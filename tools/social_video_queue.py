@@ -10,7 +10,9 @@ from typing import Any
 
 try:
     from tools.social_video_learn import (
+        DEFAULT_CANDIDATES_ROOT,
         PipelineError,
+        default_vts_bin,
         load_queue,
         output_path,
         process_one,
@@ -20,7 +22,9 @@ try:
     )
 except ImportError:  # direct script execution from tools/
     from social_video_learn import (  # type: ignore
+        DEFAULT_CANDIDATES_ROOT,
         PipelineError,
+        default_vts_bin,
         load_queue,
         output_path,
         process_one,
@@ -42,7 +46,7 @@ def process_queue(queue_path: Path, **kwargs: Any) -> list[tuple[str, str, str]]
             kwargs["knowledge_root"], platform, content_id
         ) / "source.json"
 
-        if str(item.get("status")) == "complete" and completed_marker.is_file():
+        if str(item.get("status")) == "complete" and completed_marker.is_file() and not kwargs.get("force"):
             outcomes.append((content_id, "skipped", "already complete"))
             continue
 
@@ -62,41 +66,27 @@ def process_queue(queue_path: Path, **kwargs: Any) -> list[tuple[str, str, str]]
     return outcomes
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--queue", type=Path, required=True)
+    parser.add_argument("--force", action="store_true", help="reprocess items even if a completed artifact exists")
     parser.add_argument("--knowledge-root", type=Path, default=Path("knowledge/social-video"))
     parser.add_argument("--work-root", type=Path, default=Path("work/social-video"))
-    parser.add_argument("--candidates-root", type=Path, default=Path("skills/candidates"))
-    parser.add_argument("--vts-bin", default=None)
-    return parser.parse_args()
+    parser.add_argument("--candidates-root", type=Path, default=DEFAULT_CANDIDATES_ROOT)
+    parser.add_argument("--vts-bin", default=default_vts_bin())
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
-    kwargs: dict[str, Any] = {
-        "knowledge_root": args.knowledge_root,
-        "work_root": args.work_root,
-        "candidates_root": args.candidates_root,
-    }
-    if args.vts_bin:
-        kwargs["vts_bin"] = args.vts_bin
-    else:
-        from pathlib import Path as _Path
-        try:
-            from tools.social_video_learn import VTS_COMMIT
-        except ImportError:
-            from social_video_learn import VTS_COMMIT  # type: ignore
-        kwargs["vts_bin"] = str(
-            _Path.home()
-            / ".cache"
-            / "ai-homelab-control-plane"
-            / "video-to-skill"
-            / VTS_COMMIT
-            / "vts-extract"
-        )
-
-    outcomes = process_queue(args.queue, **kwargs)
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    outcomes = process_queue(
+        args.queue,
+        knowledge_root=args.knowledge_root,
+        work_root=args.work_root,
+        candidates_root=args.candidates_root,
+        vts_bin=args.vts_bin,
+        force=args.force,
+    )
     for content_id, status, detail in outcomes:
         print(f"{content_id}: {status}: {detail}")
     return 0 if all(status in {"complete", "skipped"} for _, status, _ in outcomes) else 2

@@ -31,14 +31,40 @@ For every media migration:
 5. create second independent backup;
 6. only then consider deleting old copies.
 
+## Concrete V0 architecture (decided — D-004)
+
+```text
+T7 (APFS Encrypted, Mac-attached)          primary working copy
+   |
+   | restic backup (hourly when attached, scheduled by launchd)
+   v
+dell-xeon internal disk, restic rest-server --append-only   copy 2, same building
+   |
+   | restic copy / second repo, nightly
+   v
+Backblaze B2 bucket (object lock / versioning on)           copy 3, offsite
+```
+
+Rules:
+- The backup identity is a dedicated credential that can **append but not delete** (rest-server `--append-only`; B2 application key without `deleteFiles`). Ransomware or a destructive agent on the Mac can therefore add junk but cannot erase history.
+- No worker node holds the backup credentials. Workers are never backup sources of record.
+- `restic check --read-data-subset=5%` weekly; a scripted **restore drill** of one random client folder monthly, recorded in `90-system/migration-reports/`.
+- Time Machine of the Mac internal disk continues independently; it is not the T7 strategy.
+- Secrets (APFS passphrase, restic password, B2 key) live in the password manager with printed recovery in a physically separate place. Losing the restic password loses every backup.
+
+Budget: B2 ≈ $6/TB/month; the second copy is free (existing Xeon disk); restic is free.
+
 ## Recovery objectives
 
-Document later:
-- what can be recreated;
-- what is irreplaceable;
-- target recovery time;
-- target tolerated data loss;
-- where encryption recovery keys live.
+| Data class | RPO | RTO | Recovery path |
+|---|---|---|---|
+| Client raw media | 24 h | 1 day | restic restore from copy 2, else B2 |
+| Catalog + sidecars | 1 h | 1 h | restic (catalog is one SQLite file) |
+| Committed code | 0 | minutes | GitHub |
+| Derived view / proxies | n/a | rebuild | regenerate from catalog |
+| Model caches | n/a | re-download | pinned checksums |
+
+Irreplaceable: original client footage, human corrections in the catalog, unpushed Git work found during ingestion. Everything else is recreatable.
 
 ## Suggested data classes
 

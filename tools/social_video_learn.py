@@ -23,9 +23,12 @@ except ImportError as exc:  # pragma: no cover - exercised by the CLI environmen
     raise SystemExit("PyYAML is required; run `uv pip install -r requirements-social-video.txt`") from exc
 
 
-PROCESSING_VERSION = "social-video-learn-v0.1"
+PROCESSING_VERSION = "social-video-learn-v0.2"
 VTS_COMMIT = "c527aa9b64cdb7e39a9d20dae6218c7cfc513473"
 VTS_VERSION = "0.2.4"
+# Candidate skills are untrusted, video-derived text. They must never live under the
+# trusted `skills/` tree, because agent harnesses load every SKILL.md they find there.
+DEFAULT_CANDIDATES_ROOT = Path("knowledge/skill-candidates")
 INSTAGRAM_ID = re.compile(r"(?:instagram\.com)/(?:reel|p)/([A-Za-z0-9_-]+)", re.I)
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
 YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{6,}$")
@@ -117,16 +120,21 @@ def sha256_file(path: Path) -> str:
 
 
 def run_command(args: list[str], *, cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        errors="replace",
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError) as exc:
+        # A missing tool is an expected, reportable failure: the queue must mark the
+        # item blocked and continue, not abort the batch with a traceback.
+        raise PipelineError(f"required tool not available: {args[0]} ({exc.strerror})") from exc
 
 
 def metadata_for(source: dict[str, str]) -> dict[str, Any]:
@@ -377,12 +385,29 @@ def maybe_candidate_skill(artifact: Path, source: dict[str, str], title: str, te
     return candidate
 
 
-def process_one(value: str, *, knowledge_root: Path, work_root: Path, candidates_root: Path, vts_bin: str) -> tuple[Path, str, Path | None]:
+def extractor_provenance(vts_bin: str) -> dict[str, str | None]:
+    """Record which extractor binary actually ran; the lock file pins source, not the build."""
+    path = Path(vts_bin)
+    return {
+        "vts_binary_path": str(path),
+        "vts_binary_sha256": sha256_file(path) if path.is_file() else None,
+    }
+
+
+def process_one(
+    value: str,
+    *,
+    knowledge_root: Path,
+    work_root: Path,
+    candidates_root: Path,
+    vts_bin: str,
+    force: bool = False,
+) -> tuple[Path, str, Path | None]:
     source = normalize_input(value)
     source["original_url"] = value
     artifact = output_path(knowledge_root, source["platform"], source["content_id"])
     existing = artifact / "source.json"
-    if existing.is_file() and not os.environ.get("SOCIAL_VIDEO_FORCE"):
+    if existing.is_file() and not (force or os.environ.get("SOCIAL_VIDEO_FORCE")):
         record = read_json(existing, {})
         return artifact, str(record.get("classification", "already-processed")), None
     metadata = metadata_for(source)
@@ -390,7 +415,9 @@ def process_one(value: str, *, knowledge_root: Path, work_root: Path, candidates
     run_dir = Path(tempfile.mkdtemp(prefix=f"{safe_component(source['content_id'])}-", dir=work_root))
     try:
         extraction = run_dir / "extraction"
-        result = run_command([vts_bin, "extract", value, "--out", str(extraction)], timeout=1800)
+        # Hand the extractor the normalized identity, not the raw user string.
+        extract_input = source.get("local_path", source["canonical_url"])
+        result = run_command([vts_bin, "extract", extract_input, "--out", str(extraction)], timeout=1800)
         if result.returncode != 0:
             reason = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "vts-extract failed"
             raise PipelineError(reason)
@@ -405,66 +432,39 @@ def process_one(value: str, *, knowledge_root: Path, work_root: Path, candidates
         source_record = read_json(artifact / "source.json", {})
         source_record["classification"] = content_type
         source_record["candidate_skill"] = str(candidate) if candidate else None
+        source_record["trust"] = "untrusted-video-derived"
+        source_record.update(extractor_provenance(vts_bin))
         (artifact / "source.json").write_text(json.dumps(source_record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return artifact, content_type, candidate
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def process_queue(queue_path: Path, **kwargs: Any) -> list[tuple[str, str, str]]:
-    document = load_queue(queue_path)
-    outcomes: list[tuple[str, str, str]] = []
-    for item in unique_queue_items(document["items"]):
-        content_id = str(item["content_id"])
-        value = str(item["url"])
-        if str(item.get("status")) == "complete" and (kwargs["knowledge_root"] / "instagram" / safe_component(content_id) / "source.json").is_file():
-            outcomes.append((content_id, "skipped", "already complete"))
-            continue
-        update_queue_item(queue_path, content_id, "processing")
-        try:
-            artifact, content_type, candidate = process_one(value, **kwargs)
-            update_queue_item(queue_path, content_id, "complete")
-            outcomes.append((content_id, "complete", f"{content_type}; {artifact}" + (f"; candidate {candidate}" if candidate else "")))
-        except (PipelineError, ValueError, subprocess.TimeoutExpired) as exc:
-            reason = str(exc)[:500]
-            update_queue_item(queue_path, content_id, "blocked", reason)
-            outcomes.append((content_id, "blocked", reason))
-    return outcomes
+def default_vts_bin() -> str:
+    default = Path.home() / ".cache" / "ai-homelab-control-plane" / "video-to-skill" / VTS_COMMIT / "vts-extract"
+    return os.environ.get("VTS_EXTRACT_BIN", str(default))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", nargs="?", help="Instagram Reel URL, YouTube URL, or local video file")
-    parser.add_argument("--queue", type=Path, help="process a YAML queue instead of one input")
+    parser.add_argument("input", help="Instagram Reel URL, YouTube URL, or local video file")
+    parser.add_argument("--force", action="store_true", help="reprocess even if a completed artifact exists")
     parser.add_argument("--knowledge-root", type=Path, default=Path("knowledge/social-video"))
     parser.add_argument("--work-root", type=Path, default=Path("work/social-video"))
-    parser.add_argument("--candidates-root", type=Path, default=Path("skills/candidates"))
-    default_vts = Path.home() / ".cache" / "ai-homelab-control-plane" / "video-to-skill" / VTS_COMMIT / "vts-extract"
-    parser.add_argument("--vts-bin", default=os.environ.get("VTS_EXTRACT_BIN", str(default_vts)))
+    parser.add_argument("--candidates-root", type=Path, default=DEFAULT_CANDIDATES_ROOT)
+    parser.add_argument("--vts-bin", default=default_vts_bin())
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv or sys.argv[1:])
-    if bool(args.input) == bool(args.queue):
-        raise SystemExit("provide exactly one of an input URL/file or --queue")
-    if args.queue:
-        outcomes = process_queue(
-            args.queue,
-            knowledge_root=args.knowledge_root,
-            work_root=args.work_root,
-            candidates_root=args.candidates_root,
-            vts_bin=args.vts_bin,
-        )
-        for content_id, status, detail in outcomes:
-            print(f"{content_id}: {status}: {detail}")
-        return 0 if all(status in {"complete", "skipped"} for _, status, _ in outcomes) else 2
+    args = parse_args(argv if argv is not None else sys.argv[1:])
     artifact, content_type, candidate = process_one(
         args.input,
         knowledge_root=args.knowledge_root,
         work_root=args.work_root,
         candidates_root=args.candidates_root,
         vts_bin=args.vts_bin,
+        force=args.force,
     )
     print(f"{content_type}: {artifact}")
     if candidate:

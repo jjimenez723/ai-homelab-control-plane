@@ -1,9 +1,12 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tools import social_video_learn
 from tools.social_video_learn import (
+    DEFAULT_CANDIDATES_ROOT,
     normalize_input,
     normalize_url,
     output_path,
@@ -12,7 +15,10 @@ from tools.social_video_learn import (
     unique_queue_items,
     update_queue_item,
 )
+from tools.social_video_queue import parse_args as queue_parse_args
 from tools.social_video_queue import process_queue
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class SocialVideoLearnTests(unittest.TestCase):
@@ -109,6 +115,69 @@ class SocialVideoLearnTests(unittest.TestCase):
 
             mocked.assert_not_called()
             self.assertEqual(outcomes, [("abcDEF_123", "skipped", "already complete")])
+
+    def test_lock_file_matches_pinned_constants(self):
+        lock = (REPO_ROOT / "tools" / "video-to-skill.lock").read_text(encoding="utf-8")
+        pins = dict(
+            (key.strip(), value.strip().strip('"'))
+            for key, value in (line.split("=", 1) for line in lock.splitlines() if "=" in line)
+        )
+        self.assertEqual(pins["commit"], social_video_learn.VTS_COMMIT)
+        self.assertEqual(pins["version"], social_video_learn.VTS_VERSION)
+
+    def test_candidate_skills_default_outside_trusted_skills_tree(self):
+        self.assertEqual(DEFAULT_CANDIDATES_ROOT.parts[0], "knowledge")
+        self.assertNotEqual(DEFAULT_CANDIDATES_ROOT.parts[0], "skills")
+        self.assertEqual(social_video_learn.parse_args(["x"]).candidates_root, DEFAULT_CANDIDATES_ROOT)
+        self.assertEqual(queue_parse_args(["--queue", "q.yaml"]).candidates_root, DEFAULT_CANDIDATES_ROOT)
+
+    def test_force_flag_reprocesses_completed_artifact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"fixture")
+            normalized = normalize_input(str(video))
+            artifact = output_path(root / "knowledge", normalized["platform"], normalized["content_id"])
+            artifact.mkdir(parents=True)
+            (artifact / "source.json").write_text('{"classification": "knowledge"}\n', encoding="utf-8")
+            with patch("tools.social_video_learn.run_command") as mocked:
+                mocked.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="vts-extract failed")
+                with self.assertRaises(social_video_learn.PipelineError):
+                    process_one(
+                        str(video),
+                        knowledge_root=root / "knowledge",
+                        work_root=root / "work",
+                        candidates_root=root / "candidates",
+                        vts_bin="does-not-exist",
+                        force=True,
+                    )
+            self.assertEqual(mocked.call_args.args[0][:2], ["does-not-exist", "extract"])
+            # The extractor receives the resolved local path, not the raw argument string.
+            self.assertEqual(mocked.call_args.args[0][2], str(video.resolve()))
+
+    def test_missing_tool_blocks_item_instead_of_aborting_queue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            queue = root / "queue.yaml"
+            queue.write_text(
+                "items:\n"
+                "  - platform: youtube\n"
+                "    content_id: abcDEF_123\n"
+                "    url: https://youtu.be/abcDEF_123\n"
+                "    status: queued\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"PATH": str(root)}):
+                outcomes = process_queue(
+                    queue,
+                    knowledge_root=root / "knowledge",
+                    work_root=root / "work",
+                    candidates_root=root / "candidates",
+                    vts_bin=str(root / "missing-vts"),
+                )
+            self.assertEqual(outcomes[0][:2], ("abcDEF_123", "blocked"))
+            self.assertIn("required tool not available", outcomes[0][2])
+            self.assertIn("status: blocked", queue.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

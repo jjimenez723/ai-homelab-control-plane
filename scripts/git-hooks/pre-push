@@ -1,0 +1,13 @@
+#!/bin/sh
+# Refuse direct pushes to main from this clone. Server-side rulesets are the
+# real control (GitHub Pro on a private repo); this hook is the client-side
+# backstop until then. Install with: scripts/install-git-hooks.sh
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main)
+      echo "pre-push: direct pushes to main are refused; open a PR." >&2
+      exit 1
+      ;;
+  esac
+done
+exit 0
