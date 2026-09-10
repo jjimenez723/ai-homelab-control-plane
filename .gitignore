@@ -19,6 +19,15 @@ datasets/
 media/
 client-data/
 
+# Local pipeline environments and derived knowledge artifacts.
+.venv/
+knowledge/
+extraction/
+work/
+__pycache__/
+.pytest_cache/
+*.part
+
 # Common model-weight formats.
 *.bin
 *.ckpt

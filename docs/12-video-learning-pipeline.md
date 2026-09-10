@@ -164,3 +164,11 @@ Good candidates for:
 - batch preprocessing.
 
 This is a strong example of distributing jobs rather than attempting to pool all RAM into one model.
+
+## Implemented local command
+
+The first reusable implementation is `./scripts/learn-video`. It accepts one Instagram Reel URL, YouTube URL, or local video file, and `./scripts/learn-video --queue data/video-learning-queue.yaml` processes the deduplicated queue. It uses `yt-dlp` for anonymous URL acquisition, `ffmpeg` for media/frame work, local `video-to-skill` extraction for `whisper-rs`/Metal transcription, and local `tesseract` for basic on-screen text capture. The reviewed extractor commit and build metadata are pinned in `tools/video-to-skill.lock`.
+
+The command stores derived artifacts in ignored `knowledge/social-video/` directories and removes downloaded media and temporary extraction bundles at the end of a run. A completed artifact is reused on later runs. Queue failures are recorded as `blocked` with a reason. Candidate procedural skills are written to `skills/candidates/` for review only; they are not installed or executed automatically. Video-derived commands are treated as untrusted text and are never run by this pipeline.
+
+The pinned `video-to-skill` source was reviewed before use at the commit in `tools/video-to-skill.lock`, including its README, security notes, installation/dependency bootstrap, URL/media acquisition, environment access, filesystem writes, command execution, sandbox, and skill-install paths. This repository uses its local extractor for media probing, keyframes, and transcription only; it does not run its global skill installer or any video-derived verification command. The extractor's dependency downloads are pinned and checksum-verified, and generated skill installation remains explicit and consent-gated upstream.

@@ -124,3 +124,27 @@ The model should attack the architecture, not merely rewrite it.
 ## Social-video learning
 
 The stack now includes a local-first `social-video-learner` skill for YouTube and public Instagram Reels. It transcribes, inspects key frames/on-screen text, produces durable knowledge notes, and routes genuinely procedural tutorials into a reviewable skill-compilation flow. See `docs/12-video-learning-pipeline.md`.
+
+### Social-video implementation
+
+The reusable local command is `./scripts/learn-video`. It accepts an Instagram Reel URL, YouTube URL, or local video file:
+
+```bash
+./scripts/learn-video https://www.instagram.com/reel/<reel-id>/
+./scripts/learn-video /path/to/video.mp4
+./scripts/learn-video --queue data/video-learning-queue.yaml
+```
+
+Install the small local stack with Homebrew (`yt-dlp`, `ffmpeg`, `tesseract`, `rust`, and `cmake`) and create the Python environment with `uv pip install -r requirements-social-video.txt`. The reviewed `video-to-skill` extractor is built from the exact commit in `tools/video-to-skill.lock` and cached outside the repository. It uses local Metal-accelerated `whisper-rs` with the multilingual `ggml-base` model.
+
+```bash
+brew install yt-dlp ffmpeg tesseract rust cmake
+uv venv .venv
+uv pip install --python .venv/bin/python -r requirements-social-video.txt
+review_dir=$(mktemp -d /tmp/video-to-skill-review.XXXXXX)
+git clone https://github.com/brenoepics/video-to-skill.git "$review_dir"
+git -C "$review_dir" checkout c527aa9b64cdb7e39a9d20dae6218c7cfc513473
+cargo build --release --locked --manifest-path "$review_dir/Cargo.toml"
+```
+
+Outputs are written under ignored `knowledge/social-video/<platform>/<content-id>/` with `source.json`, `transcript.md`, `digest.md`, `recommendations.md`, `claims.json`, `visual.json`, and representative `frames/`. Generated procedural material is written as an untrusted candidate under `skills/candidates/`; it is never installed automatically. Raw downloads and temporary extraction bundles are removed after processing. Anonymous Instagram access can fail when Instagram changes or restricts its extractor; the queue records the exact failure reason and does not use third-party download sites or request passwords.
