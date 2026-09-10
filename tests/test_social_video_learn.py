@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.social_video_learn import (
     normalize_input,
@@ -11,6 +12,7 @@ from tools.social_video_learn import (
     unique_queue_items,
     update_queue_item,
 )
+from tools.social_video_queue import process_queue
 
 
 class SocialVideoLearnTests(unittest.TestCase):
@@ -79,6 +81,34 @@ class SocialVideoLearnTests(unittest.TestCase):
             self.assertEqual(result, artifact)
             self.assertEqual(classification, "knowledge")
             self.assertIsNone(candidate)
+
+    def test_completed_youtube_queue_item_uses_youtube_artifact_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            queue = root / "queue.yaml"
+            queue.write_text(
+                "items:\n"
+                "  - platform: youtube\n"
+                "    content_id: abcDEF_123\n"
+                "    url: https://youtu.be/abcDEF_123\n"
+                "    status: complete\n",
+                encoding="utf-8",
+            )
+            marker = root / "knowledge" / "youtube" / "abcDEF_123" / "source.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("{}\n", encoding="utf-8")
+
+            with patch("tools.social_video_queue.process_one") as mocked:
+                outcomes = process_queue(
+                    queue,
+                    knowledge_root=root / "knowledge",
+                    work_root=root / "work",
+                    candidates_root=root / "candidates",
+                    vts_bin="does-not-exist",
+                )
+
+            mocked.assert_not_called()
+            self.assertEqual(outcomes, [("abcDEF_123", "skipped", "already complete")])
 
 
 if __name__ == "__main__":
