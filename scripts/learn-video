@@ -6,4 +6,9 @@ if [ -x "$repo_root/.venv/bin/python" ]; then
 else
   python_bin="${PYTHON:-python3}"
 fi
+
+if [ "${1:-}" = "--queue" ]; then
+  exec "$python_bin" "$repo_root/tools/social_video_queue.py" "$@"
+fi
+
 exec "$python_bin" "$repo_root/tools/social_video_learn.py" "$@"
