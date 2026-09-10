@@ -22,6 +22,8 @@ client-data/
 # Local pipeline environments and derived knowledge artifacts.
 .venv/
 knowledge/
+# Legacy candidate-skill location; video-derived skills are untrusted and never belong in skills/.
+skills/candidates/
 extraction/
 work/
 __pycache__/
