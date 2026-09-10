@@ -6,6 +6,8 @@ Create a pipeline capable of moving multiple app opportunities through research,
 
 The goal is **pipeline throughput**, not pretending a production-quality business can always be completed in seven days.
 
+UI implementation follows `docs/14-design-system-and-ui-library-policy.md` and the `ui-design-system-builder` skill as a required gate. Every generated app selects a platform-appropriate design system and approved component library, defines tokens and a component map, and documents any justified custom primitives. Apple HIG is the quality baseline for Apple platforms and interaction craft; Android, web, and Flutter conventions remain platform-specific.
+
 ## Example portfolio
 
 Current/near-term products include:

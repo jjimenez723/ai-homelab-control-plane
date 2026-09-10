@@ -81,11 +81,15 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 10-migration-plan.md
 │   ├── 11-open-decisions.md
 │   ├── 12-video-learning-pipeline.md
-│   └── 13-dump-first-ingestion.md
+│   ├── 13-dump-first-ingestion.md
+│   └── 14-design-system-and-ui-library-policy.md
 ├── data/
-│   └── video-learning-queue.yaml
+│   ├── video-learning-queue.yaml
+│   └── ui-library-registry.yaml
 ├── skills/
-│   └── social-video-learner/
+│   ├── social-video-learner/
+│   │   └── SKILL.md
+│   └── ui-design-system-builder/
 │       └── SKILL.md
 ├── reviews/
 │   └── GPT6-ASTRA-ARCHITECTURE-REVIEW.md
