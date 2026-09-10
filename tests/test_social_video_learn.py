@@ -155,6 +155,30 @@ class SocialVideoLearnTests(unittest.TestCase):
             # The extractor receives the resolved local path, not the raw argument string.
             self.assertEqual(mocked.call_args.args[0][2], str(video.resolve()))
 
+    def test_missing_tool_blocks_item_instead_of_aborting_queue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            queue = root / "queue.yaml"
+            queue.write_text(
+                "items:\n"
+                "  - platform: youtube\n"
+                "    content_id: abcDEF_123\n"
+                "    url: https://youtu.be/abcDEF_123\n"
+                "    status: queued\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"PATH": str(root)}):
+                outcomes = process_queue(
+                    queue,
+                    knowledge_root=root / "knowledge",
+                    work_root=root / "work",
+                    candidates_root=root / "candidates",
+                    vts_bin=str(root / "missing-vts"),
+                )
+            self.assertEqual(outcomes[0][:2], ("abcDEF_123", "blocked"))
+            self.assertIn("required tool not available", outcomes[0][2])
+            self.assertIn("status: blocked", queue.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

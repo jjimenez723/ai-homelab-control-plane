@@ -120,16 +120,21 @@ def sha256_file(path: Path) -> str:
 
 
 def run_command(args: list[str], *, cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        errors="replace",
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError) as exc:
+        # A missing tool is an expected, reportable failure: the queue must mark the
+        # item blocked and continue, not abort the batch with a traceback.
+        raise PipelineError(f"required tool not available: {args[0]} ({exc.strerror})") from exc
 
 
 def metadata_for(source: dict[str, str]) -> dict[str, Any]:
