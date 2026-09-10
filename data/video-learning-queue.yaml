@@ -9,21 +9,21 @@ items:
   - platform: instagram
     content_id: DczW8D7M8ko
     url: https://www.instagram.com/reel/DczW8D7M8ko/
-    status: queued
+    status: complete
     notes: "Appeared twice in original dump; deduplicated."
   - platform: instagram
     content_id: Dc_cSU9TbCD
     url: https://www.instagram.com/reel/Dc_cSU9TbCD/
-    status: queued
+    status: complete
   - platform: instagram
     content_id: DcgGz4RCo18
     url: https://www.instagram.com/reel/DcgGz4RCo18/
-    status: queued
+    status: complete
   - platform: instagram
     content_id: Db7Vx2Hhf9c
     url: https://www.instagram.com/reel/Db7Vx2Hhf9c/
-    status: queued
+    status: complete
   - platform: instagram
     content_id: DcgOGsUJAGC
     url: https://www.instagram.com/reel/DcgOGsUJAGC/
-    status: queued
+    status: complete

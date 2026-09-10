@@ -1,0 +1,109 @@
+schema_version: 1
+description: Vetted design systems and UI libraries for automatic app generation.
+last_reviewed: 2026-09-09
+selection_rule: Prefer one primary component system per surface; record exceptions in the app design brief.
+references:
+  apple_documentation: https://developer.apple.com/documentation
+  apple_hig: https://developer.apple.com/design/human-interface-guidelines
+  apple_swiftui: https://developer.apple.com/documentation/swiftui
+  apple_uikit: https://developer.apple.com/documentation/uikit
+  motion: https://motion.dev/docs/spring
+libraries:
+  - id: swiftui
+    stack: swiftui
+    role: native design system and UI framework
+    recommendation: default
+    package: Apple SDK
+    docs: https://developer.apple.com/documentation/swiftui
+    notes: Use native controls, Dynamic Type, platform navigation, and system materials first.
+  - id: uikit
+    stack: swift
+    role: native UI framework
+    recommendation: fallback
+    package: Apple SDK
+    docs: https://developer.apple.com/documentation/uikit
+    notes: Use when SwiftUI lacks a required control, integration, or lifecycle behavior.
+  - id: base-ui
+    stack: react-web
+    role: unstyled accessible component primitives
+    recommendation: default
+    package: '@base-ui/react'
+    docs: https://base-ui.com/react/overview/about
+    notes: Good default for custom-branded React interfaces; handles focus, keyboard, ARIA, and interaction details.
+  - id: react-aria-components
+    stack: react-web
+    role: accessible unstyled components and behavior
+    recommendation: alternative
+    package: react-aria-components
+    docs: https://react-spectrum.adobe.com/react-aria/
+    notes: Prefer for complex accessibility, internationalization, and interaction requirements.
+  - id: shadcn-ui
+    stack: react-web
+    role: source-owned styled component starters
+    recommendation: default-starter
+    package: shadcn/ui registry
+    docs: https://ui.shadcn.com/docs/components
+    notes: Use with Tailwind and Base UI or Radix-compatible primitives; copied source remains project-owned and reviewable.
+  - id: radix-primitives
+    stack: react-web
+    role: unstyled accessible component primitives
+    recommendation: established-alternative
+    package: radix-ui
+    docs: https://www.radix-ui.com/primitives/docs/overview/introduction
+    notes: Prefer for existing projects already using Radix or when its primitive coverage is a better fit.
+  - id: tailwind-css
+    stack: react-web
+    role: styling and design-token layer
+    recommendation: default-styling
+    package: tailwindcss
+    docs: https://tailwindcss.com/docs/theme
+    notes: Use theme variables for tokens and mobile-first responsive variants; it is not a behavior component library.
+  - id: motion
+    stack: react-web
+    role: interaction motion and gesture animation
+    recommendation: default-motion
+    package: motion
+    docs: https://motion.dev/docs/animate
+    notes: Use springs/inertia for interruptible gesture-driven motion and honor reduced-motion preferences.
+  - id: mui
+    stack: react-web
+    role: complete styled Material component library
+    recommendation: material-alternative
+    package: '@mui/material'
+    docs: https://mui.com/material-ui/
+    notes: Choose for a coherent Material product or broad ready-made/data-heavy component coverage.
+  - id: tamagui
+    stack: react-native-expo-web
+    role: cross-platform styling and component system
+    recommendation: default-shared
+    package: tamagui
+    docs: https://tamagui.dev/docs/intro/introduction
+    notes: Prefer when React Native and web share components, tokens, and responsive behavior.
+  - id: react-native-paper
+    stack: react-native-expo
+    role: themed Material component library
+    recommendation: material-alternative
+    package: react-native-paper
+    docs: https://callstack.github.io/react-native-paper/docs/
+    notes: Prefer for Material-oriented cross-platform apps with a ready-made catalog and theme provider.
+  - id: flutter-material-3
+    stack: flutter
+    role: adaptive Material design system
+    recommendation: default
+    package: Flutter SDK
+    docs: https://docs.flutter.dev/ui/design/material
+    notes: Use Material 3 components and theme tokens for general Flutter products.
+  - id: flutter-cupertino
+    stack: flutter
+    role: Apple-aligned native-style widgets
+    recommendation: platform-specific
+    package: Flutter SDK
+    docs: https://docs.flutter.dev/ui/widgets/cupertino
+    notes: Use for iOS/macOS surfaces where Cupertino behavior and visual conventions matter.
+  - id: compose-material-3
+    stack: android-compose
+    role: Android Material design system
+    recommendation: default
+    package: androidx.compose.material3:material3
+    docs: https://developer.android.com/develop/ui/compose/designsystems/material3
+    notes: Use MaterialTheme color, typography, shapes, adaptive navigation, and dynamic color where appropriate.

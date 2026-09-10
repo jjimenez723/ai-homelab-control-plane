@@ -1,0 +1,5 @@
+repository = "https://github.com/brenoepics/video-to-skill"
+version = "0.2.4"
+commit = "c527aa9b64cdb7e39a9d20dae6218c7cfc513473"
+binary = "vts-extract"
+transcription = "whisper-rs with Metal on macOS; ggml-base model"
