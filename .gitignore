@@ -1,0 +1,36 @@
+# This planning repo should remain documentation-only.
+.DS_Store
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/
+private/
+artifacts/
+generated/
+build/
+dist/
+tmp/
+models/
+datasets/
+media/
+client-data/
+
+# Common model-weight formats.
+*.bin
+*.ckpt
+*.onnx
+*.pt
+*.pth
+*.safetensors
+
+# Client media files outside ignored media directories.
+*.avi
+*.mov
+*.mp3
+*.mp4
+*.wav
+*.webm

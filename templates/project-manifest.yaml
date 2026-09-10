@@ -1,0 +1,18 @@
+schema_version: 1
+project_id: example-project
+name: Example Project
+class: product # product | client-system | research | internal-tool
+status: active # idea | active | paused | archived
+repository:
+  remote: git@github.com:OWNER/REPO.git
+  default_branch: main
+  local_t7_path: /T7/10-code/products/example-project
+data_classification: confidential
+agent_policy:
+  local_models_allowed: true
+  frontier_models_allowed: true
+  destructive_actions_require_human: true
+verification:
+  commands: []
+owners: []
+notes: ""

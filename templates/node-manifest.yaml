@@ -1,0 +1,21 @@
+schema_version: 1
+node_id: dell-xeon
+hostname: TBD
+role: worker
+os: linux
+architecture: x86_64
+resources:
+  cpu: TBD
+  ram_gib: 32
+  accelerator: none
+  local_free_disk_gib: TBD
+capabilities:
+  - cpu
+  - git
+  - build
+  - test
+security:
+  inbound_public_ports: []
+  accepts_root_jobs: false
+  restricted_credentials_allowed: false
+status: inventory-required

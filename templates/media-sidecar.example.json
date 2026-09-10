@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "asset_id": "uuid",
+  "sha256": "hex",
+  "original_filename": "IMG_0001.JPG",
+  "canonical_filename_proposal": "2026-09-09_example-client_kitchen-island_wide_001.jpg",
+  "client_id": "example-client",
+  "project_id": "2026-09-09_kitchen-install",
+  "media_type": "image/jpeg",
+  "captured_at": null,
+  "tags": [
+    "kitchen",
+    "island",
+    "wide"
+  ],
+  "analysis": {
+    "model": "TBD",
+    "model_version": "TBD",
+    "confidence": 0.0
+  },
+  "human_reviewed": false
+}

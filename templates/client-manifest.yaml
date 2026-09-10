@@ -1,0 +1,17 @@
+schema_version: 1
+client_id: example-client
+display_name: Example Client
+data_classification: confidential
+root: /T7/20-clients/example-client
+naming:
+  slug: example-client
+media:
+  preserve_raw_filenames: true
+  checksum_algorithm: sha256
+  ai_proposals_only: true
+retention:
+  raw: TBD
+  exports: TBD
+backup:
+  second_copy_verified: false
+notes: ""
