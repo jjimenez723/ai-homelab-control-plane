@@ -80,7 +80,7 @@ The ingestion worker should:
 - compute a hash of downloaded media when downloaded;
 - cache transcripts;
 - cache representative frames;
-- never re-download/re-transcribe an already completed item unless `--force` is requested.
+- never re-download/re-transcribe an already completed item unless `--force` is requested (`./scripts/learn-video --force <url>` or `--queue ... --force`).
 
 ## Knowledge-mode output
 
@@ -108,11 +108,13 @@ knowledge/social-video/<platform>/<content-id>/
 
 ## Skill-mode output
 
-Procedural content should be routed to a skill compiler and stored first as a candidate:
+Procedural content should be routed to a skill compiler and stored first as a candidate **outside the trusted `skills/` tree**, because agent harnesses load every `SKILL.md` they find there:
 
 ```text
-skills/candidates/<skill-name>/
+knowledge/skill-candidates/<skill-name>/
 ```
+
+`knowledge/` is ignored by Git. A candidate becomes a real skill only by a human copying it into `skills/` in a reviewed PR.
 
 Only install/promote it after:
 - source provenance exists;
@@ -143,6 +145,13 @@ Therefore:
 - use deterministic allow/deny policy before installing skills;
 - keep trading credentials and live-trading services completely outside this pipeline.
 
+## Known V0 limitations (measured 2026-09-10, five reels)
+
+- Classification is regex-based. Two of five reels were labelled `unsafe/untrusted` on false positives; the label only suppresses candidate-skill generation, it does not quarantine the digest. Treat it as a hint, not a control. The real control is that nothing derived from a video is ever executed or loaded as instructions.
+- Tesseract OCR on stylized overlays produced mostly noise (`MOnelrootitolder`). On-screen text needs a local VLM pass over the ≤12 representative frames (review §20).
+- `ggml-base` mis-transcribes names and non-English speech. Move to `large-v3-turbo` (still local, Metal) before batch processing hundreds of videos.
+- Queue state (`status: complete`) is committed to Git while artifacts are ignored, so a fresh clone re-downloads everything. The queue file should be input only; completion state belongs in the (ignored) knowledge index.
+
 ## Recommended node placement
 
 ### Mac M4 Pro
@@ -169,6 +178,6 @@ This is a strong example of distributing jobs rather than attempting to pool all
 
 The first reusable implementation is `./scripts/learn-video`. It accepts one Instagram Reel URL, YouTube URL, or local video file, and `./scripts/learn-video --queue data/video-learning-queue.yaml` processes the deduplicated queue. It uses `yt-dlp` for anonymous URL acquisition, `ffmpeg` for media/frame work, local `video-to-skill` extraction for `whisper-rs`/Metal transcription, and local `tesseract` for basic on-screen text capture. The reviewed extractor commit and build metadata are pinned in `tools/video-to-skill.lock`.
 
-The command stores derived artifacts in ignored `knowledge/social-video/` directories and removes downloaded media and temporary extraction bundles at the end of a run. A completed artifact is reused on later runs. Queue failures are recorded as `blocked` with a reason. Candidate procedural skills are written to `skills/candidates/` for review only; they are not installed or executed automatically. Video-derived commands are treated as untrusted text and are never run by this pipeline.
+The command stores derived artifacts in ignored `knowledge/social-video/` directories and removes downloaded media and temporary extraction bundles at the end of a run. A completed artifact is reused on later runs. Queue failures are recorded as `blocked` with a reason. Candidate procedural skills are written to `knowledge/skill-candidates/` for review only; they are not installed or executed automatically. Every `source.json` carries `trust: untrusted-video-derived` and the sha256 of the extractor binary that ran. Video-derived commands are treated as untrusted text and are never run by this pipeline.
 
 The pinned `video-to-skill` source was reviewed before use at the commit in `tools/video-to-skill.lock`, including its README, security notes, installation/dependency bootstrap, URL/media acquisition, environment access, filesystem writes, command execution, sandbox, and skill-install paths. This repository uses its local extractor for media probing, keyframes, and transcription only; it does not run its global skill installer or any video-derived verification command. The extractor's dependency downloads are pinned and checksum-verified, and generated skill installation remains explicit and consent-gated upstream.

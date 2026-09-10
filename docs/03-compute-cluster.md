@@ -54,15 +54,16 @@ Each worker should advertise:
 - current load;
 - accepted task classes.
 
-### Queue
+### Queue (decided — D-006)
 Start simple. A durable queue plus worker leases is more important than Kubernetes.
 
-Possible implementations to evaluate later:
-- Redis + worker framework;
-- NATS/JetStream;
-- RabbitMQ;
-- PostgreSQL-backed queue;
-- lightweight bespoke queue only if requirements remain tiny.
+V0 is one coordinator process on the Mac exposing a small HTTP API (`POST /jobs`, `POST /jobs/claim`, `POST /jobs/{id}/heartbeat`, `POST /jobs/{id}/complete|fail`) backed by a SQLite `jobs` table with leases, attempts, idempotency keys, and structured results. Workers are pull-based `systemd` services that only speak this API over Tailscale; they never open the database. The storage behind the API becomes PostgreSQL only when a measured trigger fires (see review §15). Redis, NATS, RabbitMQ, Celery, Temporal, Ray, Nomad, and Kubernetes are explicitly not used in V0.
+
+### Node roster (decided — D-005)
+- `mac-m4pro`: coordinator, all model inference, transcription, vision, T7 host.
+- `dell-xeon`: first Linux worker; also hosts the on-LAN second backup copy on its internal disk.
+- `dell-i7`: second Linux worker, provisioned only after `dell-xeon` passes its acceptance gate; reserved as the future dedicated Kronos execution box if live trading ever happens.
+- `dell-lite` (8 GB, broken display): **retired**. It is not worth a service identity, a Tailscale node, and a patch cadence. If an always-on tiny node is ever needed, a used mini PC is cheaper than the maintenance.
 
 ## Explicit non-goals for V0
 
@@ -84,15 +85,13 @@ Preferred:
 - no worker exposed directly to the public Internet;
 - remote access via a private overlay/VPN if required.
 
-Evaluate Tailscale/WireGuard rather than router port forwarding.
+Decided (D-007): Tailscale (personal plan) with ACL tags `tag:coordinator`, `tag:worker`, `tag:quant`; Tailscale SSH; no port forwarding. Raw WireGuard is not worth the key management for three nodes. The LAN stays a plain LAN; nothing listens on `0.0.0.0` except SSH and the coordinator API bound to the Tailscale interface.
 
 ## Isolation
 
-Jobs should eventually run in bounded environments:
-- container where practical;
-- explicit working directory;
-- CPU/RAM/time limits;
-- allowlisted mounts;
-- least-privilege service accounts.
+Jobs run in bounded environments from the first worker, not "eventually":
+- Linux workers: each job is a transient `systemd-run` unit with `DynamicUser=yes`, `ProtectHome=yes`, `ProtectSystem=strict`, `PrivateTmp=yes`, a per-job `BindPaths=` workspace, `MemoryMax=`, `CPUQuota=`, `RuntimeMaxSec=`, and `PrivateNetwork=yes` unless the job class declares network. Rootless Podman is used only for job classes that need a full container image (builds with system deps).
+- Mac: untrusted inputs (video, unknown repos) are processed on a Linux worker whenever one exists. Until then, `sandbox-exec` profiles with no `~/` access, as `video-to-skill` does.
+- Explicit working directory, allowlisted mounts, least-privilege service accounts, no `sudo` for any agent identity.
 
 Local AI does not automatically mean trusted AI.

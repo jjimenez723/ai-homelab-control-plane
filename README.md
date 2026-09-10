@@ -68,6 +68,8 @@ Version 0 should distribute **jobs**, not model tensors:
 .
 ├── README.md
 ├── PRINCIPLES.md
+├── PLAN.md            # phased roadmap with acceptance gates
+├── DECISIONS.md       # decision log (ADR-lite)
 ├── docs/
 │   ├── 01-hardware-inventory.md
 │   ├── 02-t7-filesystem.md
@@ -92,7 +94,8 @@ Version 0 should distribute **jobs**, not model tensors:
 │   └── ui-design-system-builder/
 │       └── SKILL.md
 ├── reviews/
-│   └── GPT6-ASTRA-ARCHITECTURE-REVIEW.md
+│   ├── GPT6-ASTRA-ARCHITECTURE-REVIEW.md   # review prompt
+│   └── ASTRA-V0-ARCHITECTURE-REVIEW.md     # review result (2026-09-10)
 ├── templates/
 │   ├── project-manifest.yaml
 │   ├── client-manifest.yaml
@@ -119,11 +122,7 @@ See `docs/10-migration-plan.md`.
 
 ## Review
 
-Before implementing the cluster, give this repository to a strong planning/reasoning model and use:
-
-`reviews/GPT6-ASTRA-ARCHITECTURE-REVIEW.md`
-
-The model should attack the architecture, not merely rewrite it.
+The architecture review prompt is `reviews/GPT6-ASTRA-ARCHITECTURE-REVIEW.md`; the resulting review is `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md`. Decisions taken from it are recorded in `DECISIONS.md`; the execution order is `PLAN.md`. Start there before touching hardware.
 
 ## Social-video learning
 
@@ -137,6 +136,7 @@ The reusable local command is `./scripts/learn-video`. It accepts an Instagram R
 ./scripts/learn-video https://www.instagram.com/reel/<reel-id>/
 ./scripts/learn-video /path/to/video.mp4
 ./scripts/learn-video --queue data/video-learning-queue.yaml
+./scripts/learn-video --force https://www.instagram.com/reel/<reel-id>/   # reprocess
 ```
 
 Install the small local stack with Homebrew (`yt-dlp`, `ffmpeg`, `tesseract`, `rust`, and `cmake`) and create the Python environment with `uv pip install -r requirements-social-video.txt`. The reviewed `video-to-skill` extractor is built from the exact commit in `tools/video-to-skill.lock` and cached outside the repository. It uses local Metal-accelerated `whisper-rs` with the multilingual `ggml-base` model.
@@ -151,4 +151,4 @@ git -C "$review_dir" checkout c527aa9b64cdb7e39a9d20dae6218c7cfc513473
 cargo build --release --locked --manifest-path "$review_dir/Cargo.toml"
 ```
 
-Outputs are written under ignored `knowledge/social-video/<platform>/<content-id>/` with `source.json`, `transcript.md`, `digest.md`, `recommendations.md`, `claims.json`, `visual.json`, and representative `frames/`. Generated procedural material is written as an untrusted candidate under `skills/candidates/`; it is never installed automatically. Raw downloads and temporary extraction bundles are removed after processing. Anonymous Instagram access can fail when Instagram changes or restricts its extractor; the queue records the exact failure reason and does not use third-party download sites or request passwords.
+Outputs are written under ignored `knowledge/social-video/<platform>/<content-id>/` with `source.json`, `transcript.md`, `digest.md`, `recommendations.md`, `claims.json`, `visual.json`, and representative `frames/`. Generated procedural material is written as an untrusted candidate under ignored `knowledge/skill-candidates/` (never under the trusted `skills/` tree); it is never installed automatically. Raw downloads and temporary extraction bundles are removed after processing. Anonymous Instagram access can fail when Instagram changes or restricts its extractor; the queue records the exact failure reason and does not use third-party download sites or request passwords.

@@ -1,6 +1,10 @@
 # 11 — Open Decisions for Architecture Review
 
-A reviewer should explicitly decide or recommend experiments for these items.
+Most items below were decided on 2026-09-10; see `DECISIONS.md` for the decision and `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` for the reasoning. Items still open are marked **OPEN** and depend on measurements from `PLAN.md` phases.
+
+Decided: T7 filesystem (D-002), T7 host (D-003), backup target (D-004), node roster (D-005), queue (D-006), network (D-007), inference runtime (D-008), catalog (D-009), coding-agent worktree/permission model (D-010), sidecar/catalog format (D-009), Kronos placement (D-011), metrics (D-012).
+
+Still **OPEN** pending measurement: embedding model choice, rename confidence threshold, keyframe sampling policy, GPU purchase, whether `dell-i7` becomes the dedicated Kronos box.
 
 ## Storage
 - T7 filesystem: APFS Encrypted vs alternative?
