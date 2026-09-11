@@ -101,8 +101,14 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── client-manifest.yaml
 │   ├── media-sidecar.example.json
 │   └── node-manifest.yaml
+├── tools/
+│   └── ingest/          # manual-first daily ingestion (the `organize` CLI)
+├── config/
+│   └── ingest.example.yaml
+├── "Organize Files.command"   # double-clickable launcher
 └── scripts/
-    └── bootstrap-t7.sh
+    ├── bootstrap-t7.sh
+    └── organize
 ```
 
 ## First implementation milestone
@@ -119,6 +125,17 @@ The first milestone is intentionally boring:
 8. only then begin automating ingestion and worker nodes.
 
 See `docs/10-migration-plan.md`.
+
+## Manual-first daily ingestion
+
+Day-to-day Desktop/Documents/Downloads/SD cleanup (PLAN.md Phase 1A, `DECISIONS.md` D-016) is one CLI, `organize`, plus a double-clickable `Organize Files.command` launcher that calls the same CLI:
+
+```bash
+./scripts/organize desktop --dry-run
+./scripts/organize all --apply
+```
+
+Copy `config/ingest.example.yaml` to `config/ingest.yaml` (ignored by git) and set `t7.volume_uuid` and any registered SD card UUIDs for this machine first. Every destructive move goes through one transactional primitive -- copy to a T7 `.partial` staging file, flush/close, SHA-256 destination verification, atomic finalize + catalog commit, and only then unlink the source -- so a crash, unplug, or hash mismatch always leaves the source intact and the transfer safely retryable. Desktop, Documents, and Downloads only ever run when invoked by hand; SD cards are detected automatically by volume UUID but only a UUID explicitly registered in `config/ingest.yaml` is eligible, and originals still require an explicit `--apply`. `--dry-run` (the default with no flag) never writes anything, including to the catalog. See `docs/13-dump-first-ingestion.md` for the full design and `tests/ingest/` for the fault-injection test suite that proves it.
 
 ## Review
 

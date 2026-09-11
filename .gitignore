@@ -22,6 +22,16 @@ client-data/
 # Local pipeline environments and derived knowledge artifacts.
 .venv/
 knowledge/
+
+# Machine-specific ingestion config (T7 UUID, real Desktop/Documents/Downloads
+# paths, registered SD UUIDs). Commit config/ingest.example.yaml instead.
+config/ingest.yaml
+# Local ingest catalog/sidecars/staging when a dev T7 root lives in-repo.
+90-system/
+# The generic `media/` ignore above (for local media dumps) would otherwise
+# also swallow this source package.
+!tools/ingest/media/
+!tools/ingest/media/**
 # Legacy candidate-skill location; video-derived skills are untrusted and never belong in skills/.
 skills/candidates/
 extraction/

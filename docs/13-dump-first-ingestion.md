@@ -167,3 +167,7 @@ The organized tree is derived from catalog state. Model confidence controls orga
 Nothing is deleted merely because it appears duplicated. Duplicate garbage collection requires a hash-confirmed canonical copy, backup/retention policy satisfaction, and explicit approval or a separately accepted deletion policy.
 
 This separation lets file movement be reliable and boring while AI classification improves independently.
+
+## Implementation (Phase 1A)
+
+Mode B is implemented in `tools/ingest/` and exposed as the `organize` CLI (`scripts/organize`, `Organize Files.command`). `tools/ingest/transaction.py` is the one transactional move primitive described above; every source class in `tools/ingest/sources.py` routes through it. `tools/ingest/catalog.py` holds the SQLite schema and sidecar writer; `tools/ingest/media/heic.py` is the HEIC->JPEG derivative. `config/ingest.example.yaml` documents the human-editable configuration. `tests/ingest/` is the fault-injection suite covering the failure modes listed above.

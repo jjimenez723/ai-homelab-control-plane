@@ -30,10 +30,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements-social-video.txt
+          cache-dependency-path: |
+            requirements-social-video.txt
+            requirements-ingest.txt
 
       - name: Install test dependencies
-        run: python -m pip install --requirement requirements-social-video.txt
+        run: |
+          python -m pip install --requirement requirements-social-video.txt
+          python -m pip install --requirement requirements-ingest.txt
 
       - name: Compile Python sources
         run: python -m compileall -q tools tests
