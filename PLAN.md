@@ -35,6 +35,25 @@ Nothing in this phase needs a Dell, a queue, or a model.
 
 **Gate 1:** catalog row count == inventory file count; a random 1% sample re-hashes identical; `restic restore` of one random client folder to `/tmp` matches hashes; source disks are still untouched.
 
+## Phase 1A — Manual-first daily ingestion (build immediately after the catalog primitive)
+
+This is the normal day-to-day cleanup path after the one-time legacy dump. It is intentionally **not** a continuously destructive watcher.
+
+- [ ] Build one ingest transaction primitive used by every source: copy to a T7 `.partial`/staging path → flush/close → SHA-256 destination verification → atomic destination rename/register in SQLite → only then unlink the source. A crash, unplug, hash mismatch, or database failure must leave the source intact and the transaction retryable/idempotent.
+- [ ] Build the `organize` CLI with `desktop`, `documents`, `downloads`, `sd`, and `all` targets plus `--dry-run` and `--apply`. Default behavior during development is dry-run/manual invocation; no command may silently become destructive.
+- [ ] Add a double-clickable macOS launcher (for example `Organize Files.command`) that invokes the same CLI rather than duplicating logic.
+- [ ] Desktop and Documents are **manual-trigger only**. Merely mounting the T7 or logging in must never empty or rearrange either folder.
+- [ ] Downloads is manual-trigger during development. After Gate 1A passes, add an **opt-in** launchd/FSEvents mode that considers only settled files (default: unchanged for ≥20 minutes), ignores incomplete browser downloads, and pauses entirely when the T7 is unavailable.
+- [ ] Detect SD/removable-media insertion automatically by volume UUID, but only registered source volumes are eligible. Detection may surface/queue work; source files are moved only after an explicit `organize sd --apply` / `organize all --apply`. Never vacuum arbitrary removable disks.
+- [ ] Require the expected T7 volume UUID and writable/unlocked state before any apply operation. If absent, exit cleanly without modifying sources.
+- [ ] Hard-exclude Git repositories/worktrees and their contents, `.git`, `node_modules`, virtualenvs, app/package bundles, Photos libraries, active/incomplete downloads, symlinks that escape an allowed root, system/hidden metadata, and paths carrying an explicit `keep-local` marker. Add a configurable exclusion file.
+- [ ] Extend the catalog/sidecar provenance with original volume UUID, original path/name, source class, detected/transfer/verified/classified timestamps, transfer state, final path/name, classifier/model/confidence, and recovery/error state.
+- [ ] Keep transfer authority deterministic. AI receives only already-verified T7 assets and may propose/classify/tag/rename destinations; it never gets direct authority to delete a Mac/SD source path.
+- [ ] Classification policy: high-confidence items may be materialized into the organized view automatically; medium/low confidence goes to `00-inbox/needs-review/` with proposed destination/name preserved in metadata.
+- [ ] Add integration tests for: T7 missing, unknown SD card, file still changing, interrupted copy, injected hash mismatch, duplicate/retry, database failure after copy, source unlink failure, excluded Git repo, and successful resume after reconnect.
+
+**Gate 1A:** dry-run is zero-write; every destructive path uses the verified transaction primitive; fault-injection tests prove the source survives every failure before commit; an unknown removable disk is ignored; Desktop/Documents never move without explicit invocation; a registered SD import requires explicit apply; a successful test move is byte-identical on the T7 and absent at source only after verification. Only after this gate may the opt-in Downloads watcher be enabled.
+
 ## Phase 2 — Local models exist and are measured (days 14–30)
 
 - [ ] Install Ollama; pull the capable tier (Qwen 3.6-35B-A3B class, MXFP8/Q4), the small tier (≤ 4B), a VLM (Qwen3-VL-8B class), embeddings (bge-m3 or nomic-embed), whisper `large-v3-turbo`.
@@ -80,4 +99,4 @@ Nothing in this phase needs a Dell, a queue, or a model.
 
 ## Explicitly not in this plan
 
-Kubernetes, Nomad, Ray, Temporal, Redis, NATS, RabbitMQ, distributed inference, multi-node training, a metrics stack, automatic file renaming/deletion, automatic skill installation, any live-trading path, `dell-lite` provisioning.
+Kubernetes, Nomad, Ray, Temporal, Redis, NATS, RabbitMQ, distributed inference, multi-node training, a metrics stack, **unbounded AI-directed source deletion**, automatic skill installation, any live-trading path, `dell-lite` provisioning. Deterministic, hash-verified source removal through the approved ingestion transaction is in scope.
