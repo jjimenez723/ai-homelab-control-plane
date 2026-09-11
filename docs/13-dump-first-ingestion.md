@@ -129,6 +129,35 @@ Detected Git repositories are inventoried, not moved by recurring cleanup. Recor
 
 Images/video preserve technical and capture metadata. Video classification may use keyframes + transcript + VLM. SD-card filesystem/camera metadata structures are not blindly destroyed; bulk card wiping/reformatting is a separate user action after backup requirements are satisfied.
 
+### HEIC/HEIF compatibility derivatives
+
+HEIC/HEIF photos are never destructively converted. The ingested HEIC/HEIF remains the authoritative archival original and receives the normal source hash/provenance record.
+
+After verified ingestion, the media pipeline may generate a JPEG compatibility derivative with this default configuration:
+
+```yaml
+media:
+  heic_to_jpeg:
+    enabled: true
+    preserve_original: true
+    jpeg_quality: 100
+    preserve_metadata: true
+    preserve_icc_profile: true
+    normalize_orientation: true
+```
+
+Requirements:
+
+- JPEG quality is fixed at **100** unless the owner explicitly changes the configuration later.
+- Quality 100 means the encoder's maximum JPEG quality setting; it is still a lossy JPEG encoding, so the original HEIC/HEIF must be retained.
+- Preserve transferable EXIF, capture timestamp, orientation, color/ICC profile, and other safe image metadata where the selected converter supports it.
+- The derivative must share the same logical asset ID as the original while having its own file ID/hash/path.
+- Record `derived_from`, converter/tool name, converter version, output format, quality setting, conversion timestamp, and conversion status in the catalog/sidecar.
+- Use deterministic collision-safe naming. Re-running conversion must not create `photo-2.jpg`, `photo-3.jpg`, or otherwise duplicate an existing valid derivative.
+- A corrupted input or converter failure records an error and leaves the verified HEIC/HEIF untouched.
+- AI classification treats the HEIC original and JPEG derivative as one logical photo, not two independent assets.
+- The organized/consumer-facing view may prefer the JPEG for compatibility while the archival/source view retains the HEIC/HEIF original.
+
 ## Organized view
 
 The organized tree is derived from catalog state. Model confidence controls organization, not whether a verified transfer is considered successful. A worse future model must be able to regenerate the view without losing original provenance.
