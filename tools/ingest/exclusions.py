@@ -38,7 +38,10 @@ def is_bundle_dir(directory: Path, config: ExclusionsConfig) -> bool:
 
 
 def is_excluded_dir_name(directory: Path, config: ExclusionsConfig) -> bool:
-    return directory.name in config.dir_names
+    # Case-insensitive: matches macOS's default case-insensitive-but-preserving
+    # APFS, where `Node_Modules` and `node_modules` are the same directory.
+    name = directory.name.lower()
+    return any(name == excluded.lower() for excluded in config.dir_names)
 
 
 def has_keep_local_marker(directory: Path, config: ExclusionsConfig) -> bool:

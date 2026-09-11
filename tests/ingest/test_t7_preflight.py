@@ -99,7 +99,7 @@ class SDDetectionTests(unittest.TestCase):
             unknown_card = make_volume(UNKNOWN_SD_UUID, sd_mount, removable=True, label="UNKNOWN_SD")
             prober = fake_prober([unknown_card])
 
-            eligible = detect_sd_sources(prober, config)
+            eligible = detect_sd_sources(prober(), config)
             self.assertEqual(eligible, [])
 
     def test_registered_sd_card_is_detected(self):
@@ -111,7 +111,7 @@ class SDDetectionTests(unittest.TestCase):
             registered_card = make_volume(SD_TEST_UUID, sd_mount, removable=True, label="MY_SD")
             prober = fake_prober([registered_card])
 
-            eligible = detect_sd_sources(prober, config)
+            eligible = detect_sd_sources(prober(), config)
             self.assertEqual(len(eligible), 1)
             self.assertEqual(eligible[0].volume.volume_uuid, SD_TEST_UUID)
             self.assertEqual(eligible[0].root, sd_mount)
@@ -128,7 +128,7 @@ class SDDetectionTests(unittest.TestCase):
             fixed_volume = make_volume(SD_TEST_UUID, fixed_mount, removable=False)
             prober = fake_prober([fixed_volume])
 
-            eligible = detect_sd_sources(prober, config)
+            eligible = detect_sd_sources(prober(), config)
             self.assertEqual(eligible, [])
 
 

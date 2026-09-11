@@ -112,6 +112,57 @@ class CLIIntegrationTests(unittest.TestCase):
         self.assertIn("not connected", output)
         self.assertTrue((self.desktop / "photo.jpg").exists())
 
+    def test_two_sd_cards_sharing_a_generic_label_are_both_processed(self):
+        sd_a_mount = self.root / "SD_CARD_A"
+        sd_b_mount = self.root / "SD_CARD_B"
+        write_file(sd_a_mount / "IMG_0001.JPG", b"a" * 100)
+        write_file(sd_b_mount / "IMG_0001.JPG", b"b" * 100)
+        uuid_b = "33333333-3333-3333-3333-333333333333"
+
+        config = build_config(
+            desktop=self.desktop, t7_root=self.t7, sd_volume_uuids=frozenset({SD_TEST_UUID, uuid_b}), settle_seconds=1
+        )
+        volume_a = make_volume(SD_TEST_UUID, sd_a_mount, removable=True, label="NO NAME")
+        volume_b = make_volume(uuid_b, sd_b_mount, removable=True, label="NO NAME")  # same label as volume_a
+        prober = lambda: [volume_a, volume_b]  # noqa: E731
+
+        exit_code, output = self._run(config, ["sd", "--apply"], prober)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("2/2 transferred", output)
+        self.assertFalse((sd_a_mount / "IMG_0001.JPG").exists())
+        self.assertFalse((sd_b_mount / "IMG_0001.JPG").exists())
+        landed = list((self.t7 / "00-inbox" / "organized" / "sd").rglob("IMG_0001*.JPG"))
+        self.assertEqual(len(landed), 2)  # both cards' files landed distinctly, not one clobbering the other
+
+    def test_one_file_raising_unexpectedly_does_not_abort_the_whole_batch(self):
+        write_file(self.desktop / "good1.txt", b"one")
+        write_file(self.desktop / "bad.txt", b"two")
+        write_file(self.desktop / "good2.txt", b"three")
+        config = build_config(desktop=self.desktop, t7_root=self.t7, settle_seconds=1)
+
+        from tools.ingest import cli as cli_module
+        from tools.ingest import transaction as transaction_module
+
+        original_transfer = transaction_module.transfer_file
+
+        def flaky_transfer(catalog, planned, resolved_t7, **kwargs):
+            if planned.source_path.name == "bad.txt":
+                raise RuntimeError("simulated unexpected failure")
+            return original_transfer(catalog, planned, resolved_t7, **kwargs)
+
+        cli_module.transfer_file = flaky_transfer
+        try:
+            exit_code, output = self._run(config, ["desktop", "--apply"], lambda: [])
+        finally:
+            cli_module.transfer_file = original_transfer
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((self.desktop / "good1.txt").exists())
+        self.assertFalse((self.desktop / "good2.txt").exists())
+        self.assertTrue((self.desktop / "bad.txt").exists())  # errored before anything touched it
+        self.assertIn("ERROR:", output)
+        self.assertIn("2/3 transferred", output)
+
     def test_default_mode_without_flags_is_dry_run(self):
         write_file(self.desktop / "photo.jpg", b"data")
         config = build_config(desktop=self.desktop, t7_root=self.t7)

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from tools.ingest.catalog import (
     STATE_COMMITTED,
+    STATE_FAILED_ERROR,
     STATE_FAILED_HASH_MISMATCH,
     STATE_SOURCE_UNLINKED,
     Catalog,
@@ -26,6 +27,7 @@ from tools.ingest.config import IngestConfig, load_config
 from tools.ingest.derivatives import maybe_generate_heic_derivative
 from tools.ingest.exclusions import ExclusionReason
 from tools.ingest.git_repos import inspect_git_repo
+from tools.ingest.identity import asset_id_for
 from tools.ingest.scanner import ScanResult, scan_source
 from tools.ingest.sources import (
     ALL_SOURCE_CLASSES,
@@ -36,8 +38,8 @@ from tools.ingest.sources import (
     static_source_root,
 )
 from tools.ingest.t7 import ResolvedT7, resolve_t7
-from tools.ingest.transaction import PlannedTransfer, transfer_file
-from tools.ingest.volumes import VolumeError, VolumeProber, diskutil_volume_prober
+from tools.ingest.transaction import PlannedTransfer, TransferOutcome, transfer_file
+from tools.ingest.volumes import MountedVolume, VolumeError, VolumeProber, diskutil_volume_prober
 
 EXCLUSION_LABELS = {
     ExclusionReason.GIT_REPO: "Git repositories",
@@ -66,10 +68,19 @@ class SourceTarget:
     root: Path
     volume_uuid: str
 
+    @property
+    def key(self) -> tuple[str, str]:
+        # Display labels aren't guaranteed unique (two SD cards can share a
+        # generic label; Desktop/Documents can share a volume_uuid), but the
+        # (source_class, volume_uuid) pair always is.
+        return (self.source_class, self.volume_uuid)
 
-def gather_targets(config: IngestConfig, requested: list[str], prober: VolumeProber) -> list[SourceTarget]:
+
+def gather_targets(config: IngestConfig, requested: list[str], volumes: list[MountedVolume]) -> list[SourceTarget]:
+    """Build the list of scan targets from one already-taken volume snapshot,
+    so a card ejecting mid-run can't make different call sites disagree about
+    what's mounted."""
     targets: list[SourceTarget] = []
-    volumes = prober()
 
     for source_class in MANUAL_STATIC_SOURCES:
         if source_class not in requested:
@@ -80,7 +91,7 @@ def gather_targets(config: IngestConfig, requested: list[str], prober: VolumePro
         targets.append(SourceTarget(source_class, SOURCE_LABELS[source_class], root, volume_uuid))
 
     if SOURCE_SD in requested:
-        for sd in detect_sd_sources(prober, config):
+        for sd in detect_sd_sources(volumes, config):
             label = f"SD ({sd.volume.label})"
             targets.append(SourceTarget(SOURCE_SD, label, sd.root, sd.volume.volume_uuid))
 
@@ -103,7 +114,7 @@ def _print_exclusions(counts: dict[str, int]) -> None:
         print(f"  {count} {label}")
 
 
-def _print_git_repos(scans: dict[str, ScanResult], limit: int = 10) -> None:
+def _print_git_repos(scans: dict[tuple[str, str], ScanResult], limit: int = 10) -> None:
     all_repos = [repo for scan in scans.values() for repo in scan.git_repos]
     if not all_repos:
         return
@@ -118,12 +129,18 @@ def cmd_organize(args: argparse.Namespace, prober: VolumeProber | None = None) -
     prober = prober or diskutil_volume_prober
     config = load_config(args.config)
     requested = _requested_classes(args.target)
-    targets = gather_targets(config, requested, prober)
+
+    # Probe exactly once: gathering targets and resolving the T7 both need a
+    # consistent view of what's mounted, not two independent diskutil calls
+    # that could disagree if a card is inserted/ejected mid-invocation.
+    volumes = prober()
+    snapshot_prober: VolumeProber = lambda: volumes  # noqa: E731
+    targets = gather_targets(config, requested, volumes)
 
     t7_error: str | None = None
     resolved_t7: ResolvedT7 | None = None
     try:
-        resolved_t7 = resolve_t7(config, prober, for_apply=args.apply)
+        resolved_t7 = resolve_t7(config, snapshot_prober, for_apply=args.apply)
     except VolumeError as exc:
         t7_error = str(exc)
 
@@ -137,16 +154,16 @@ def cmd_organize(args: argparse.Namespace, prober: VolumeProber | None = None) -
     repo_root = config.repo_root
     extra_excludes = (repo_root,) + ((resolved_t7.root,) if resolved_t7 is not None else ())
 
-    scans: dict[str, ScanResult] = {}
+    scans: dict[tuple[str, str], ScanResult] = {}
     for target in targets:
         scan = scan_source(target.root, config=config, extra_exclude_paths=extra_excludes)
-        scans[target.label] = scan
+        scans[target.key] = scan
 
     for source_class in MANUAL_STATIC_SOURCES:
         if source_class not in requested:
             continue
         matching = [t for t in targets if t.source_class == source_class]
-        scan = scans[matching[0].label]
+        scan = scans[matching[0].key]
         print(f"{SOURCE_LABELS[source_class]}: {'missing' if scan.missing else f'{len(scan.eligible)} eligible'}")
 
     sd_targets = [t for t in targets if t.source_class == SOURCE_SD]
@@ -154,7 +171,7 @@ def cmd_organize(args: argparse.Namespace, prober: VolumeProber | None = None) -
         if not sd_targets:
             print("SD: no registered/mounted card detected")
         else:
-            total_sd_eligible = sum(len(scans[t.label].eligible) for t in sd_targets)
+            total_sd_eligible = sum(len(scans[t.key].eligible) for t in sd_targets)
             print(f"SD: {total_sd_eligible} eligible")
 
     combined_counts: dict[str, int] = {}
@@ -164,7 +181,7 @@ def cmd_organize(args: argparse.Namespace, prober: VolumeProber | None = None) -
     _print_exclusions(combined_counts)
     _print_git_repos(scans)
 
-    all_eligible = [(target, f) for target in targets for f in scans[target.label].eligible]
+    all_eligible = [(target, f) for target in targets for f in scans[target.key].eligible]
     total_bytes = sum(f.size for _, f in all_eligible)
     print(f"\nPlanned: {len(all_eligible)} files / {total_bytes / 1e9:.1f} GB")
 
@@ -174,34 +191,46 @@ def cmd_organize(args: argparse.Namespace, prober: VolumeProber | None = None) -
 
     assert resolved_t7 is not None
     catalog_path = resolved_t7.catalog_path
-    outcomes = []
+    outcomes: list[TransferOutcome] = []
     total_removed_bytes = 0
     with Catalog(catalog_path) as catalog:
         for target in targets:
             catalog.upsert_volume(target.volume_uuid, label=target.label, mount_point=str(target.root))
-            for f in scans[target.label].eligible:
+            for f in scans[target.key].eligible:
                 planned = PlannedTransfer(
                     source_path=f.path,
                     rel_path=f.rel_path,
                     source_volume_id=target.volume_uuid,
                     source_class=target.source_class,
                 )
-                outcome = transfer_file(catalog, planned, resolved_t7, settle_seconds=config.settle_seconds)
+                try:
+                    outcome = transfer_file(catalog, planned, resolved_t7, settle_seconds=config.settle_seconds)
+                except Exception as exc:  # noqa: BLE001 - one bad file must not abort the whole batch
+                    print(f"  ERROR: {f.path}: {exc}")
+                    outcome = TransferOutcome(
+                        asset_id=asset_id_for(target.volume_uuid, f.rel_path),
+                        state=STATE_FAILED_ERROR,
+                        success=False,
+                        error_message=str(exc),
+                    )
                 outcomes.append(outcome)
                 if outcome.state == STATE_SOURCE_UNLINKED:
                     total_removed_bytes += f.size
                 if outcome.final_path is not None and outcome.state in (STATE_COMMITTED, STATE_SOURCE_UNLINKED):
-                    maybe_generate_heic_derivative(
-                        catalog,
-                        resolved_t7,
-                        parent_asset_id=outcome.asset_id,
-                        parent_final_path=outcome.final_path,
-                        source_volume_id=target.volume_uuid,
-                        source_class=target.source_class,
-                        config=config.media.heic_to_jpeg,
-                    )
+                    try:
+                        maybe_generate_heic_derivative(
+                            catalog,
+                            resolved_t7,
+                            parent_asset_id=outcome.asset_id,
+                            parent_final_path=outcome.final_path,
+                            source_volume_id=target.volume_uuid,
+                            source_class=target.source_class,
+                            config=config.media.heic_to_jpeg,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - a derivative failure never blocks ingestion
+                        print(f"  ERROR: derivative for {outcome.final_path}: {exc}")
 
-            for repo in scans[target.label].git_repos:
+            for repo in scans[target.key].git_repos:
                 details = inspect_git_repo(repo.path)
                 catalog.record_repo(
                     f"{target.volume_uuid}:{repo.rel_path}",

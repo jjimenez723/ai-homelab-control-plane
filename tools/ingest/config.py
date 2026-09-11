@@ -187,6 +187,14 @@ def load_config(path: Path | None = None) -> IngestConfig:
     )
 
     heic_raw = merged["media"]["heic_to_jpeg"]
+    if not heic_raw.get("preserve_original", True):
+        # Not a real knob: docs/13 and D-016 require the HEIC/HEIF original to
+        # remain the untouched archival asset. Refuse to start rather than
+        # silently ignore an operator's expectation that this would delete it.
+        raise ValueError(
+            "media.heic_to_jpeg.preserve_original may not be set to false: "
+            "the original HEIC/HEIF is never deleted by this tool"
+        )
     media = MediaConfig(
         heic_to_jpeg=HeicToJpegConfig(
             enabled=bool(heic_raw["enabled"]),

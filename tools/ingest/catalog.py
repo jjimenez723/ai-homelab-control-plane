@@ -189,6 +189,18 @@ class Catalog:
         row = self._conn.execute("SELECT * FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()
         return Asset(dict(row)) if row is not None else None
 
+    def get_asset_id_by_final_path(self, final_path: str) -> str | None:
+        """Which asset (if any) currently claims this exact destination path.
+
+        Used to tell "this path is already mine, safe to resume" apart from
+        "an unrelated asset (possibly from a different source volume) already
+        landed here" -- content equality alone isn't enough to distinguish
+        those, since two different sources can legitimately contain
+        byte-identical files at the same relative path.
+        """
+        row = self._conn.execute("SELECT asset_id FROM assets WHERE final_path = ?", (final_path,)).fetchone()
+        return row["asset_id"] if row is not None else None
+
     def ensure_pending_asset(
         self,
         asset_id: str,

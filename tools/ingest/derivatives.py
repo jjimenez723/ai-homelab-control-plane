@@ -45,6 +45,13 @@ def maybe_generate_heic_derivative(
         normalize_orientation=config.normalize_orientation,
     )
     result = convert_heic_to_jpeg(parent_final_path, output_path, options)
+    if result.success and (result.sha256 is None or result.size is None or result.output_path is None):
+        # Defensive: a converter must never claim success without a complete
+        # result. Treat this as a failure rather than crash the batch.
+        result = DerivativeResult(
+            success=False, converter=result.converter, converter_version=result.converter_version,
+            error_message="converter reported success with an incomplete result",
+        )
 
     if result.success:
         assert result.sha256 is not None and result.size is not None and result.output_path is not None

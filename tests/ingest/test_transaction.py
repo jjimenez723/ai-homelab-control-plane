@@ -345,6 +345,35 @@ class DestinationCollisionTests(TransactionTestCase):
         self.assertEqual(outcome.final_path, target_path)
         self.assertEqual(sha256_file(target_path), source_hash)
 
+    def test_two_different_volumes_with_identical_relative_path_and_content_stay_distinct(self):
+        """Two different SD cards can each have DCIM/100MSDCF/IMG_0001.JPG
+        with byte-identical content. They must not be silently merged into
+        one final path/catalog row -- each keeps its own asset identity."""
+        first_source = write_file(self.desktop / "card-a" / "IMG_0001.JPG", b"same bytes", age_seconds=3600)
+        second_source = write_file(self.desktop / "card-b" / "IMG_0001.JPG", b"same bytes", age_seconds=3600)
+
+        first_planned = PlannedTransfer(
+            source_path=first_source, rel_path="IMG_0001.JPG", source_volume_id="sd-card-a", source_class="sd"
+        )
+        second_planned = PlannedTransfer(
+            source_path=second_source, rel_path="IMG_0001.JPG", source_volume_id="sd-card-b", source_class="sd"
+        )
+
+        first = self.run_transfer(first_planned)
+        second = self.run_transfer(second_planned)
+
+        self.assertTrue(first.success and second.success)
+        self.assertNotEqual(first.asset_id, second.asset_id)
+        self.assertNotEqual(first.final_path, second.final_path)
+        self.assertTrue(first.final_path.exists())
+        self.assertTrue(second.final_path.exists())
+        self.assertEqual(
+            self.catalog.get_asset_id_by_final_path(str(first.final_path)), first.asset_id
+        )
+        self.assertEqual(
+            self.catalog.get_asset_id_by_final_path(str(second.final_path)), second.asset_id
+        )
+
 
 class SourceUnlinkFailureTests(TransactionTestCase):
     def test_source_unlink_failure_keeps_transfer_committed_but_flags_error(self):

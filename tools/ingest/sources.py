@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tools.ingest.config import IngestConfig
-from tools.ingest.volumes import MountedVolume, VolumeProber, registered_sd_volumes
+from tools.ingest.volumes import MountedVolume, registered_sd_volumes
 
 SOURCE_DESKTOP = "desktop"
 SOURCE_DOCUMENTS = "documents"
@@ -64,17 +64,16 @@ class SDSource:
         return self.volume.mount_point
 
 
-def detect_sd_sources(prober: VolumeProber, config: IngestConfig) -> list[SDSource]:
+def detect_sd_sources(volumes: list[MountedVolume], config: IngestConfig) -> list[SDSource]:
     """Registered, currently-mounted SD/removable sources.
 
     An unregistered removable disk is never returned here, no matter how
     plausible it looks -- registration is an explicit owner action in
     config/ingest.yaml, never inferred.
     """
-    volumes = prober()
     eligible = registered_sd_volumes(volumes, config.sources.sd_volume_uuids)
     return [SDSource(volume=v) for v in eligible]
 
 
-def all_removable_volumes(prober: VolumeProber) -> list[MountedVolume]:
-    return [v for v in prober() if v.removable]
+def all_removable_volumes(volumes: list[MountedVolume]) -> list[MountedVolume]:
+    return [v for v in volumes if v.removable]

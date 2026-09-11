@@ -109,6 +109,20 @@ class ExclusionTests(unittest.TestCase):
             self.assertFalse(any("node_modules" in p for p in rel_paths))
             self.assertEqual(scan.exclusion_counts.get(ExclusionReason.DIR_NAME), 1)
 
+    def test_excluded_dir_names_match_case_insensitively(self):
+        """macOS's default APFS is case-insensitive-but-preserving, so
+        `Node_Modules` and `node_modules` must be treated as the same name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "Desktop"
+            write_file(desktop / "app" / "Node_Modules" / "leftpad" / "index.js")
+            write_file(desktop / "app" / "package.json")
+            config = build_config(desktop=desktop)
+
+            scan = scan_source(desktop, config=config)
+            rel_paths = {f.rel_path for f in scan.eligible}
+            self.assertIn(os.path.join("app", "package.json"), rel_paths)
+            self.assertFalse(any("Node_Modules" in p for p in rel_paths))
+
     def test_venv_directories_are_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "Desktop"
