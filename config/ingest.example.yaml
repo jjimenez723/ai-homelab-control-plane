@@ -9,7 +9,8 @@
 # (see PLAN.md Phase 1A and DECISIONS.md D-016).
 
 t7:
-  # Preferred: pin the T7 by its stable APFS volume UUID (see `diskutil info /Volumes/<name>`).
+  # Preferred: pin the T7 by its stable volume UUID (see `diskutil info /Volumes/<name>`).
+  # The T7 stays exFAT (D-017); `diskutil` reports a VolumeUUID for exFAT too.
   # `organize` refuses to run --apply if no mounted volume has this UUID.
   volume_uuid: "REPLACE-WITH-T7-VOLUME-UUID"
 

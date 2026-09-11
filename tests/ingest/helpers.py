@@ -72,7 +72,7 @@ def build_config(
 
 def make_volume(uuid: str, mount_point: Path, *, writable: bool = True, removable: bool = False, label: str = "") -> MountedVolume:
     return MountedVolume(
-        volume_uuid=uuid, mount_point=mount_point, filesystem="apfs", writable=writable, removable=removable, label=label or uuid
+        volume_uuid=uuid, mount_point=mount_point, filesystem="exfat", writable=writable, removable=removable, label=label or uuid
     )
 
 
