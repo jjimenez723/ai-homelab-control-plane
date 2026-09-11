@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Thin wrapper around `python -m tools.ingest.cli`. This is the only entry
+# point into the ingestion logic -- `Organize Files.command` calls this same
+# script rather than duplicating anything.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ -x "$ROOT_DIR/.venv/bin/python3" ]]; then
+  PYTHON="$ROOT_DIR/.venv/bin/python3"
+else
+  PYTHON="python3"
+fi
+
+exec "$PYTHON" -m tools.ingest.cli "$@"

@@ -1,0 +1,92 @@
+# Human-editable configuration for the `organize` manual-first ingestion CLI.
+#
+# Copy this file to `config/ingest.yaml` (ignored by git; see .gitignore) and
+# adjust paths/UUIDs for this machine. `organize` looks for `config/ingest.yaml`
+# by default, or a path given with `--config`.
+#
+# Nothing in this file makes ingestion run automatically. Desktop, Documents,
+# and Downloads are only ever scanned/moved when the CLI is invoked by hand
+# (see PLAN.md Phase 1A and DECISIONS.md D-016).
+
+t7:
+  # Preferred: pin the T7 by its stable APFS volume UUID (see `diskutil info /Volumes/<name>`).
+  # `organize` refuses to run --apply if no mounted volume has this UUID.
+  volume_uuid: "REPLACE-WITH-T7-VOLUME-UUID"
+
+  # Optional development/testing convenience: a fixed filesystem path used instead of
+  # UUID detection. Only set this for local dev/test roots, never for the real T7.
+  storage_root_override: null
+
+  # Sub-path under the resolved T7 root where verified assets land before
+  # AI classification proposes a client/project destination.
+  inbox_relative_path: "00-inbox/organized"
+
+  # Sub-path under the resolved T7 root used for .partial staging files,
+  # the catalog, and sidecars.
+  system_relative_path: "90-system"
+
+sources:
+  desktop: "~/Desktop"
+  documents: "~/Documents"
+  downloads: "~/Downloads"
+
+  # Registered removable-media source volumes. Only UUIDs listed here are ever
+  # eligible for `organize sd`; any other mounted removable disk is ignored.
+  sd_volume_uuids: []
+
+# How long (seconds) a file's mtime must be unchanged before it is considered
+# settled/safe to move. Applies to manual Desktop/Documents/Downloads/SD runs.
+settle_seconds: 30
+
+# The future opt-in Downloads watcher (not enabled by Phase 1A) must use at
+# least this settle window before it is allowed to touch a file.
+downloads_watcher_min_settle_seconds: 1200
+
+exclusions:
+  # Directory names skipped anywhere in a source tree (not reported individually).
+  dir_names:
+    - node_modules
+    - .venv
+    - venv
+    - env
+    - .tox
+    - __pycache__
+    - .mypy_cache
+    - .pytest_cache
+    - .git
+
+  # Directories treated as a single opaque unit (never descended into or moved
+  # piece by piece) because moving their internal files independently would
+  # corrupt them.
+  bundle_extensions:
+    - .app
+    - .bundle
+    - .framework
+    - .plugin
+    - .kext
+    - .photoslibrary
+    - .xcodeproj
+    - .xcworkspace
+
+  # Suffixes that mark an in-progress/incomplete browser download.
+  incomplete_download_suffixes:
+    - .crdownload
+    - .download
+    - .part
+
+  # A file or directory literally named this, present in a directory, excludes
+  # that directory (and everything under it) from ingestion.
+  keep_local_marker: ".keep-local"
+
+  # Additional absolute paths to always exclude, beyond the automatic
+  # self-exclusion of this repository and the resolved T7 root.
+  extra_paths: []
+
+media:
+  heic_to_jpeg:
+    enabled: true
+    preserve_original: true
+    jpeg_quality: 100
+    preserve_metadata: true
+    preserve_icc_profile: true
+    normalize_orientation: true

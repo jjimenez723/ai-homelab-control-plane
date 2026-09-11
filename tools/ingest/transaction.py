@@ -1,0 +1,280 @@
+"""The one deterministic transactional move primitive.
+
+Every destructive ingestion path (`organize desktop/documents/downloads/sd
+--apply`) routes through `transfer_file`. No AI/LLM code calls this directly
+or is ever given the authority to unlink a source path -- see D-016.
+
+State machine (persisted per-asset so retries resume instead of restarting):
+
+    pending -> copying -> copied -> verified -> committed -> source_unlinked
+
+A crash, unplug, hash mismatch, or database failure at any point before the
+`committed` catalog write leaves the source file untouched. `transfer_file`
+never raises for expected failure modes; it returns a `TransferOutcome` so
+callers can aggregate results without a crashed batch losing earlier work.
+"""
+
+from __future__ import annotations
+
+import mimetypes
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from tools.ingest.catalog import (
+    STATE_COMMITTED,
+    STATE_COPYING,
+    STATE_FAILED_ERROR,
+    STATE_FAILED_HASH_MISMATCH,
+    STATE_PENDING,
+    STATE_SOURCE_UNLINKED,
+    STATE_VERIFIED,
+    Catalog,
+    now_iso,
+)
+from tools.ingest.exclusions import is_settled
+from tools.ingest.hashing import CHUNK_SIZE, sha256_file
+from tools.ingest.identity import asset_id_for
+from tools.ingest.t7 import ResolvedT7
+
+
+@dataclass
+class TransferFaultHooks:
+    """Injection points for fault-injection tests. All default to no-op."""
+
+    mid_copy: Callable[[int, int], None] | None = None
+    after_copy: Callable[[Path], None] | None = None
+    after_dest_hash: Callable[[str], None] | None = None
+    before_verify_commit: Callable[[], None] | None = None
+    before_finalize_rename: Callable[[], None] | None = None
+    before_final_commit: Callable[[], None] | None = None
+    before_unlink: Callable[[], None] | None = None
+
+
+@dataclass
+class PlannedTransfer:
+    source_path: Path
+    rel_path: str
+    source_volume_id: str
+    source_class: str
+
+
+@dataclass
+class TransferOutcome:
+    asset_id: str
+    state: str
+    success: bool
+    final_path: Path | None = None
+    error_message: str | None = None
+    skipped_reason: str | None = None
+    source_unlink_failed: bool = False
+
+
+def _copy_with_fsync(source_path: Path, staging_path: Path, hooks: TransferFaultHooks) -> None:
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
+    total = source_path.stat().st_size
+    written = 0
+    with open(source_path, "rb") as src, open(staging_path, "wb") as dst:
+        while True:
+            chunk = src.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            dst.write(chunk)
+            written += len(chunk)
+            if hooks.mid_copy is not None:
+                hooks.mid_copy(written, total)
+        dst.flush()
+        os.fsync(dst.fileno())
+
+
+def _resolve_final_path(inbox_dir: Path, source_class: str, rel_path: str, source_sha256: str) -> Path:
+    base = inbox_dir / source_class / rel_path
+    if not base.exists():
+        return base
+    try:
+        if base.is_file() and sha256_file(base) == source_sha256:
+            return base  # a previous attempt already placed our verified content here
+    except OSError:
+        pass
+    return base.parent / f"{base.stem}__{source_sha256[:8]}{base.suffix}"
+
+
+def _staging_path(resolved_t7: ResolvedT7, asset_id: str) -> Path:
+    return resolved_t7.staging_dir / f"{asset_id}.partial"
+
+
+def transfer_file(
+    catalog: Catalog,
+    planned: PlannedTransfer,
+    resolved_t7: ResolvedT7,
+    *,
+    settle_seconds: int,
+    hooks: TransferFaultHooks | None = None,
+) -> TransferOutcome:
+    hooks = hooks or TransferFaultHooks()
+    asset_id = asset_id_for(planned.source_volume_id, planned.rel_path)
+    staging_path = _staging_path(resolved_t7, asset_id)
+    existing = catalog.get_asset(asset_id)
+
+    if existing is not None and existing.row["transfer_state"] == STATE_SOURCE_UNLINKED:
+        return TransferOutcome(asset_id=asset_id, state=STATE_SOURCE_UNLINKED, success=True, skipped_reason="already_completed")
+
+    if existing is not None and existing.row["transfer_state"] == STATE_COMMITTED:
+        return _finish_unlink(catalog, asset_id, existing.row["final_path"], planned.source_path, resolved_t7, hooks)
+
+    if existing is not None and existing.row["transfer_state"] == STATE_VERIFIED:
+        final_path = Path(existing.row["final_path"])
+        if staging_path.exists():
+            try:
+                if sha256_file(staging_path) != existing.row["sha256"]:
+                    # corrupted partial from an interrupted prior attempt; redo the copy.
+                    pass
+                else:
+                    return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks)
+            except OSError:
+                pass
+        elif final_path.exists():
+            # rename already happened before a crash; only the DB commit is outstanding.
+            return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks, rename_needed=False)
+        # neither a valid partial nor a finalized file exists: source is still safe, redo from scratch.
+
+    if not planned.source_path.exists():
+        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, skipped_reason="source_vanished")
+
+    if not is_settled(planned.source_path, settle_seconds):
+        return TransferOutcome(asset_id=asset_id, state=STATE_PENDING, success=False, skipped_reason="still_changing")
+
+    stat = planned.source_path.stat()
+    catalog.ensure_pending_asset(
+        asset_id,
+        source_volume_id=planned.source_volume_id,
+        source_class=planned.source_class,
+        original_path=planned.rel_path,
+        original_filename=planned.source_path.name,
+        size=stat.st_size,
+    )
+
+    try:
+        source_sha256 = sha256_file(planned.source_path)
+    except OSError as exc:
+        catalog.update_asset(asset_id, transfer_state=STATE_FAILED_ERROR, error_state="hash_failed", error_message=str(exc))
+        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, error_message=str(exc))
+
+    mime, _ = mimetypes.guess_type(planned.source_path.name)
+    catalog.upsert_blob(source_sha256, size=stat.st_size, mime=mime)
+    catalog.update_asset(
+        asset_id,
+        sha256=source_sha256,
+        mime=mime,
+        transfer_started_at=now_iso(),
+        transfer_state=STATE_COPYING,
+    )
+
+    try:
+        _copy_with_fsync(planned.source_path, staging_path, hooks)
+    except OSError as exc:
+        catalog.update_asset(asset_id, transfer_state=STATE_FAILED_ERROR, error_state="copy_failed", error_message=str(exc))
+        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, error_message=str(exc))
+
+    if hooks.after_copy is not None:
+        hooks.after_copy(staging_path)
+    catalog.update_asset(asset_id, transferred_at=now_iso(), transfer_state="copied")
+
+    try:
+        dest_sha256 = sha256_file(staging_path)
+    except OSError as exc:
+        catalog.update_asset(asset_id, transfer_state=STATE_FAILED_ERROR, error_state="dest_hash_failed", error_message=str(exc))
+        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, error_message=str(exc))
+    if hooks.after_dest_hash is not None:
+        hooks.after_dest_hash(dest_sha256)
+
+    if dest_sha256 != source_sha256:
+        catalog.update_asset(
+            asset_id,
+            transfer_state=STATE_FAILED_HASH_MISMATCH,
+            error_state="hash_mismatch",
+            error_message=f"source={source_sha256} dest={dest_sha256}",
+        )
+        return TransferOutcome(
+            asset_id=asset_id,
+            state=STATE_FAILED_HASH_MISMATCH,
+            success=False,
+            error_message="destination hash did not match source after copy",
+        )
+
+    final_path = _resolve_final_path(resolved_t7.inbox_dir, planned.source_class, planned.rel_path, source_sha256)
+
+    try:
+        if hooks.before_verify_commit is not None:
+            hooks.before_verify_commit()
+        catalog.update_asset(
+            asset_id,
+            verified_at=now_iso(),
+            transfer_state=STATE_VERIFIED,
+            final_path=str(final_path),
+            final_filename=final_path.name,
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberately broad: any DB failure here must not touch source
+        return TransferOutcome(asset_id=asset_id, state=STATE_COPYING, success=False, error_message=f"catalog write failed before commit: {exc}")
+
+    return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks)
+
+
+def _finalize_and_commit(
+    catalog: Catalog,
+    asset_id: str,
+    staging_path: Path,
+    final_path: Path,
+    source_path: Path,
+    resolved_t7: ResolvedT7,
+    hooks: TransferFaultHooks,
+    *,
+    rename_needed: bool = True,
+) -> TransferOutcome:
+    if rename_needed:
+        try:
+            if hooks.before_finalize_rename is not None:
+                hooks.before_finalize_rename()
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging_path, final_path)
+        except OSError as exc:
+            catalog.update_asset(asset_id, transfer_state=STATE_VERIFIED, error_state="finalize_failed", error_message=str(exc))
+            return TransferOutcome(asset_id=asset_id, state=STATE_VERIFIED, success=False, error_message=str(exc))
+
+    try:
+        if hooks.before_final_commit is not None:
+            hooks.before_final_commit()
+        catalog.update_asset(asset_id, transfer_state=STATE_COMMITTED)
+    except Exception as exc:  # noqa: BLE001 - destination is verified+renamed; only bookkeeping is outstanding
+        return TransferOutcome(asset_id=asset_id, state=STATE_VERIFIED, success=False, final_path=final_path, error_message=f"catalog commit failed: {exc}")
+
+    catalog.write_sidecar(asset_id, resolved_t7.sidecars_dir)
+    return _finish_unlink(catalog, asset_id, str(final_path), source_path, resolved_t7, hooks)
+
+
+def _finish_unlink(
+    catalog: Catalog,
+    asset_id: str,
+    final_path_str: str,
+    source_path: Path,
+    resolved_t7: ResolvedT7,
+    hooks: TransferFaultHooks,
+) -> TransferOutcome:
+    final_path = Path(final_path_str)
+    try:
+        if hooks.before_unlink is not None:
+            hooks.before_unlink()
+        source_path.unlink()
+    except FileNotFoundError:
+        pass  # source already gone (a previous run's unlink succeeded before its own commit landed)
+    except OSError as exc:
+        catalog.update_asset(asset_id, error_state="source_unlink_failed", error_message=str(exc))
+        return TransferOutcome(
+            asset_id=asset_id, state=STATE_COMMITTED, success=True, final_path=final_path,
+            source_unlink_failed=True, error_message=str(exc),
+        )
+
+    catalog.update_asset(asset_id, completed_at=now_iso(), transfer_state=STATE_SOURCE_UNLINKED, error_state=None, error_message=None)
+    catalog.write_sidecar(asset_id, resolved_t7.sidecars_dir)
+    return TransferOutcome(asset_id=asset_id, state=STATE_SOURCE_UNLINKED, success=True, final_path=final_path)
