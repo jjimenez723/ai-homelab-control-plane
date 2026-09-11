@@ -34,7 +34,7 @@ For every media migration:
 ## Concrete V0 architecture (decided — D-004)
 
 ```text
-T7 (APFS Encrypted, Mac-attached)          primary working copy
+T7 (exFAT + Samsung Magician password, Mac-attached)   primary working copy
    |
    | restic backup (hourly when attached, scheduled by launchd)
    v
@@ -50,7 +50,7 @@ Rules:
 - No worker node holds the backup credentials. Workers are never backup sources of record.
 - `restic check --read-data-subset=5%` weekly; a scripted **restore drill** of one random client folder monthly, recorded in `90-system/migration-reports/`.
 - Time Machine of the Mac internal disk continues independently; it is not the T7 strategy.
-- Secrets (APFS passphrase, restic password, B2 key) live in the password manager with printed recovery in a physically separate place. Losing the restic password loses every backup.
+- Secrets (Samsung T7 security password, restic password, B2 key) live in the password manager with printed recovery in a physically separate place. Losing the restic password loses every backup. The T7 password protects local access but does not replace independent backups.
 
 Budget: B2 ≈ $6/TB/month; the second copy is free (existing Xeon disk); restic is free.
 

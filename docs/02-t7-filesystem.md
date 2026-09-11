@@ -107,29 +107,37 @@ Do not force descriptive renaming directly onto camera originals until the inges
 
 ## Filesystem decision
 
-Decided in `DECISIONS.md` (D-002, D-003); rationale in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` §10.
+Current decision: `DECISIONS.md` D-017 supersedes D-002 and the APFS-clone portion of D-003. The original Astra review's APFS recommendation is retained as historical reasoning, not the current implementation target.
 
-- Format the T7 as **APFS (Encrypted), case-insensitive** (`diskutil apfs` default). Store the recovery key in the password manager, not on any node.
-- The T7 is **Mac-attached only**. Linux cannot mount encrypted APFS; the Linux drivers for unencrypted APFS are read-only/experimental and must not be used for client data. Linux workers never see the T7 as a block device or a mounted volume. They receive job payloads (files copied by the coordinator) or, for bulk reads, a read-only SMB export from the Mac.
-- Case-insensitive matches the Mac's internal volume, so every Git repository behaves identically on both. A case-sensitive volume breaks Xcode, Adobe, Unity, Steam, and several package managers. If an old Linux-born repository has two files differing only by case, the ingest inventory flags it and it is fixed in Git, not by choosing a filesystem.
-- exFAT is rejected: no permissions, no symlinks/hardlinks (breaks `npm`/`pnpm`/`uv`), no clonefile, no snapshots, no encryption.
-- Never bit-lock the T7 to one machine's Secure Enclave; the APFS passphrase must be a real passphrase so the drive can be unlocked on another Mac after a loss.
+- Keep the existing Samsung T7 as **exFAT**. **Do not reformat it** as part of this project.
+- At-rest access control is provided by the T7's Samsung Magician password/security feature, which the owner has enabled. Store the password in the password manager. The owner unlocks the device before use.
+- The T7 remains primarily **Mac-attached** as the storage host. If it is locked, absent, read-only, or has the wrong configured volume UUID, ingestion exits without modifying source files.
+- exFAT portability is useful, but its limitations are explicit architecture constraints: no APFS clonefile/snapshots and no reliance on POSIX ownership, ACL, symlink, hardlink, xattr, or filesystem-immutability semantics.
+- Active Git development stays on the Mac/internal native filesystem or Linux worker filesystems. Do not run package-manager-heavy working trees directly from the T7.
+- The restic/B2 backup chain remains required. Hardware password protection is access control, not backup.
 
 ## Derived-view primitive
 
-The organized view under `20-clients/`, `10-code/`, etc. is materialized from the catalog using **APFS clones** (`cp -c`, `clonefile(2)`): zero extra space, a separate inode, so editing a file in the view never mutates the original in `00-inbox/legacy-dump/`. Hardlinks are rejected for this reason. Symlinks are acceptable for read-only views but break in Finder-centric workflows.
+The organized view under `20-clients/`, `10-code/`, etc. is derived from the catalog using **catalog-backed references or verified ordinary copies** when a physical view is needed.
 
-After hashing, the legacy dump is locked with `chflags -R uchg` and owner read-only permissions. Nothing in this repository unlocks it; unlocking is a manual step recorded in `90-system/migration-reports/`.
+Rules:
+- never use hardlinks for the organized view;
+- do not call `cp -c` or assume clonefile support;
+- a copy must be treated as a derivative, never as the sole canonical original;
+- dry-run must report the estimated additional disk usage before materializing a large copied view;
+- view regeneration remains idempotent and hash-aware.
+
+After hashing, legacy-dump protection is enforced by checksum manifests, catalog state, backup policy, and application-level refusal to mutate legacy originals. Do not rely on `chflags` or POSIX read-only permissions on exFAT.
 
 ## Catalog placement
 
-The ingest catalog (`90-system/catalog.sqlite`, WAL mode, single writer) lives **on the T7** so it travels with the data and a restore is a file copy. Embedding indexes live beside it. Only the ingest daemon on the Mac writes to it; everything else reads a snapshot copy. See review §10 and §11.
+The ingest catalog (`90-system/catalog.sqlite`, single writer) lives **on the T7** so it travels with the data; per-asset sidecars remain the durable human-readable recovery form. Because the volume is exFAT, the writer must close/checkpoint SQLite cleanly before planned ejects, and the catalog/sidecars must be covered by the backup chain. Embedding indexes live beside it. Only the ingest daemon on the Mac writes to it; everything else reads a snapshot/exported copy. See D-009 and D-017.
 
 ## Code execution rule
 
 Avoid making every Linux node build directly inside a network-mounted T7 repository.
 
-Active development clones live on the Mac's **internal** disk, not on the T7. The T7 holds mirrors (`git clone --mirror`) and workspaces that are not open in an editor. Running an editor, watcher, or package manager against a USB volume is slower and loses work when the cable moves. (This requires freeing the internal disk first; it was measured at 98% full on 2026-09-10.)
+Active development clones live on the Mac's **internal** disk, not on the T7. The T7 may hold exported archives or bare mirrors where tested, but it is not the working filesystem for package-manager-heavy repositories because exFAT lacks native POSIX/symlink semantics. Running an editor, watcher, or package manager against removable USB storage also risks work when the cable moves.
 
 Preferred pattern:
 1. Git remote is source of truth.

@@ -82,3 +82,11 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review Â
 - Relationship to D-004: this permits verified file-level moves during normal ingestion. Bulk wiping/reformatting of a source disk or SD card remains subject to the backup/restore policy in D-004.
 - Revisit trigger: the manual triggers become meaningfully burdensome and telemetry/fault tests show the transactional path has operated safely for at least 30 days.
 
+## D-017 â€” Keep the existing T7 as exFAT with Samsung hardware password protection
+- Status: accepted 2026-09-11 (owner direction; Samsung Magician password/security enabled).
+- Supersedes: D-002 in full and the `clonefile`/APFS-derived-view portion of D-003. D-003's Mac-attached storage-host role otherwise remains.
+- Decision: do **not** reformat the populated Samsung T7. Keep its existing exFAT filesystem and use the T7's Samsung Magician password/security layer for at-rest protection. The owner unlocks the device before use; when locked/unmounted, ingestion must treat the T7 as unavailable and modify no source files.
+- Consequences: exFAT provides broad portability but not APFS clonefile/snapshots or dependable POSIX ownership, ACL, symlink, hardlink, xattr, or filesystem-immutability semantics. Active Git workspaces remain on internal/native filesystems. The organized view uses catalog-backed paths or verified ordinary copies rather than hardlinks or `cp -c`. Legacy-dump integrity is enforced with hashes/manifests, transaction rules, backups, and application policy rather than `chflags`.
+- Catalog consequence: the T7 remains Mac-attached and single-writer for ingestion. SQLite/sidecar state must be checkpointed/closed cleanly before planned disconnects, and the backup chain remains mandatory because exFAT has weaker crash-recovery semantics than APFS.
+- Revisit trigger: the owner obtains another storage device or explicitly chooses a downtime/migration window where all T7 data is independently verified elsewhere and the benefits of APFS outweigh the migration cost.
+
