@@ -137,6 +137,10 @@ Day-to-day Desktop/Documents/Downloads/SD cleanup (PLAN.md Phase 1A, `DECISIONS.
 
 Copy `config/ingest.example.yaml` to `config/ingest.yaml` (ignored by git) and set `t7.volume_uuid` and any registered SD card UUIDs for this machine first. Every destructive move goes through one transactional primitive -- copy to a T7 `.partial` staging file, flush/close, SHA-256 destination verification, atomic finalize + catalog commit, and only then unlink the source -- so a crash, unplug, or hash mismatch always leaves the source intact and the transfer safely retryable. Desktop, Documents, and Downloads only ever run when invoked by hand; SD cards are detected automatically by volume UUID but only a UUID explicitly registered in `config/ingest.yaml` is eligible, and originals still require an explicit `--apply`. `--dry-run` (the default with no flag) never writes anything, including to the catalog. See `docs/13-dump-first-ingestion.md` for the full design and `tests/ingest/` for the fault-injection test suite that proves it.
 
+## Immediate encrypted off-site backup
+
+`angel` is backed up through restic to `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`, an encrypted restic repository in Google Drive—not a Google Drive Desktop mirror. The source is pinned to the same configured T7 volume UUID used by ingestion. Backup commands, restore safety, retention reporting, Keychain use, and the unenabled nightly LaunchAgent template are documented in `docs/09-backup-recovery.md`.
+
 ## Review
 
 The architecture review prompt is `reviews/GPT6-ASTRA-ARCHITECTURE-REVIEW.md`; the resulting review is `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md`. Decisions taken from it are recorded in `DECISIONS.md`; the execution order is `PLAN.md`. Start there before touching hardware.

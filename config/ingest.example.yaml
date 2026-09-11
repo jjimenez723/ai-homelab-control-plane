@@ -91,3 +91,22 @@ media:
     preserve_metadata: true
     preserve_icc_profile: true
     normalize_orientation: true
+
+# Immediate off-site backup (D-018). The source UUID is deliberately inherited
+# from t7.volume_uuid above so this file has one machine-specific identity.
+# The repository is encrypted restic data accessed through rclone; it is not a
+# Google Drive Desktop mirror. Keep OAuth credentials and the Keychain password
+# outside this repository.
+backup:
+  repository: "rclone:gdrive-backup:AI-Homelab-Backups/T7-restic"
+  keychain_service: "ai-homelab-t7-restic"
+  retention:
+    keep_daily: 30
+    keep_weekly: 12
+    keep_monthly: 24
+    keep_yearly: 5
+  # Only incomplete ingestion artifacts are excluded. Originals, catalog,
+  # sidecars, manifests, and derivatives remain protected.
+  exclude_patterns:
+    - "90-system/staging/**"
+    - "**/*.partial"

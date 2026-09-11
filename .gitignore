@@ -38,6 +38,7 @@ extraction/
 work/
 __pycache__/
 .pytest_cache/
+.state/
 *.part
 
 # Common model-weight formats.

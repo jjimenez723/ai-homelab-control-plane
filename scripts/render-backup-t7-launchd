@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Render a per-checkout LaunchAgent without loading/enabling it.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET="${1:-$HOME/Library/LaunchAgents/com.ai-homelab.t7-backup.plist}"
+if [[ -e "$TARGET" ]]; then
+  echo "Refusing to overwrite existing LaunchAgent: $TARGET" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$TARGET")" "$ROOT_DIR/.state/backup-logs"
+sed "s|__REPOSITORY_ROOT__|$ROOT_DIR|g" "$ROOT_DIR/launchd/com.ai-homelab.t7-backup.plist.template" > "$TARGET"
+chmod 600 "$TARGET"
+echo "Rendered but did not load: $TARGET"

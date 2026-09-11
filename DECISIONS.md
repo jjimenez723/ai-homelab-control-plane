@@ -90,3 +90,9 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review Â
 - Catalog consequence: the T7 remains Mac-attached and single-writer for ingestion. SQLite/sidecar state must be checkpointed/closed cleanly before planned disconnects, and the backup chain remains mandatory because exFAT has weaker crash-recovery semantics than APFS.
 - Revisit trigger: the owner obtains another storage device or explicitly chooses a downtime/migration window where all T7 data is independently verified elsewhere and the benefits of APFS outweigh the migration cost.
 
+## D-018 â€” Immediate V0 off-site backup: encrypted restic via rclone to Google Drive
+- Status: proposed 2026-09-11 (implementation PR pending owner OAuth and restore drill).
+- Supersedes: the **immediate-target** portion of D-004 only. D-004's later independent `dell-xeon` append-only repository and Backblaze B2 copy remain desirable separate failure domains.
+- Decision: while the Dell/B2 path is not yet provisioned, `angel` (the Samsung T7) is backed up to the dedicated repository `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`. Restic encrypts, snapshots, and deduplicates data before rclone stores repository objects in Drive. Google Drive Desktop mirroring/sync is not a backup mechanism.
+- Consequence: Drive is off-site but is neither immutable nor append-only. The Mac's dedicated OAuth scope and Keychain-held restic password are still sensitive; a compromised Mac/Drive account could delete repository objects. This does not replace the future append-only Dell copy.
+- Revisit trigger: the Dell append-only repository is operational and has passed a restore drill, or Drive retention/availability/cost no longer meets the requirement.

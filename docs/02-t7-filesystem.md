@@ -114,7 +114,7 @@ Current decision: `DECISIONS.md` D-017 supersedes D-002 and the APFS-clone porti
 - The T7 remains primarily **Mac-attached** as the storage host. If it is locked, absent, read-only, or has the wrong configured volume UUID, ingestion exits without modifying source files.
 - exFAT portability is useful, but its limitations are explicit architecture constraints: no APFS clonefile/snapshots and no reliance on POSIX ownership, ACL, symlink, hardlink, xattr, or filesystem-immutability semantics.
 - Active Git development stays on the Mac/internal native filesystem or Linux worker filesystems. Do not run package-manager-heavy working trees directly from the T7.
-- The restic/B2 backup chain remains required. Hardware password protection is access control, not backup.
+- The D-018 encrypted restic/Google Drive backup remains required now; the D-004 Dell/B2 chain remains the desired later independent backup. Hardware password protection is access control, not backup.
 
 ## Derived-view primitive
 

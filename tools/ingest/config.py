@@ -71,6 +71,22 @@ DEFAULTS: dict[str, Any] = {
             "normalize_orientation": True,
         }
     },
+    "backup": {
+        # This is intentionally constrained in code to the one dedicated
+        # Google Drive repository for this machine. It is not a general
+        # arbitrary-restic-repository setting.
+        "repository": "rclone:gdrive-backup:AI-Homelab-Backups/T7-restic",
+        "keychain_service": "ai-homelab-t7-restic",
+        "retention": {
+            "keep_daily": 30,
+            "keep_weekly": 12,
+            "keep_monthly": 24,
+            "keep_yearly": 5,
+        },
+        # The only default exclusions are incomplete transfer artifacts. Do
+        # not add valuable data classes here without an explicit decision.
+        "exclude_patterns": ["90-system/staging/**", "**/*.partial"],
+    },
 }
 
 
@@ -125,6 +141,22 @@ class SourcesConfig:
 
 
 @dataclass(frozen=True)
+class BackupRetentionConfig:
+    keep_daily: int = 30
+    keep_weekly: int = 12
+    keep_monthly: int = 24
+    keep_yearly: int = 5
+
+
+@dataclass(frozen=True)
+class BackupConfig:
+    repository: str = "rclone:gdrive-backup:AI-Homelab-Backups/T7-restic"
+    keychain_service: str = "ai-homelab-t7-restic"
+    retention: BackupRetentionConfig = field(default_factory=BackupRetentionConfig)
+    exclude_patterns: tuple[str, ...] = ("90-system/staging/**", "**/*.partial")
+
+
+@dataclass(frozen=True)
 class IngestConfig:
     t7: T7Config
     sources: SourcesConfig
@@ -132,6 +164,7 @@ class IngestConfig:
     downloads_watcher_min_settle_seconds: int
     exclusions: ExclusionsConfig
     media: MediaConfig
+    backup: BackupConfig = field(default_factory=BackupConfig)
     config_path: Path | None = None
 
     @property
@@ -206,6 +239,23 @@ def load_config(path: Path | None = None) -> IngestConfig:
         )
     )
 
+    backup_raw = merged["backup"]
+    retention_raw = backup_raw["retention"]
+    retention = BackupRetentionConfig(
+        keep_daily=int(retention_raw["keep_daily"]),
+        keep_weekly=int(retention_raw["keep_weekly"]),
+        keep_monthly=int(retention_raw["keep_monthly"]),
+        keep_yearly=int(retention_raw["keep_yearly"]),
+    )
+    if any(value < 1 for value in (retention.keep_daily, retention.keep_weekly, retention.keep_monthly, retention.keep_yearly)):
+        raise ValueError("backup retention values must each be at least 1")
+    backup = BackupConfig(
+        repository=str(backup_raw["repository"]),
+        keychain_service=str(backup_raw["keychain_service"]),
+        retention=retention,
+        exclude_patterns=tuple(str(pattern) for pattern in backup_raw["exclude_patterns"]),
+    )
+
     return IngestConfig(
         t7=t7,
         sources=sources,
@@ -213,5 +263,6 @@ def load_config(path: Path | None = None) -> IngestConfig:
         downloads_watcher_min_settle_seconds=int(merged["downloads_watcher_min_settle_seconds"]),
         exclusions=exclusions,
         media=media,
+        backup=backup,
         config_path=resolved_path,
     )
