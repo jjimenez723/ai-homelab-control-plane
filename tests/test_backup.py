@@ -102,6 +102,7 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(report["source_uuid"], T7_TEST_UUID)
             self.assertEqual(report["source_bytes"], 5)
             self.assertEqual(report["google_drive_remote"], "ok")
+            self.assertEqual(report["rclone_config_password_command"], "ok")
             self.assertEqual(report["keychain_password_command"], "ok")
             self.assertFalse(any(args[0] == "restic" for args, _ in runner.calls))
 
@@ -131,6 +132,21 @@ class BackupTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, "Keychain item"):
                 service.backup()
             self.assertFalse(any(args[0] == "restic" for args, _ in runner.calls))
+
+    def test_rclone_config_keychain_failure_refuses_remote_access(self):
+        class MissingRcloneKeychainRunner(RecordingRunner):
+            def __call__(self, args, env):  # type: ignore[no-untyped-def]
+                if args[0] == "security" and args[args.index("-s") + 1] == "ai-homelab-rclone-config":
+                    self.calls.append((list(args), dict(env)))
+                    return CommandResult(44)
+                return super().__call__(args, env)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = MissingRcloneKeychainRunner()
+            service, _ = self.make_service(Path(tmp), runner)
+            with self.assertRaisesRegex(BackupError, "ai-homelab-rclone-config"):
+                service.backup()
+            self.assertFalse(any(args[0] == "rclone" for args, _ in runner.calls))
 
     def test_init_does_not_reinitialize_an_existing_repository(self):
         with tempfile.TemporaryDirectory() as tmp:

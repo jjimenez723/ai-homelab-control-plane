@@ -46,6 +46,7 @@ Rules:
 - The dedicated Google Drive repository is `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`; it contains only encrypted restic repository data, never a browsable T7 mirror.
 - The source is pinned by `t7.volume_uuid`, never `/Volumes/T7` or its current Finder name. If Samsung security is locked, the disk is disconnected, or the UUID differs, backup exits without making an empty snapshot.
 - The repository passphrase is held only in macOS Keychain (`ai-homelab-t7-restic`) and read by `RESTIC_PASSWORD_COMMAND`. **Losing it permanently loses access to this backup.** Never place it in Drive, Git, `.env`, config, or logs.
+- If rclone configuration encryption is enabled, its separate passphrase belongs in Keychain (`ai-homelab-rclone-config`) and is supplied through `RCLONE_PASSWORD_COMMAND`; manual and scheduled rclone calls stay noninteractive.
 - Google Drive is not immutable or append-only. It is useful immediate off-site protection, but does not eliminate the later append-only `dell-xeon` restic repository and independent B2 failure domain from D-004.
 - No worker node holds the backup credentials. Workers are never backup sources of record.
 - Run `backup-t7-check` (metadata plus a 5% data subset) regularly; run `backup-t7-check --deep` periodically and record a real restore drill before declaring production readiness.
@@ -84,6 +85,12 @@ Create the repository password directly in macOS Keychain—this command ends in
 
 ```bash
 security add-generic-password -U -a "$USER" -s ai-homelab-t7-restic -w
+```
+
+If you enabled rclone configuration encryption, also run this once and enter the **same rclone configuration password** chosen in `rclone config`:
+
+```bash
+security add-generic-password -U -a "$USER" -s ai-homelab-rclone-config -w
 ```
 
 After the remote and Keychain report are green, run `./scripts/backup-t7-init`, then `./scripts/backup-t7 --preflight`. Review that output and obtain explicit approval before running the first `./scripts/backup-t7` upload.

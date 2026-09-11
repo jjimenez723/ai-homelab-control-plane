@@ -77,6 +77,7 @@ DEFAULTS: dict[str, Any] = {
         # arbitrary-restic-repository setting.
         "repository": "rclone:gdrive-backup:AI-Homelab-Backups/T7-restic",
         "keychain_service": "ai-homelab-t7-restic",
+        "rclone_keychain_service": "ai-homelab-rclone-config",
         "retention": {
             "keep_daily": 30,
             "keep_weekly": 12,
@@ -152,6 +153,7 @@ class BackupRetentionConfig:
 class BackupConfig:
     repository: str = "rclone:gdrive-backup:AI-Homelab-Backups/T7-restic"
     keychain_service: str = "ai-homelab-t7-restic"
+    rclone_keychain_service: str = "ai-homelab-rclone-config"
     retention: BackupRetentionConfig = field(default_factory=BackupRetentionConfig)
     exclude_patterns: tuple[str, ...] = ("90-system/staging/**", "**/*.partial")
 
@@ -252,6 +254,7 @@ def load_config(path: Path | None = None) -> IngestConfig:
     backup = BackupConfig(
         repository=str(backup_raw["repository"]),
         keychain_service=str(backup_raw["keychain_service"]),
+        rclone_keychain_service=str(backup_raw["rclone_keychain_service"]),
         retention=retention,
         exclude_patterns=tuple(str(pattern) for pattern in backup_raw["exclude_patterns"]),
     )

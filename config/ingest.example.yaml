@@ -100,6 +100,7 @@ media:
 backup:
   repository: "rclone:gdrive-backup:AI-Homelab-Backups/T7-restic"
   keychain_service: "ai-homelab-t7-restic"
+  rclone_keychain_service: "ai-homelab-rclone-config"
   retention:
     keep_daily: 30
     keep_weekly: 12

@@ -70,8 +70,11 @@ def validate_backup_config(config: BackupConfig) -> None:
             "backup.repository must be the dedicated Google Drive repository "
             f"{REPOSITORY!r}"
         )
-    if not KEYCHAIN_SERVICE_RE.fullmatch(config.keychain_service):
-        raise BackupError("backup.keychain_service contains unsupported characters")
+    if not all(
+        KEYCHAIN_SERVICE_RE.fullmatch(service)
+        for service in (config.keychain_service, config.rclone_keychain_service)
+    ):
+        raise BackupError("backup Keychain service contains unsupported characters")
 
 
 def resolve_backup_source(config: IngestConfig, prober: VolumeProber) -> BackupSource:
@@ -144,10 +147,17 @@ class BackupService:
         # in an argv element or a repository file.
         return f"security find-generic-password -s {self.config.backup.keychain_service} -w"
 
+    @property
+    def rclone_password_command(self) -> str:
+        return f"security find-generic-password -s {self.config.backup.rclone_keychain_service} -w"
+
     def _env(self) -> dict[str, str]:
         env = dict(os.environ)
         env.pop("RESTIC_PASSWORD", None)
         env["RESTIC_PASSWORD_COMMAND"] = self.password_command
+        # Restic's rclone backend inherits this when it invokes rclone, so
+        # direct validation and scheduled backups remain noninteractive.
+        env["RCLONE_PASSWORD_COMMAND"] = self.rclone_password_command
         return env
 
     def _run(self, args: Sequence[str]) -> CommandResult:
@@ -159,6 +169,7 @@ class BackupService:
 
     def ensure_remote(self) -> None:
         self._require("rclone")
+        self.ensure_rclone_keychain()
         result = self._run(["rclone", "lsd", RCLONE_REMOTE])
         if result.returncode != 0:
             raise BackupError("Google Drive remote gdrive-backup is unavailable or unauthorized")
@@ -171,6 +182,17 @@ class BackupService:
         if result.returncode != 0 or not result.stdout:
             raise BackupError(
                 f"macOS Keychain item {self.config.backup.keychain_service!r} is unavailable; no password was printed"
+            )
+
+    def ensure_rclone_keychain(self) -> None:
+        self._require("security")
+        result = self._run(
+            ["security", "find-generic-password", "-s", self.config.backup.rclone_keychain_service, "-w"]
+        )
+        if result.returncode != 0 or not result.stdout:
+            raise BackupError(
+                "macOS Keychain item "
+                f"{self.config.backup.rclone_keychain_service!r} is unavailable; no password was printed"
             )
 
     def _restic(self, *args: str) -> CommandResult:
@@ -213,6 +235,7 @@ class BackupService:
             "repository": self.config.backup.repository,
             "exclusions": list(self.config.backup.exclude_patterns),
             "google_drive_remote": "ok",
+            "rclone_config_password_command": "ok",
             "keychain_password_command": "ok",
         }
 
