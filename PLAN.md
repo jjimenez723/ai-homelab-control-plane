@@ -15,21 +15,21 @@ Nothing in this phase needs a Dell, a queue, or a model.
 - [ ] Free the Mac's internal disk to ≥ 60 GB (it had 12 GB free on 2026-09-10). APFS at 98% will corrupt snapshots and kill Whisper/LLM runs. Move nothing to the T7 yet; delete caches (`~/Library/Caches`, Xcode DerivedData, `node_modules` graveyards, old simulators).
 - [ ] Buy/allocate a second drive or confirm `dell-xeon` has ≥ 2 TB internal free for the restic repo.
 - [ ] Create a Backblaze B2 bucket with versioning; create an application key **without** `deleteFiles`.
-- [ ] Put the following in the password manager: T7 APFS passphrase (to be created), restic password, B2 key. Print the restic password and store it away from the laptop.
+- [ ] Put the following in the password manager: Samsung T7 security password (hardware password already enabled via Samsung Magician), restic password, B2 key. Print the restic password and store it away from the laptop.
 - [ ] Apply repository settings from review §32 (squash-only, auto-delete branches); install `scripts/git-hooks/pre-push`.
 - [ ] Decide GitHub Pro (rulesets on a private repo) — yes/no recorded in DECISIONS.md.
 - [ ] Create the `quant` macOS user; move Kronos work there (D-011). Verify the primary user can no longer read `~quant`.
 
 **Gate 0:** `df -h /System/Volumes/Data` shows ≥ 60 GB free; B2 bucket + append-only key exist; `git push origin main` from the Mac is refused by the hook; `ls ~quant` from the primary user is denied.
 
-## Phase 1 — T7 format, dump, inventory, hash, lock (days 7–21)
+## Phase 1 — T7 confirm, bootstrap, dump, inventory, hash (days 7–21)
 
-- [ ] Format T7: `diskutil apfs createContainer` → APFS Encrypted, case-insensitive (D-002). Record serial, capacity, and measured throughput (`dd`/`fio`) in `docs/01-hardware-inventory.md`.
+- [ ] **Do not reformat the T7.** Confirm the existing filesystem remains exFAT and Samsung Magician password/security is enabled (D-017). Record serial, capacity, `VolumeUUID`, filesystem, security/unlock behavior, and measured throughput (`dd`/`fio`) in `docs/01-hardware-inventory.md`.
 - [ ] `scripts/bootstrap-t7.sh /Volumes/T7`.
 - [ ] Exclude the T7 from Spotlight (`mdutil -i off`) and from Time Machine.
-- [ ] Copy (never move) legacy sources into `00-inbox/legacy-dump/<source>/` with `rsync -aHAX --info=progress2`; keep a per-source `rsync` log in `90-system/migration-reports/`.
+- [ ] Copy (never move) legacy sources into `00-inbox/legacy-dump/<source>/` using an exFAT-compatible copy path that preserves file bytes, names, timestamps where supported, and a per-source transfer log in `90-system/migration-reports/`. Do not rely on POSIX ownership, ACL, symlink, hardlink, or xattr preservation on exFAT.
 - [ ] Build `tools/ingest/inventory.py`: walk, stat, sha256 (one pass, ≥ 700 MB/s measured), MIME sniff, `.git` detection with remotes/dirty/unpushed/stash state, write `90-system/catalog.sqlite` (schema in review §11).
-- [ ] `chflags -R uchg` the dump after the inventory verifies file count + total bytes against the rsync log.
+- [ ] After inventory verifies file count + total bytes, write an immutable checksum manifest and enforce legacy-dump protection in the ingest/application layer. Do not rely on `chflags`, POSIX permissions, APFS snapshots, or filesystem immutability on exFAT.
 - [ ] First restic snapshot of `00-inbox/` to `dell-xeon` (or, if the Dell is not ready, to the second drive) and `restic check`.
 - [ ] Produce `90-system/migration-reports/unpushed-repos.md` — the one list the owner must act on manually (unpushed commits cannot be inferred).
 
@@ -69,7 +69,7 @@ This is the normal day-to-day cleanup path after the one-time legacy dump. It is
 
 - [ ] Pick one small client shoot (≤ 500 files). Run metadata → keyframes → VLM tags → canonical-name proposal → embeddings.
 - [ ] Human-label 100 assets as the canary set; store in `corrections` table.
-- [ ] Materialize the derived view with APFS clones (`cp -c`) into `20-clients/<client>/…`; `--dry-run` first; abort if > 20% of proposals change between runs.
+- [ ] Materialize the derived view only when useful using verified ordinary copies or catalog-backed references compatible with exFAT; never use hardlinks and do not assume APFS clonefile support. `--dry-run` first; report additional disk usage; abort if > 20% of proposals change between runs.
 - [ ] Search CLI: `tools/search "vertical countertop install clips"` returns ranked assets from sqlite-vec.
 
 **Gate 3:** precision of client/project inference ≥ 95% and of tags ≥ 80% on the canary set; a deliberate model swap to a worse model is caught by the canary diff; view regeneration is idempotent (second run makes zero changes).
