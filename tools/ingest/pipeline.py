@@ -412,13 +412,20 @@ def _process_file(
         protected_extensions=config.naming.protected_extensions,
         vocabulary=config.naming.vocabulary,
     )
+    # A successful rename changes filesystem ctime even though it does not
+    # change the file's bytes. Refresh last_seen_at after our own mutation so
+    # the ctime cache guard does not mistake that rename for a later content
+    # rewrite on the next scan. A real rewrite after this point still advances
+    # ctime beyond this timestamp and forces a full re-read.
+    post_naming_now = now_iso() if naming.renamed else now
     ledger.update_local_file(
         observed.local_file_id,
-        now=now,
+        now=post_naming_now,
         name_quality=naming.name_quality,
         naming_state=naming.naming_state,
         current_path=str(naming.path),
         current_filename=naming.path.name,
+        last_seen_at=post_naming_now,
     )
     current_path = naming.path
 
