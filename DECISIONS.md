@@ -180,3 +180,12 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review Â
 - Migration: catalog migration 4 atomically rebuilds `assets` to remove the legacy `UNIQUE(source_volume_id, original_path)` constraint while preserving all existing asset IDs and rows. Existing IDs are not rewritten; new IDs use the content-aware scheme.
 - Consequence: a path can be reused safely, exact duplicates remain auditable as separate occurrences, and an in-place rewrite or pathname swap during ingestion cannot inherit the prior file's deletion authority.
 - Revisit trigger: the catalog later needs a first-class source-occurrence table separate from `assets` for multi-location lifecycle tracking; if so, migrate provenance there without changing `blobs.sha256` as content identity.
+
+## D-028 â€” Different bytes never inherit local decision authority
+- Status: accepted 2026-09-12.
+- Context: the Mac-side local identity is based on `(volume, device, inode)` so it survives a rename. An inode can also be reused, and applications can rewrite an existing inode in place. Those two cases cannot be distinguished reliably after the bytes have changed.
+- Decision: once a previously observed local identity has a different SHA-256, it starts a new ledger generation even when the inode and pathname are unchanged. Earlier naming/classification rows remain as audit history but are out of scope for the new bytes.
+- Decision: a generation reset has no filesystem authority. It never renames or deletes the path by itself. A useful human-authored filename already present on disk therefore remains present, while prior model decisions and prior keep/ignore authority are re-evaluated for the changed content.
+- Decision: the hourly hash cache requires unchanged path, size, mtime, and ctime. Restoring an old mtime after an in-place rewrite does not permit reuse of the old SHA-256 because ctime invalidates the cache.
+- Consequence: same-path inode reuse and same-size in-place rewrites cannot silently inherit stale naming or retention state.
+- Revisit trigger: a stronger platform file-generation identifier becomes available and is proven stable across renames but changes on replacement, allowing edits and replacements to be distinguished without trusting path or timestamps.
