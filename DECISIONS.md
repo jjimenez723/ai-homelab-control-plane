@@ -222,3 +222,10 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review Â
 - Decision: `file_evidence` upserts rather than appending. That is not a violation of the append-only rule governing `naming_history` and `classification_runs`: the key already encodes every input that could make the answer different, so a second write under the same id is a re-derivation of the same question, not a competing judgment.
 - Consequence: the hourly run is cheap on a folder that has not changed, a rename costs nothing, and stale perception cannot be attributed to bytes it never described.
 - Revisit trigger: evidence becomes an input to a decision (see D-029), at which point a cache hit is load-bearing for that decision and the key may need to include the interpretation layer's version as well.
+
+## D-032 â€” Tesseract is a validated machine-local OCR option, not a global default
+- Status: accepted 2026-09-12 (real Downloads and screenshots validation).
+- Context: `NullOCRBackend` is the repository-safe default because an OCR engine is machine-local optional capability, not a repository prerequisite. The owner's Mac validated Tesseract 5.5.3 against the initial real corpus: seven `tesseract-ocr` evidence records were produced, including useful visible text from an encrypted PDF whose embedded-text extractor correctly declined decryption.
+- Decision: retain `NullOCRBackend` as the default. The owner's gitignored machine-local configuration may set `evidence.ocr.backend: tesseract`; Tesseract is not a mandatory global default.
+- Consequence: OCR remains non-authoritative FACTS. It does not feed naming, triage, ingestion, moves, or deletion; the validated result records perception capability, not document understanding or decision authority.
+- Revisit trigger: a repository-wide OCR default is proposed, at which point its installation, portability, corpus coverage, privacy, and failure modes require an explicit decision.

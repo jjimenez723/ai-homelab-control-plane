@@ -4,7 +4,7 @@
 
 Read this before changing anything under `tools/ingest/evidence/`. As with the naming layer, several things that look like incidental structure are load-bearing safety properties.
 
-Decisions of record: D-029 (evidence is perception, never authority), D-030 (extracted text stays on the Mac), D-031 (evidence is cached by content, never by path).
+Decisions of record: D-029 (evidence is perception, never authority), D-030 (extracted text stays on the Mac), D-031 (evidence is cached by content, never by path), D-032 (Tesseract is a validated machine-local option, not a global default).
 
 ## The one thing to understand first
 
@@ -204,6 +204,7 @@ One deliberate divergence: degenerate geometry (fewer than four points, negative
 |---|---|---|
 | `pypdfium2` | renders PDF pages to pixels so a scanned document can be OCRed at all | `pdfium_available()` is False, rasterization returns empty plus `backend_unavailable`, nothing raises |
 | `pypdf` (already present) | PDF embedded text | PDFs route to OCR or produce nothing |
+| `fonttools` | lets pypdf fully parse CFF/Type1 font encodings encountered in the real corpus | affected embedded text may be incomplete and pypdf warns |
 | `pillow` (already present) | image decode, preprocessing, PNG encode | the image path is inert |
 
 `pypdfium2` was chosen over PyMuPDF deliberately: PyMuPDF renders PDF pages just as well but is AGPL-licensed, while pypdfium2 wraps Google's PDFium under Apache-2.0/BSD-3-Clause with prebuilt wheels and no system library dependency.
@@ -243,6 +244,26 @@ evidence:
 ```
 
 `triage.auto_ingest` and `automation.enabled` are untouched by this feature and both remain `false` by default. Turning evidence on does not turn anything else on.
+
+## Real-world Phase 1C acceptance validation (2026-09-12)
+
+The owner's initial dry-run corpus exercised 29 Downloads and 3 screenshots with no owner-file or Angel-volume mutation. Downloads produced 29 evaluations, one existing rename proposal, 17 Angel candidates, and 12 review items; screenshots produced three existing rename proposals and three review items. `triage.auto_ingest` and `automation.enabled` remained `false` throughout.
+
+With real OCR enabled in the owner's gitignored machine-local configuration (`evidence.ocr.backend: tesseract`), Tesseract 5.5.3 produced seven `tesseract-ocr` evidence records. The post-validation corpus contained 35 evidence records: 34 `ok` and one explicit failure, across native text, heuristic visual evidence, and OCR. This validates the optional backend on that Mac; `NullOCRBackend` remains the repository-safe default (D-032).
+
+One acceptance case demonstrated graceful fallback without concealing failure. For `CP_575_G (1).pdf`, embedded-text extraction recorded `status: failed` with `unsupported encrypted pdf; decryption not attempted`. Rasterization and Tesseract then independently produced 29 OCR blocks at approximately 0.93 mean confidence, recovering readable visible content sufficient to identify the document as an IRS CP575G EIN assignment notice. The native-extraction failure remains recorded; OCR did not convert it into native-text success.
+
+This is a FACTS / PERCEPTION result, not an interpretation or decision result:
+
+```text
+FACTS / PERCEPTION         COMPLETE FOR PHASE 1C
+    ↓
+INTERPRETATION             NOT IMPLEMENTED
+    ↓
+DECISIONS                  EXIST, BUT DO NOT CONSUME EVIDENCE YET
+```
+
+The existing `2026-08-11_notice.pdf` rename proposal for that file predated Tesseract. OCR later supported that the generic description fit the visible document, but did not produce or influence the filename. No evidence feeds naming, triage, ingestion, moves, or deletion.
 
 ## What comes next, and what has to be true first
 

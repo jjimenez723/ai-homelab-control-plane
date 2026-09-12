@@ -6,6 +6,11 @@ pillow-heif==1.7.0
 # a generic name, so it is a declared dependency rather than an optional one.
 # `tools/ingest/media/probe.py` still degrades gracefully if it is missing.
 pypdf==6.18.1
+# pypdf can encounter CFF/Type1 fonts. Without fontTools some font encodings
+# cannot be fully parsed; that occurred in the owner's real corpus, making
+# this a demonstrated ingestion dependency rather than speculative optional
+# functionality.
+fonttools==4.65.0
 # Renders PDF pages to pixels so a scanned document (one with no usable
 # embedded text layer) can be OCRed or shown to a vision backend at all --
 # `tools/ingest/evidence/raster.py` is dead without it, and scanned-PDF OCR
