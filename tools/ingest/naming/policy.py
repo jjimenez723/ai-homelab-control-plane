@@ -179,7 +179,13 @@ def _link_rename(source: Path, target: Path) -> bool:
     names. That is recoverable and visible; an overwritten file is neither.
     """
     try:
-        os.link(source, target)
+        # `follow_symlinks=True` is the default, and it is the wrong default
+        # here: handed a symlink it hardlinks the *target*, so a link planted in
+        # Downloads would pull a file from outside the source root into it and
+        # then unlink the symlink the owner had. The scanner already refuses
+        # symlinks; this is the same rule at the moment of mutation, where the
+        # check cannot be raced.
+        os.link(source, target, follow_symlinks=False)
     except FileExistsError:
         raise
     except OSError as exc:
@@ -241,6 +247,13 @@ def safe_rename(source: Path, target_name: str, *, disambiguator: str) -> Path:
     """
     if "/" in target_name or "\\" in target_name or target_name in {".", ".."}:
         raise NamePolicyError(f"unsafe rename target: {target_name!r}")
+
+    # Re-checked here rather than trusting the scan: discovery, settling,
+    # hashing and probing all happen first, and anything can replace a file
+    # with a symlink in that window. This is the last moment before mutation,
+    # so it is the only place the answer cannot go stale.
+    if source.is_symlink():
+        raise NamePolicyError(f"refusing to rename a symlink: {source}")
 
     directory = source.parent
     resolved_name = collision_free_name(directory, target_name, disambiguator=disambiguator)
