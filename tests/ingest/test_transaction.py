@@ -20,6 +20,7 @@ from tools.ingest.catalog import (
     STATE_COMMITTED,
     STATE_FAILED_ERROR,
     STATE_FAILED_HASH_MISMATCH,
+    STATE_NEEDS_REVIEW,
     STATE_SOURCE_UNLINKED,
     STATE_VERIFIED,
     Catalog,
@@ -141,7 +142,7 @@ class InterruptedCopyTests(TransactionTestCase):
 
         from tools.ingest.identity import asset_id_for
 
-        asset_id = asset_id_for(planned.source_volume_id, planned.rel_path)
+        asset_id = asset_id_for(planned.source_volume_id, planned.rel_path, source_hash)
         self.catalog.ensure_pending_asset(
             asset_id,
             source_volume_id=planned.source_volume_id,
@@ -216,7 +217,7 @@ class DatabaseFailureTests(TransactionTestCase):
         # No asset row claims verified/committed/source_unlinked.
         from tools.ingest.identity import asset_id_for
 
-        asset = self.catalog.get_asset(asset_id_for(SOURCE_VOLUME_ID, "notes.txt"))
+        asset = self.catalog.get_asset(asset_id_for(SOURCE_VOLUME_ID, "notes.txt", source_hash))
         self.assertNotIn(asset.row["transfer_state"], (STATE_VERIFIED, STATE_COMMITTED, STATE_SOURCE_UNLINKED))
 
     def test_retry_after_database_failure_before_commit_succeeds(self):
@@ -373,6 +374,87 @@ class DestinationCollisionTests(TransactionTestCase):
         self.assertEqual(
             self.catalog.get_asset_id_by_final_path(str(second.final_path)), second.asset_id
         )
+
+
+class ReusedSourcePathTests(TransactionTestCase):
+    def test_same_path_with_different_bytes_creates_a_new_asset(self):
+        source = self.make_source("invoice.pdf", b"first invoice")
+        first_hash = sha256_file(source)
+        first = self.run_transfer(self.planned(source))
+
+        self.assertTrue(first.success)
+        self.assertFalse(source.exists())
+        self.assertEqual(sha256_file(first.final_path), first_hash)
+
+        replacement = self.make_source("invoice.pdf", b"second unrelated invoice")
+        second_hash = sha256_file(replacement)
+        second = self.run_transfer(self.planned(replacement))
+
+        self.assertTrue(second.success)
+        self.assertEqual(second.state, STATE_SOURCE_UNLINKED)
+        self.assertNotEqual(first.asset_id, second.asset_id)
+        self.assertNotEqual(first.final_path, second.final_path)
+        self.assertEqual(sha256_file(first.final_path), first_hash)
+        self.assertEqual(sha256_file(second.final_path), second_hash)
+        self.assertFalse(replacement.exists())
+
+        rows = self.catalog._conn.execute(
+            """
+            SELECT asset_id, sha256 FROM assets
+            WHERE source_volume_id = ? AND original_path = ?
+            ORDER BY created_at, rowid
+            """,
+            (SOURCE_VOLUME_ID, "invoice.pdf"),
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["sha256"] for row in rows}, {first_hash, second_hash})
+
+    def test_same_content_at_different_paths_keeps_distinct_provenance(self):
+        first_source = self.make_source("a/report.pdf", b"identical report")
+        second_source = self.make_source("b/report.pdf", b"identical report")
+        expected_hash = sha256_file(first_source)
+
+        first = self.run_transfer(self.planned(first_source, rel_path="a/report.pdf"))
+        second = self.run_transfer(self.planned(second_source, rel_path="b/report.pdf"))
+
+        self.assertTrue(first.success and second.success)
+        self.assertNotEqual(first.asset_id, second.asset_id)
+        self.assertNotEqual(first.final_path, second.final_path)
+        self.assertEqual(
+            self.catalog.get_asset(first.asset_id).row["sha256"],
+            self.catalog.get_asset(second.asset_id).row["sha256"],
+        )
+        self.assertEqual(self.catalog.get_asset(first.asset_id).row["sha256"], expected_hash)
+
+    def test_source_replaced_during_copy_is_not_deleted(self):
+        original = os.urandom(2 * 1024 * 1024)
+        replacement_bytes = b"replacement that was never copied"
+        source = self.make_source("mutable.bin", original)
+        original_hash = sha256_file(source)
+        replaced = False
+
+        def replace_source(written: int, total: int) -> None:
+            nonlocal replaced
+            if not replaced and written < total:
+                swap = source.with_name("swap.tmp")
+                swap.write_bytes(replacement_bytes)
+                os.replace(swap, source)
+                replaced = True
+
+        outcome = self.run_transfer(
+            self.planned(source),
+            hooks=TransferFaultHooks(mid_copy=replace_source),
+        )
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.state, STATE_NEEDS_REVIEW)
+        self.assertTrue(source.exists())
+        self.assertEqual(source.read_bytes(), replacement_bytes)
+        self.assertIsNotNone(outcome.final_path)
+        self.assertEqual(sha256_file(outcome.final_path), original_hash)
+
+        asset = self.catalog.get_asset(outcome.asset_id)
+        self.assertEqual(asset.row["error_state"], "source_identity_mismatch")
 
 
 class SourceUnlinkFailureTests(TransactionTestCase):
