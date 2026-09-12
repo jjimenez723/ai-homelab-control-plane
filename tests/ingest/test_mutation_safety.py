@@ -274,3 +274,106 @@ class DevStorageRootTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceIdentityTests(unittest.TestCase):
+    """The source must be the file the catalog row is actually about.
+
+    Asset identity is derived from (source volume, relative path). Two
+    different files can therefore share one row over time -- `invoice.pdf`
+    downloaded twice, or two same-day screenshots that the namer gives the same
+    generated name. Verifying only the *destination* on resume is not enough:
+    it proves the recorded bytes arrived, not that the file now sitting at the
+    source path is the one they came from.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.root = Path(self._tmpdir.name)
+        self.desktop = self.root / "Desktop"
+        self.t7 = self.root / "T7"
+        self.t7.mkdir()
+        self.config = build_config(desktop=self.desktop, t7_root=self.t7, settle_seconds=1)
+        self.resolved_t7 = make_resolved_t7(self.config)
+        self.catalog = Catalog(self.resolved_t7.catalog_path)
+        self.addCleanup(self.catalog.close)
+
+    def _planned(self, source: Path) -> PlannedTransfer:
+        return PlannedTransfer(
+            source_path=source, rel_path=source.name,
+            source_volume_id=SOURCE_VOLUME_ID, source_class="desktop",
+        )
+
+    def _transfer(self, planned, **kwargs):
+        return transfer_file(self.catalog, planned, self.resolved_t7, settle_seconds=1, **kwargs)
+
+    def _commit_without_unlinking(self, path: Path):
+        from tools.ingest.transaction import TransferFaultHooks
+
+        outcome = self._transfer(
+            self._planned(path),
+            hooks=TransferFaultHooks(before_unlink=lambda: (_ for _ in ()).throw(OSError("locked"))),
+        )
+        self.assertEqual(outcome.state, STATE_COMMITTED)
+        self.assertTrue(path.exists())
+        return outcome
+
+    def test_a_different_file_at_a_committed_path_is_never_unlinked(self):
+        """No crash needed: one failed unlink is the whole precondition."""
+        first = write_file(self.desktop / "invoice.pdf", b"the real invoice" * 200)
+        self._commit_without_unlinking(first)
+
+        first.unlink()  # the owner dealt with it themselves
+        second = write_file(self.desktop / "invoice.pdf", b"an entirely different document" * 200)
+        expected = sha256_file(second)
+
+        outcome = self._transfer(self._planned(second))
+
+        self.assertTrue(second.exists(), "a file the catalog has never seen must not be deleted")
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.state, STATE_NEEDS_REVIEW)
+        self.assertEqual(sha256_file(second), expected)
+
+    def test_the_archived_file_is_not_overwritten_either(self):
+        """Refusing must not swing the other way and clobber what is on Angel."""
+        first = write_file(self.desktop / "report.pdf", b"the archived report" * 200)
+        archived = sha256_file(first)
+        outcome = self._commit_without_unlinking(first)
+        final_path = Path(outcome.final_path)
+
+        first.unlink()
+        second = write_file(self.desktop / "report.pdf", b"a newer unrelated report" * 200)
+        self._transfer(self._planned(second))
+
+        self.assertEqual(sha256_file(final_path), archived, "the archived asset must survive untouched")
+        self.assertTrue(second.exists())
+
+    def test_a_new_file_at_a_completed_path_is_not_silently_skipped(self):
+        """Reporting success for a file that was never copied loses it quietly.
+
+        Once `scan.pdf` has been ingested, a later different `scan.pdf` used to
+        return success with no destination -- so it was neither archived nor
+        reported, just invisible.
+        """
+        first = write_file(self.desktop / "scan.pdf", b"the first scan" * 200)
+        self.assertEqual(self._transfer(self._planned(first)).state, STATE_SOURCE_UNLINKED)
+        self.assertFalse(first.exists())
+
+        second = write_file(self.desktop / "scan.pdf", b"a different scan entirely" * 200)
+        outcome = self._transfer(self._planned(second))
+
+        self.assertTrue(second.exists())
+        self.assertFalse(outcome.success, "a file that was never copied must not report success")
+        self.assertEqual(outcome.state, STATE_NEEDS_REVIEW)
+
+    def test_the_same_file_reappearing_unchanged_still_resumes_normally(self):
+        """The guard must not break the ordinary retry it sits in front of."""
+        source = write_file(self.desktop / "photo.jpg", b"unchanged bytes" * 200)
+        self._commit_without_unlinking(source)
+
+        outcome = self._transfer(self._planned(source))
+
+        self.assertEqual(outcome.state, STATE_SOURCE_UNLINKED)
+        self.assertTrue(outcome.success)
+        self.assertFalse(source.exists(), "the genuine resume must still complete")
