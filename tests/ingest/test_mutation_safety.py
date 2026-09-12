@@ -377,3 +377,79 @@ class SourceIdentityTests(unittest.TestCase):
         self.assertEqual(outcome.state, STATE_SOURCE_UNLINKED)
         self.assertTrue(outcome.success)
         self.assertFalse(source.exists(), "the genuine resume must still complete")
+
+
+class SourceIdentityAtUnlinkTests(ResumeVerificationTests):
+    """`_finish_unlink` is the only function that removes a user's file, so it
+    re-proves its own precondition rather than trusting the caller.
+
+    Both findings here came from an adversarial review of this branch. Neither
+    needs a crash: one failed unlink is enough to set up the first, and a
+    writer that preserves mtime is enough for the second.
+    """
+
+    def test_a_verified_resume_will_not_delete_a_different_file_at_the_same_path(self):
+        """The `verified` branch verified the staging partial and the
+        destination, and nothing at all about the source."""
+        from tools.ingest.transaction import TransferFaultHooks
+
+        first = write_file(self.desktop / "invoice.pdf", b"FIRST invoice" * 500)
+        planned = self._planned(first)
+
+        with self.assertRaises(RuntimeError):
+            self._transfer(
+                planned,
+                hooks=TransferFaultHooks(
+                    before_finalize_rename=lambda: (_ for _ in ()).throw(RuntimeError("crash after verify"))
+                ),
+            )
+        from tools.ingest.identity import asset_id_for
+
+        asset_id = asset_id_for(SOURCE_VOLUME_ID, "invoice.pdf")
+        self.assertEqual(self.catalog.get_asset(asset_id).row["transfer_state"], STATE_VERIFIED)
+
+        # The owner deals with that file; later an unrelated invoice takes the name.
+        first.unlink()
+        second = write_file(self.desktop / "invoice.pdf", b"SECOND, entirely different invoice" * 500)
+        expected = sha256_file(second)
+
+        resumed = self._transfer(self._planned(second))
+
+        self.assertTrue(second.exists(), "a file that was never copied must not be deleted")
+        self.assertEqual(sha256_file(second), expected)
+        self.assertNotEqual(resumed.state, STATE_SOURCE_UNLINKED)
+
+    def test_a_source_that_grows_after_it_was_read_is_not_deleted(self):
+        """A writer that preserves mtime -- `curl -R`, `rsync -a`, a sync client
+        -- makes a half-written file look settled. Both hashes then agree on
+        the truncated prefix, and the completed file would be unlinked."""
+        import os
+
+        source = write_file(self.desktop / "big-download.zip", b"first chunk" * 100)
+
+        def resume_the_download() -> None:
+            stat = source.stat()
+            with open(source, "ab") as handle:
+                handle.write(b"the rest of the download" * 500)
+            # The writer preserves the original timestamp, as several do.
+            os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+        from tools.ingest.transaction import TransferFaultHooks
+
+        # The window is between reading the bytes and deleting the source, so
+        # the writer resumes there rather than at the unlink itself.
+        outcome = self._transfer(
+            self._planned(source), hooks=TransferFaultHooks(before_final_commit=resume_the_download)
+        )
+
+        self.assertTrue(source.exists(), "the completed download must survive")
+        self.assertNotEqual(outcome.state, STATE_SOURCE_UNLINKED)
+        self.assertIn("changed after it was read", (outcome.error_message or ""))
+
+    def test_an_unchanged_source_is_still_deleted_normally(self):
+        """The guard must not break the ordinary successful case."""
+        source = write_file(self.desktop / "ordinary-report.pdf", b"content" * 500)
+        outcome = self._transfer(self._planned(source))
+        self.assertEqual(outcome.state, STATE_SOURCE_UNLINKED)
+        self.assertFalse(source.exists())
+        self.assertTrue(Path(outcome.final_path).exists())
