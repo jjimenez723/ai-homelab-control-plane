@@ -8,7 +8,8 @@ folder, or the real Angel volume.**
 Nine things get demonstrated, each separately:
 
 1. a badly named screenshot is renamed but **not** selected for Angel;
-2. a badly named screenshot is renamed **and** selected for Angel;
+2. a badly named screenshot is renamed **and**, once you say so, selected
+   for Angel;
 3. a useful existing filename is left alone;
 4. a uselessly named image gets a meaningful name even though it is not kept;
 5. an installer in Downloads is ignored and not moved;
@@ -203,11 +204,12 @@ ls "$DRILL/Downloads"
 * **6** — the PDF is now on the T7, its SHA-256 matches what you recorded, and
   it is gone from `Downloads/`. The source was removed only after the copy was
   hash-verified and the catalog committed.
-* **2** — a screenshot reaching `ingest` lands the same way. In this drill both
-  screenshots stay in `review`, because deciding whether a screenshot is a
-  disposable UI state or a durable design reference needs OCR and image
-  understanding, which this phase deliberately does not build. To see the
-  ingest path for a screenshot explicitly, force it:
+* **2** — see the next section. Both screenshots land in `review`, because
+  telling a disposable UI state from a durable design reference needs OCR and
+  image understanding, which this phase deliberately does not build. The system
+  does not guess; it asks you.
+
+To see what it decided and why:
 
 ```bash
 .venv/bin/python - <<'PY'
@@ -226,6 +228,40 @@ PY
 
 The reason string is the point: the system says *why* it will not decide, and
 leaves the file alone rather than guessing.
+
+---
+
+## 3a. You decide — demonstration 2
+
+`review` is a queue, not a list. A screenshot the system could not judge is one
+*you* can, and `keep` is how you say so. Turn auto-ingest back off first, to
+show this does not depend on it:
+
+```bash
+sed -i '' 's/  auto_ingest: true/  auto_ingest: false/' "$DRILL/ingest.yaml"
+
+SHOT="$DRILL/Screenshots/2026-09-12_screen-capture-2560x1440.png"
+shasum -a 256 "$SHOT"
+organize keep "$SHOT" --reason "client feedback on the kitchen layout"
+organize triage all --apply
+```
+
+Check:
+
+```bash
+ls "$DRILL/Screenshots"
+find "$DRILL/T7/00-inbox" -type f
+shasum -a 256 "$DRILL/T7/00-inbox/organized/screenshots/"*.png
+```
+
+* **2** — the screenshot you renamed in step 2 is now on the T7 under that same
+  generated name, its SHA-256 matches what you recorded, and it is gone from
+  `Screenshots/`. It moved because *you* said so, through the same verified
+  transfer path, with `auto_ingest` off.
+
+`organize ignore PATH` is the mirror image and is worth trying too: it marks a
+file as not-for-Angel, and the file **stays exactly where it is**. Ignoring is
+never deleting.
 
 ---
 
