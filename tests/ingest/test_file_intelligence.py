@@ -705,6 +705,40 @@ class OwnerDecisionTests(FileIntelligenceTestCase):
             self.assertEqual(report.sources[0].outcomes[0].retention, RETENTION_IGNORE)
             self.assertTrue(document.exists())
 
+    def test_owner_decision_order_does_not_depend_on_wall_clock(self):
+        """Append order is authority order even if timestamps move backwards."""
+        shot = make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(2560, 1440))
+        report = self.run_pipeline(targets=("screenshots",), apply=False)
+        local_file_id = report.sources[0].outcomes[0].local_file_id
+
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            row = ledger.get_local_file(local_file_id)
+            ledger.append_classification(
+                {
+                    "local_file_id": local_file_id,
+                    "asset_id": None,
+                    "source_volume_id": row["source_volume_id"],
+                    "source_class": row["source_class"],
+                    "sha256": row["sha256"],
+                    "recommendation": RETENTION_INGEST,
+                    "confidence": 1.0,
+                    "reason": "owner decision with a skewed clock",
+                    "model": "human",
+                    "model_version": "-",
+                    "policy_outcome": RETENTION_INGEST,
+                    "human_state": "decided",
+                    "human_corrected": 1,
+                    "created_at": "2000-01-01T00:00:00+00:00",
+                }
+            )
+            runs = ledger.classification_runs(local_file_id)
+            latest = ledger.latest_classification(local_file_id)
+
+        self.assertEqual(runs[-1]["recommendation"], RETENTION_INGEST)
+        self.assertEqual(runs[-1]["human_corrected"], 1)
+        self.assertEqual(latest["recommendation"], RETENTION_INGEST)
+        self.assertEqual(latest["human_corrected"], 1)
+
     def test_deciding_on_an_untracked_file_is_refused_rather_than_guessed(self):
         stray = make_blob(self.downloads / "never-scanned.pdf", b"%PDF")
         self.run_pipeline(targets=("screenshots",), apply=False)  # creates the ledger, not this row
