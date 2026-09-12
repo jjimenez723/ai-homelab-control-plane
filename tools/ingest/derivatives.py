@@ -18,6 +18,34 @@ from tools.ingest.t7 import ResolvedT7
 HEIC_TO_JPEG_KIND = "heic_to_jpeg"
 
 
+def _resolve_derivative_path(catalog: Catalog, parent_final_path: Path, child_asset_id: str) -> tuple[Path, bool]:
+    """Pick a destination for the JPEG derivative that belongs to nobody else.
+
+    `photo.heic` wants to write `photo.jpg`, but an unrelated `photo.jpg` from
+    the same folder is an entirely ordinary thing to have ingested -- a phone
+    shooting HEIC alongside an exported JPEG. Overwriting it destroyed a file
+    whose Mac original the pipeline had already deleted.
+
+    So the naive `with_suffix('.jpg')` is only used when it is free, or when
+    the catalog says this derivative already owns it (a regeneration). Anything
+    else gets the same `__<id8>` disambiguation the transfer primitive uses, so
+    the two paths behave alike. Returns the path and whether overwriting it is
+    this derivative reclaiming its own output.
+    """
+    base = parent_final_path.with_suffix(".jpg")
+    disambiguated = base.parent / f"{base.stem}__{child_asset_id[:8]}{base.suffix}"
+    for candidate in (base, disambiguated):
+        owner = catalog.get_asset_id_by_final_path(str(candidate))
+        if owner == child_asset_id:
+            return candidate, True  # our own previous output; regenerating it is fine
+        if owner is None and not candidate.exists():
+            return candidate, False
+    # Both candidates belong to something else. Hand back the occupied path
+    # with no permission to replace it: the converter then records a failure
+    # rather than destroying a file, and the verified original is untouched.
+    return disambiguated, False
+
+
 def maybe_generate_heic_derivative(
     catalog: Catalog,
     resolved_t7: ResolvedT7,
@@ -36,7 +64,7 @@ def maybe_generate_heic_derivative(
         return None  # idempotent: never re-encode, never produce photo-2.jpg
 
     child_asset_id = derivative_asset_id_for(parent_asset_id, HEIC_TO_JPEG_KIND)
-    output_path = parent_final_path.with_suffix(".jpg")
+    output_path, may_replace = _resolve_derivative_path(catalog, parent_final_path, child_asset_id)
 
     options = HeicToJpegOptions(
         jpeg_quality=config.jpeg_quality,
@@ -44,7 +72,7 @@ def maybe_generate_heic_derivative(
         preserve_icc_profile=config.preserve_icc_profile,
         normalize_orientation=config.normalize_orientation,
     )
-    result = convert_heic_to_jpeg(parent_final_path, output_path, options)
+    result = convert_heic_to_jpeg(parent_final_path, output_path, options, allow_replace=may_replace)
     if result.success and (result.sha256 is None or result.size is None or result.output_path is None):
         # Defensive: a converter must never claim success without a complete
         # result. Treat this as a failure rather than crash the batch.

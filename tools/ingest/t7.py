@@ -35,18 +35,36 @@ def _check_writable(root: Path) -> None:
         raise VolumeError(f"T7 root is not writable (read-only or locked): {root}")
 
 
-def resolve_t7(config: IngestConfig, prober: VolumeProber, *, for_apply: bool) -> ResolvedT7:
+def resolve_t7(
+    config: IngestConfig,
+    prober: VolumeProber,
+    *,
+    for_apply: bool,
+    allow_storage_root_override: bool = False,
+) -> ResolvedT7:
     """Resolve the configured destination volume's root path.
 
     Preflight order matches the spec: volume present -> UUID matches ->
     mounted -> writable -> structure valid. Any failure raises `VolumeError`
     before anything is written.
+
+    `allow_storage_root_override` must be passed explicitly by a caller that
+    intends to run against a dev/test root. The override disables UUID
+    verification for the whole destructive path -- including the source unlink
+    -- so a config file alone must not be able to switch it on (D-019,
+    invariant 2). `tools/backup.py` refuses the same override the same way.
     """
     volume_uuid = config.t7.volume_uuid
     root: Path
     resolved_uuid: str | None
 
     if config.t7.storage_root_override is not None:
+        if not allow_storage_root_override:
+            raise VolumeError(
+                "t7.storage_root_override is set, which bypasses volume-UUID verification. "
+                "It is a development-only root and must be requested explicitly "
+                "(`organize ... --allow-dev-storage-root`); refusing to use it implicitly."
+            )
         # Explicit dev/test root; bypasses UUID detection entirely by design
         # (see config/ingest.example.yaml). Never used for the real T7.
         root = config.t7.storage_root_override

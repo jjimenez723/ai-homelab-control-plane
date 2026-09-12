@@ -98,4 +98,6 @@ def touch_fresh(path: Path) -> None:
 
 
 def make_resolved_t7(config: IngestConfig) -> ResolvedT7:
-    return resolve_t7(config, prober=lambda: [], for_apply=True)
+    # Tests always run against an isolated `storage_root_override` root, which
+    # is exactly the case production callers must opt into explicitly.
+    return resolve_t7(config, prober=lambda: [], for_apply=True, allow_storage_root_override=True)

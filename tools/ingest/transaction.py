@@ -27,6 +27,7 @@ from tools.ingest.catalog import (
     STATE_COPYING,
     STATE_FAILED_ERROR,
     STATE_FAILED_HASH_MISMATCH,
+    STATE_NEEDS_REVIEW,
     STATE_PENDING,
     STATE_SOURCE_UNLINKED,
     STATE_VERIFIED,
@@ -117,6 +118,44 @@ def _staging_path(resolved_t7: ResolvedT7, asset_id: str) -> Path:
     return resolved_t7.staging_dir / f"{asset_id}.partial"
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Flush a directory entry so a completed rename survives power loss.
+
+    Without this the catalog can reach `committed` while the rename itself is
+    still only in the page cache -- and a `committed` row is what authorises
+    deleting the source on the next run.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def destination_holds(final_path: Path, expected_sha256: str | None) -> bool:
+    """Whether `final_path` provably contains the bytes we recorded.
+
+    Existence is not evidence. A resumed transfer reaches the source-unlink
+    step on the strength of this answer, so it hashes the file rather than
+    trusting either the catalog row or the presence of *a* file at the path --
+    the destination may have been deleted, truncated, or replaced by something
+    unrelated since the row was written.
+    """
+    if not expected_sha256:
+        return False
+    try:
+        if not final_path.is_file():
+            return False
+        return sha256_file(final_path) == expected_sha256
+    except OSError:
+        return False
+
+
 def transfer_file(
     catalog: Catalog,
     planned: PlannedTransfer,
@@ -134,7 +173,26 @@ def transfer_file(
         return TransferOutcome(asset_id=asset_id, state=STATE_SOURCE_UNLINKED, success=True, skipped_reason="already_completed")
 
     if existing is not None and existing.row["transfer_state"] == STATE_COMMITTED:
-        return _finish_unlink(catalog, asset_id, existing.row["final_path"], planned.source_path, resolved_t7, hooks)
+        # A prior run copied and committed but could not unlink (read-only card,
+        # locked file). Only finish that unlink if the destination still holds
+        # the exact bytes -- the row records what was true then, not now.
+        final_path = Path(existing.row["final_path"]) if existing.row["final_path"] else None
+        if final_path is not None and destination_holds(final_path, existing.row["sha256"]):
+            return _finish_unlink(catalog, asset_id, str(final_path), planned.source_path, resolved_t7, hooks)
+        if not planned.source_path.exists():
+            # Destination gone *and* source gone: nothing left to recover here,
+            # and nothing this function may delete. Surface it loudly.
+            catalog.update_asset(
+                asset_id,
+                transfer_state=STATE_NEEDS_REVIEW,
+                error_state="destination_lost",
+                error_message=f"committed asset no longer verifiable at {existing.row['final_path']}",
+            )
+            return TransferOutcome(
+                asset_id=asset_id, state=STATE_NEEDS_REVIEW, success=False,
+                error_message="committed destination is missing or altered and the source is gone",
+            )
+        # Source survives: redo the transfer from scratch rather than delete it.
 
     if existing is not None and existing.row["transfer_state"] == STATE_VERIFIED:
         final_path = Path(existing.row["final_path"])
@@ -147,10 +205,12 @@ def transfer_file(
                     return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks)
             except OSError:
                 pass
-        elif final_path.exists():
-            # rename already happened before a crash; only the DB commit is outstanding.
+        elif destination_holds(final_path, existing.row["sha256"]):
+            # The rename did land before the crash; only the DB commit is
+            # outstanding. Existence alone would not be enough: an unrelated
+            # file at this path would otherwise authorise deleting the source.
             return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks, rename_needed=False)
-        # neither a valid partial nor a finalized file exists: source is still safe, redo from scratch.
+        # neither a valid partial nor a verified destination exists: source is still safe, redo from scratch.
 
     if not planned.source_path.exists():
         return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, skipped_reason="source_vanished")
@@ -256,6 +316,7 @@ def _finalize_and_commit(
                 hooks.before_finalize_rename()
             final_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staging_path, final_path)
+            _fsync_dir(final_path.parent)
         except OSError as exc:
             catalog.update_asset(asset_id, transfer_state=STATE_VERIFIED, error_state="finalize_failed", error_message=str(exc))
             return TransferOutcome(asset_id=asset_id, state=STATE_VERIFIED, success=False, error_message=str(exc))

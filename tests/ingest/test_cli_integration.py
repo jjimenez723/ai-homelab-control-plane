@@ -29,6 +29,11 @@ class CLIIntegrationTests(unittest.TestCase):
         self.t7.mkdir()
 
     def _run(self, config, argv, prober):
+        # Every test here targets an isolated `storage_root_override` root, and
+        # that override now has to be requested explicitly -- a config file on
+        # its own may not disable volume-UUID verification (see
+        # `test_mutation_safety.DevStorageRootTests`).
+        argv = list(argv) + ["--allow-dev-storage-root"]
         from tools.ingest import cli as cli_module
 
         original = cli_module.load_config

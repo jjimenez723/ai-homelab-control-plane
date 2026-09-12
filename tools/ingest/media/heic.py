@@ -68,7 +68,20 @@ def is_heic(path: Path) -> bool:
     return path.suffix.lower() in HEIC_SUFFIXES
 
 
-def convert_heic_to_jpeg(source_path: Path, output_path: Path, options: HeicToJpegOptions) -> DerivativeResult:
+def convert_heic_to_jpeg(
+    source_path: Path,
+    output_path: Path,
+    options: HeicToJpegOptions,
+    *,
+    allow_replace: bool = False,
+) -> DerivativeResult:
+    """Write a JPEG derivative of `source_path` at `output_path`.
+
+    `allow_replace` is the caller asserting that `output_path` is this
+    derivative's own previous output and may be regenerated. It defaults to
+    False so that an unrelated file occupying the path fails the conversion
+    instead of being destroyed.
+    """
     if _IMPORT_ERROR is not None:
         return DerivativeResult(success=False, converter=CONVERTER_NAME, error_message=f"pillow-heif not installed: {_IMPORT_ERROR}")
 
@@ -96,6 +109,17 @@ def convert_heic_to_jpeg(source_path: Path, output_path: Path, options: HeicToJp
             rgb = im.convert("RGB") if im.mode not in {"RGB", "L"} else im
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_path.exists() and not allow_replace:
+                # The caller is responsible for choosing a free path (or for
+                # stating that overwriting this one is its own prior output).
+                # Refusing here means a converter can never silently destroy a
+                # file it did not create, whatever a caller gets wrong.
+                return DerivativeResult(
+                    success=False,
+                    converter=CONVERTER_NAME,
+                    converter_version=converter_version(),
+                    error_message=f"refusing to overwrite an existing file: {output_path}",
+                )
             fd, tmp_name = tempfile.mkstemp(prefix=".heic-jpeg-", suffix=".partial", dir=str(output_path.parent))
             os.close(fd)
             tmp_path = Path(tmp_name)

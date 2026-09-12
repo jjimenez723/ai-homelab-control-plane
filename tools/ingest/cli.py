@@ -125,10 +125,15 @@ def _print_git_repos(scans: dict[tuple[str, str], ScanResult], limit: int = 10) 
         print(f"  ... and {len(all_repos) - limit} more")
 
 
-def cmd_organize(args: argparse.Namespace, prober: VolumeProber | None = None) -> int:
+def cmd_organize(
+    args: argparse.Namespace,
+    prober: VolumeProber | None = None,
+    config: IngestConfig | None = None,
+) -> int:
     prober = prober or diskutil_volume_prober
-    config = load_config(args.config)
+    config = config if config is not None else load_config(args.config)
     requested = _requested_classes(args.target)
+    allow_dev_root = bool(getattr(args, "allow_dev_storage_root", False))
 
     # Probe exactly once: gathering targets and resolving the T7 both need a
     # consistent view of what's mounted, not two independent diskutil calls
@@ -140,7 +145,9 @@ def cmd_organize(args: argparse.Namespace, prober: VolumeProber | None = None) -
     t7_error: str | None = None
     resolved_t7: ResolvedT7 | None = None
     try:
-        resolved_t7 = resolve_t7(config, snapshot_prober, for_apply=args.apply)
+        resolved_t7 = resolve_t7(
+            config, snapshot_prober, for_apply=args.apply, allow_storage_root_override=allow_dev_root
+        )
     except VolumeError as exc:
         t7_error = str(exc)
 
@@ -272,6 +279,14 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true", help="Report only. Zero writes. Default.")
     mode.add_argument("--apply", action="store_true", help="Actually transfer eligible files through the verified transaction primitive.")
     parser.add_argument("--config", type=Path, default=None, help="Path to ingest.yaml (default: config/ingest.yaml).")
+    parser.add_argument(
+        "--allow-dev-storage-root",
+        action="store_true",
+        help=(
+            "Honor t7.storage_root_override. Development only: it bypasses volume-UUID "
+            "verification for every write, including the source unlink."
+        ),
+    )
     return parser
 
 

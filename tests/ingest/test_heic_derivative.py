@@ -130,17 +130,32 @@ class ConverterUnitTests(unittest.TestCase):
         self.assertIsNotNone(result.error_message)
         self.assertEqual(source.read_bytes(), original_bytes)
 
-    def test_rerun_overwrites_deterministically_without_numbered_suffixes(self):
+    def test_rerun_regenerates_in_place_without_numbered_suffixes(self):
+        """Regeneration is deterministic -- but only when the caller says the
+        destination is this derivative's own earlier output."""
         source = make_heic(self.root / "photo.heic")
         output = self.root / "photo.jpg"
 
         first = convert_heic_to_jpeg(source, output, HeicToJpegOptions())
-        second = convert_heic_to_jpeg(source, output, HeicToJpegOptions())
+        second = convert_heic_to_jpeg(source, output, HeicToJpegOptions(), allow_replace=True)
 
         self.assertTrue(first.success and second.success)
         self.assertEqual(first.output_path, second.output_path)
         siblings = sorted(p.name for p in self.root.iterdir())
         self.assertEqual(siblings, ["photo.heic", "photo.jpg"])  # no photo-2.jpg
+
+    def test_converter_refuses_to_overwrite_an_existing_file_by_default(self):
+        """The converter cannot destroy a file it did not create, whatever the
+        caller passes as an output path."""
+        source = make_heic(self.root / "photo.heic")
+        output = self.root / "photo.jpg"
+        output.write_bytes(b"someone else's photograph")
+
+        result = convert_heic_to_jpeg(source, output, HeicToJpegOptions())
+
+        self.assertFalse(result.success)
+        self.assertIn("refusing to overwrite", result.error_message)
+        self.assertEqual(output.read_bytes(), b"someone else's photograph")
 
 
 class DerivativeOrchestrationTests(unittest.TestCase):
