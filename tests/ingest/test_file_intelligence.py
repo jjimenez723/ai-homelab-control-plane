@@ -12,6 +12,7 @@ The requirements these encode, in one sentence each:
 from __future__ import annotations
 
 import dataclasses
+import os
 import json
 import tempfile
 import threading
