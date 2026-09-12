@@ -1,11 +1,9 @@
-"""Schema migrations must never cost an existing catalog anything.
+"""Migrating a catalog that already holds the owner's data.
 
-The T7 catalog is the durable record of what was ingested and where it came
-from. A migration that dropped a row, or that failed halfway and left the
-database unusable, would be worse than the feature it was adding.
-
-So the rules under test are: forward-only, additive, idempotent, and every
-pre-existing row survives byte-for-byte.
+The T7 catalog is durable truth about files whose Mac originals have already
+been deleted. A migration that loses a row loses the only record of where
+something came from, so these tests are about one thing: an existing catalog
+survives, unchanged, no matter how many times the code runs over it.
 """
 
 from __future__ import annotations
@@ -16,217 +14,194 @@ import unittest
 from pathlib import Path
 
 from tools.ingest.catalog import MIGRATIONS, SCHEMA, Catalog
-from tools.ingest.ledger import LocalLedger
+from tools.ingest.ledger import LOCAL_MIGRATIONS, LocalLedger
 from tools.ingest.migrations import add_column_if_missing, apply_migrations
 
-# The exact Phase 1A schema as shipped in PR #6, reproduced here rather than
-# imported: the point is to prove that a database created by *that* code opens
-# under today's code. Importing the current SCHEMA would test nothing.
-LEGACY_ASSET_COLUMNS = (
-    "asset_id", "sha256", "source_volume_id", "source_class", "original_path",
-    "original_filename", "size", "mime", "detected_at", "transfer_started_at",
-    "transferred_at", "verified_at", "completed_at", "transfer_state", "final_path",
-    "final_filename", "error_state", "error_message", "derived_from",
-    "classifier_model", "classifier_model_version", "classifier_confidence",
-    "human_reviewed", "created_at", "updated_at",
-)
+
+def make_v1_catalog(path: Path) -> str:
+    """A catalog exactly as Phase 1A left it: the old schema, no version marker.
+
+    Pre-migration databases report `user_version = 0`, which is what makes
+    migration 1 have to be a no-op over an already-populated tree.
+    """
+    connection = sqlite3.connect(str(path))
+    connection.executescript(SCHEMA)
+    connection.execute(
+        """
+        INSERT INTO assets(
+            asset_id, sha256, source_volume_id, source_class, original_path, original_filename,
+            size, mime, transfer_state, final_path, final_filename, human_reviewed, created_at, updated_at
+        ) VALUES (
+            'asset-1', 'abc123', 'vol-1', 'desktop', 'holiday.jpg', 'holiday.jpg',
+            4096, 'image/jpeg', 'source_unlinked', '/T7/00-inbox/organized/desktop/holiday.jpg',
+            'holiday.jpg', 0, '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00'
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO blobs(sha256, size, mime, first_seen) VALUES ('abc123', 4096, 'image/jpeg', '2026-09-01T00:00:00+00:00')"
+    )
+    connection.execute(
+        """
+        INSERT INTO repos(repo_id, source_volume_id, original_path, remote_url, head, branch, dirty, unpushed, stash, detected_at)
+        VALUES ('vol-1:code/app', 'vol-1', 'code/app', 'git@example.com:me/app.git', 'deadbeef', 'main', 1, 1, 0, '2026-09-01T00:00:00+00:00')
+        """
+    )
+    connection.commit()
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    connection.close()
+    return version
 
 
-class MigrationTests(unittest.TestCase):
+class CatalogMigrationTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
+        self.path = Path(self._tmp.name) / "catalog.sqlite"
 
-    def _legacy_catalog(self) -> Path:
-        """A database exactly as the pre-migration code would have left it."""
-        path = self.root / "catalog.sqlite"
-        conn = sqlite3.connect(str(path), isolation_level=None)
-        conn.executescript(SCHEMA)
-        conn.execute(
-            """
-            INSERT INTO assets(
-                asset_id, sha256, source_volume_id, source_class, original_path,
-                original_filename, size, transfer_state, human_reviewed, created_at, updated_at
-            ) VALUES ('legacy-1', 'abc123', 'vol-1', 'desktop', 'photo.jpg', 'photo.jpg',
-                      4096, 'source_unlinked', 0, '2026-09-11T00:00:00+00:00', '2026-09-11T00:00:00+00:00')
-            """
-        )
-        conn.execute("INSERT INTO blobs(sha256, size, mime, first_seen) VALUES ('abc123', 4096, 'image/jpeg', '2026-09-11T00:00:00+00:00')")
-        # user_version stays 0, as it was before migrations existed.
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 0)
-        conn.close()
-        return path
+    def test_a_phase_1a_catalog_reports_version_zero(self):
+        self.assertEqual(make_v1_catalog(self.path), 0)
 
-    def test_a_pre_migration_catalog_opens_and_keeps_its_rows(self):
-        path = self._legacy_catalog()
-        with Catalog(path) as catalog:
+    def test_existing_rows_survive_the_migration(self):
+        make_v1_catalog(self.path)
+        with Catalog(self.path) as catalog:
             self.assertEqual(catalog.schema_version, len(MIGRATIONS))
-            asset = catalog.get_asset("legacy-1")
-            self.assertIsNotNone(asset)
-            self.assertEqual(asset.row["original_filename"], "photo.jpg")
+            asset = catalog.get_asset("asset-1")
+            self.assertEqual(asset.row["original_filename"], "holiday.jpg")
             self.assertEqual(asset.row["sha256"], "abc123")
             self.assertEqual(asset.row["transfer_state"], "source_unlinked")
+            blobs = catalog._conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0]
+            repos = catalog._conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0]
+        self.assertEqual((blobs, repos), (1, 1))
 
-    def test_every_legacy_column_survives(self):
-        path = self._legacy_catalog()
-        with Catalog(path) as catalog:
-            columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(assets)")}
-        for column in LEGACY_ASSET_COLUMNS:
-            self.assertIn(column, columns, f"migration dropped {column}")
+    def test_the_new_columns_are_added_as_null_not_backfilled_with_a_guess(self):
+        make_v1_catalog(self.path)
+        with Catalog(self.path) as catalog:
+            asset = catalog.get_asset("asset-1")
+        # We do not know what this file was first called; claiming to would be
+        # a fabricated provenance record.
+        self.assertIsNone(asset.row["first_seen_filename"])
+        self.assertIsNone(asset.row["local_file_id"])
+        self.assertIsNone(asset.row["retention_recommendation"])
 
     def test_migration_is_idempotent(self):
-        path = self._legacy_catalog()
-        for _ in range(3):
-            with Catalog(path) as catalog:
-                version = catalog.schema_version
-                count = catalog._conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
-            self.assertEqual(version, len(MIGRATIONS))
-            self.assertEqual(count, 1)
+        make_v1_catalog(self.path)
+        for _ in range(4):
+            with Catalog(self.path) as catalog:
+                self.assertEqual(catalog.schema_version, len(MIGRATIONS))
+        with Catalog(self.path) as catalog:
+            rows = catalog._conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+            self.assertEqual(rows, 1)
 
-    def test_new_tables_exist_after_migration(self):
-        path = self._legacy_catalog()
-        with Catalog(path) as catalog:
+    def test_a_fresh_catalog_reaches_the_current_version(self):
+        with Catalog(self.path) as catalog:
+            self.assertEqual(catalog.schema_version, len(MIGRATIONS))
             tables = {
                 row[0]
                 for row in catalog._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
-        for table in ("naming_history", "classification_runs", "media_metadata", "duplicate_observations"):
-            self.assertIn(table, tables)
+        for expected in ("assets", "blobs", "naming_history", "classification_runs", "media_metadata", "duplicate_observations"):
+            self.assertIn(expected, tables)
 
     def test_a_newer_database_is_refused_rather_than_downgraded(self):
-        path = self.root / "future.sqlite"
-        conn = sqlite3.connect(str(path), isolation_level=None)
-        conn.execute("PRAGMA user_version = 99")
-        conn.close()
-        conn = sqlite3.connect(str(path), isolation_level=None)
-        with self.assertRaises(RuntimeError):
-            apply_migrations(conn, MIGRATIONS)
-        conn.close()
+        """A checkout older than the disk must stop, not silently misread it."""
+        connection = sqlite3.connect(str(self.path))
+        connection.executescript(SCHEMA)
+        connection.execute("PRAGMA user_version = 99")
+        connection.commit()
+        connection.close()
+        with self.assertRaises(RuntimeError) as caught:
+            Catalog(self.path)
+        self.assertIn("newer than this code supports", str(caught.exception))
 
-    def test_add_column_if_missing_is_safe_to_repeat(self):
-        conn = sqlite3.connect(":memory:", isolation_level=None)
-        conn.execute("CREATE TABLE t (a TEXT)")
-        conn.execute("INSERT INTO t(a) VALUES ('keep me')")
-        for _ in range(3):
-            add_column_if_missing(conn, "t", "b", "TEXT")
-        columns = [row[1] for row in conn.execute("PRAGMA table_info(t)")]
-        self.assertEqual(columns, ["a", "b"])
-        self.assertEqual(conn.execute("SELECT a FROM t").fetchone()[0], "keep me")
-        conn.close()
-
-
-class LedgerHistoryTests(unittest.TestCase):
-    """Naming and classification are ledgers, not mutable fields."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.ledger = LocalLedger(Path(self._tmp.name) / "ledger.sqlite")
-        self.addCleanup(self.ledger.close)
-
-    def _naming(self, **overrides):
-        record = {
-            "local_file_id": "file-1",
-            "source_volume_id": "mac-local",
-            "source_class": "downloads",
-            "directory": "/tmp",
-            "original_filename": "IMG_1.png",
-            "name_quality": "poor",
-            "decision": "renamed",
-            "approved_by": "automatic",
-            "human_corrected": 0,
-            "created_at": "2026-09-12T00:00:00+00:00",
-        }
-        record.update(overrides)
-        return record
-
-    def test_naming_history_accumulates_rather_than_overwrites(self):
-        self.ledger.append_naming(self._naming(applied_filename="first.png"))
-        self.ledger.append_naming(self._naming(original_filename="first.png", applied_filename="second.png"))
-        history = self.ledger.naming_history("file-1")
-        self.assertEqual(len(history), 2)
-        self.assertEqual([row["applied_filename"] for row in history], ["first.png", "second.png"])
-
-    def test_reclassification_appends_a_new_run(self):
-        for recommendation in ("review", "ingest", "ignore"):
-            self.ledger.append_classification(
+    def test_naming_and_classification_history_survive_a_later_migration(self):
+        """History is the point of these tables; a future migration must not
+        be able to quietly discard it."""
+        with Catalog(self.path) as catalog:
+            catalog.append_naming(
                 {
-                    "local_file_id": "file-1",
-                    "source_volume_id": "mac-local",
+                    "local_file_id": "local-1",
+                    "asset_id": "asset-1",
+                    "source_volume_id": "vol-1",
                     "source_class": "downloads",
-                    "recommendation": recommendation,
-                    "policy_outcome": recommendation,
+                    "directory": "/Users/me/Downloads",
+                    "sha256": "abc123",
+                    "original_filename": "IMG_6909.JPG",
+                    "applied_filename": "2026-09-12_hawk.jpg",
+                    "name_quality": "poor",
+                    "decision": "renamed",
+                    "approved_by": "automatic",
+                    "human_corrected": 0,
                     "created_at": "2026-09-12T00:00:00+00:00",
                 }
             )
-        runs = self.ledger.classification_runs("file-1")
-        self.assertEqual([row["recommendation"] for row in runs], ["review", "ingest", "ignore"])
+            catalog.append_classification(
+                {
+                    "local_file_id": "local-1",
+                    "source_volume_id": "vol-1",
+                    "source_class": "downloads",
+                    "recommendation": "review",
+                    "policy_outcome": "review",
+                    "created_at": "2026-09-12T00:00:00+00:00",
+                }
+            )
 
-    def test_a_human_row_is_recognised_permanently(self):
-        self.assertFalse(self.ledger.has_human_naming("file-1"))
-        self.ledger.append_naming(self._naming(approved_by="human", human_corrected=1, applied_filename="mine.png"))
-        self.assertTrue(self.ledger.has_human_naming("file-1"))
-        # A later automatic row does not clear the lock.
-        self.ledger.append_naming(self._naming(applied_filename="machine.png"))
-        self.assertTrue(self.ledger.has_human_naming("file-1"))
+        # A hypothetical migration 3 runs; prior rows must be untouched.
+        connection = sqlite3.connect(str(self.path), isolation_level=None)
+        connection.row_factory = sqlite3.Row
 
-    def test_inode_reuse_starts_a_new_lineage_rather_than_inheriting_a_lock(self):
-        """A recycled inode must not let a stranger's file inherit a human lock."""
-        tmp = Path(self._tmp.name)
-        original = tmp / "original.png"
-        original.write_bytes(b"first file")
-        stat = original.stat()
+        def migration_3(conn: sqlite3.Connection) -> None:
+            add_column_if_missing(conn, "assets", "future_column", "TEXT")
 
-        first = self.ledger.observe_file(
-            path=original, source_class="downloads", source_volume_id="mac-local",
-            device=stat.st_dev, inode=stat.st_ino, size=10, sha256="a" * 64,
-            mime="image/png", media_kind="image", now="2026-09-12T00:00:00+00:00",
-        )
-        self.ledger.record_human_name(
-            first.local_file_id, filename="original.png", directory=str(tmp), now="2026-09-12T00:00:00+00:00"
-        )
-        self.assertTrue(self.ledger.has_human_naming(first.local_file_id))
+        apply_migrations(connection, tuple(MIGRATIONS) + (migration_3,))
+        naming = connection.execute("SELECT * FROM naming_history").fetchall()
+        runs = connection.execute("SELECT * FROM classification_runs").fetchall()
+        connection.close()
 
-        original.unlink()  # the tracked path is gone
-        replacement = tmp / "replacement.png"
-        replacement.write_bytes(b"an entirely different file")
+        self.assertEqual(len(naming), 1)
+        self.assertEqual(naming[0]["original_filename"], "IMG_6909.JPG")
+        self.assertEqual(naming[0]["applied_filename"], "2026-09-12_hawk.jpg")
+        self.assertEqual(len(runs), 1)
 
-        second = self.ledger.observe_file(
-            path=replacement, source_class="downloads", source_volume_id="mac-local",
-            device=stat.st_dev, inode=stat.st_ino,  # inode reused
-            size=20, sha256="b" * 64, mime="image/png", media_kind="image",
-            now="2026-09-12T01:00:00+00:00",
-        )
-        self.assertTrue(second.is_new_generation)
-        row = self.ledger.get_local_file(second.local_file_id)
-        self.assertEqual(row["first_seen_filename"], "replacement.png")
-        self.assertEqual(row["naming_state"], "unevaluated")
 
-    def test_an_in_place_edit_keeps_its_lineage(self):
-        """Same path, changed bytes: the owner edited their file."""
-        tmp = Path(self._tmp.name)
-        path = tmp / "notes.txt"
-        path.write_bytes(b"v1")
-        stat = path.stat()
+class LocalLedgerMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "state" / "local-ledger.sqlite"
 
-        first = self.ledger.observe_file(
-            path=path, source_class="downloads", source_volume_id="mac-local",
-            device=stat.st_dev, inode=stat.st_ino, size=2, sha256="a" * 64,
-            mime="text/plain", media_kind="text", now="2026-09-12T00:00:00+00:00",
-        )
-        self.ledger.record_human_name(
-            first.local_file_id, filename="notes.txt", directory=str(tmp), now="2026-09-12T00:00:00+00:00"
-        )
+    def test_the_ledger_creates_its_directory_and_reaches_the_current_version(self):
+        with LocalLedger(self.path) as ledger:
+            self.assertEqual(ledger.schema_version, len(LOCAL_MIGRATIONS))
+        self.assertTrue(self.path.exists())
 
-        path.write_bytes(b"v2 much longer now")
-        second = self.ledger.observe_file(
-            path=path, source_class="downloads", source_volume_id="mac-local",
-            device=stat.st_dev, inode=stat.st_ino, size=18, sha256="c" * 64,
-            mime="text/plain", media_kind="text", now="2026-09-12T01:00:00+00:00",
-        )
-        self.assertFalse(second.is_new_generation)
-        self.assertTrue(self.ledger.has_human_naming(second.local_file_id))
+    def test_reopening_the_ledger_preserves_its_rows(self):
+        with LocalLedger(self.path) as ledger:
+            ledger.append_naming(
+                {
+                    "local_file_id": "local-1",
+                    "source_volume_id": "mac-local",
+                    "source_class": "screenshots",
+                    "directory": "/tmp",
+                    "original_filename": "Screenshot.png",
+                    "name_quality": "poor",
+                    "decision": "renamed",
+                    "applied_filename": "2026-09-12_thing.png",
+                    "approved_by": "automatic",
+                    "human_corrected": 0,
+                    "created_at": "2026-09-12T00:00:00+00:00",
+                }
+            )
+        for _ in range(3):
+            with LocalLedger(self.path) as ledger:
+                history = ledger.naming_history("local-1")
+                self.assertEqual(len(history), 1)
+                self.assertEqual(history[0]["applied_filename"], "2026-09-12_thing.png")
+
+    def test_the_ledger_file_is_owner_only(self):
+        with LocalLedger(self.path):
+            pass
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

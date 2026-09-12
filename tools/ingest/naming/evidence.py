@@ -51,7 +51,14 @@ class NamingEvidence:
     name_quality: str
     name_quality_reason: str
     modified_date: str | None = None
+    # True when *anything* suggests a screen capture, including the probe's
+    # weak pixel heuristic. Good enough to route a file to review; not good
+    # enough to assert an origin in a filename.
     is_screenshot: bool = False
+    # True only when the evidence is strong: the filename identifies it as a
+    # capture, or it came from the configured screenshots folder. This is what
+    # a proposer is allowed to turn into the word "screen-capture".
+    screenshot_by_name: bool = False
     # Deterministic probe output, exactly as measured, under the probe's own
     # key names. An absent key means "not known" -- never zero or empty.
     facts: dict[str, Any] = field(default_factory=dict)
@@ -82,9 +89,10 @@ def looks_like_screenshot(filename: str, media_kind: str, facts: dict[str, Any])
     """Screenshot by filename, or by the probe's pixel-level hint.
 
     The name test is the strong signal. `is_probably_screenshot` is explicitly
-    a heuristic in the probe (a PNG with no camera EXIF), so it is only trusted
-    as a secondary cue -- enough to name a file `screen-capture`, never enough
-    to justify a retention decision on its own.
+    a heuristic in the probe (a PNG with no camera EXIF), so it is only a
+    secondary cue: enough to route a file to review, never enough to assert an
+    origin in a filename. `screenshot_by_name` is the stronger signal a
+    proposer is given for that.
     """
     if name_looks_like_screenshot(filename):
         return True
@@ -141,6 +149,7 @@ def gather_evidence(
         name_quality_reason=reason,
         modified_date=modified_date(path),
         is_screenshot=looks_like_screenshot(path.name, facts.media_kind, facts.facts),
+        screenshot_by_name=name_looks_like_screenshot(path.name) or source_class == "screenshots",
         facts=dict(facts.facts),
         probe_errors=facts.errors,
         vocabulary=vocabulary,

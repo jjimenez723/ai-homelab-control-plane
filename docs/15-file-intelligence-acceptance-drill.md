@@ -74,6 +74,13 @@ automation:
 YAML
 ```
 
+One thing to know before starting: `state_relative_path` is validated to be a
+path *inside the checkout*, so the drill's ledger, run lock, and logs land in
+`.state/drill/` in this repository rather than under `$DRILL`. That directory is
+gitignored, and the cleanup step removes it. Re-running the drill from the top
+without removing it first will make `organize status` count the previous run's
+files as well.
+
 A shorthand for the rest of the drill:
 
 ```bash
@@ -151,7 +158,7 @@ What to check, one line each:
 |---|--------|
 | 1 | Both screenshots now have date-prefixed descriptive names, and **both are still in `Screenshots/`**. Nothing went to the T7. |
 | 3 | `Fine-Line-Group-2026-SOW.pdf` still has exactly that name. |
-| 4 | `IMG_6909.png` is now something like `2026-09-12_photo-4032x3024.png`, still in `Downloads/`. |
+| 4 | `IMG_6909.png` is now `2026-09-12_photo-4032x3024.png`, still in `Downloads/`. Note `photo`, not `screen-capture`: the probe's PNG-without-EXIF hint is not strong enough to assert an origin in a filename. |
 | 5 | `GoogleChrome.dmg` is untouched — same name, same place. |
 
 The T7 inbox should be empty or absent: `triage.auto_ingest` is false, so this
@@ -204,15 +211,14 @@ ls "$DRILL/Downloads"
 
 ```bash
 .venv/bin/python - <<'PY'
-import os, sqlite3
+import sqlite3
 from pathlib import Path
-ledger = Path(os.environ["DRILL"]) / ".state/drill/local-ledger.sqlite"
-if not ledger.exists():
-    ledger = Path("/Users") / "..." # see `organize doctor` for the real path
+
+ledger = Path(".state/drill/local-ledger.sqlite")   # `organize doctor` prints this path
 conn = sqlite3.connect(ledger)
 for row in conn.execute(
     "SELECT current_filename, retention_recommendation, retention_reason "
-    "FROM local_files WHERE source_class='screenshots'"
+    "FROM local_files WHERE source_class = 'screenshots'"
 ):
     print(row)
 PY
@@ -300,11 +306,12 @@ organize duplicates
 ## 7. Clean up
 
 ```bash
-rm -rf "$DRILL"
+rm -rf "$DRILL" .state/drill
 unset DRILL
 ```
 
-Nothing outside `$DRILL` was touched at any point.
+The drill created exactly two things: `$DRILL`, and `.state/drill` inside this
+checkout. Nothing else was touched at any point.
 
 ---
 

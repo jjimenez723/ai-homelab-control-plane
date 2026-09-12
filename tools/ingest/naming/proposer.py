@@ -253,7 +253,12 @@ class DeterministicProposer:
         real name, so it will not be re-proposed on the next run.
         """
         tag = _dimension_tag(evidence)
-        if evidence.is_screenshot:
+        # Only name something a screen capture when the evidence actually says
+        # so. The probe's `is_probably_screenshot` is a PNG-without-EXIF guess,
+        # and a 4032x3024 phone photo saved without metadata trips it -- naming
+        # that `screen-capture` would be inventing certainty the file does not
+        # support, which is exactly what the generic fallback exists to avoid.
+        if evidence.screenshot_by_name:
             base = "screen-capture"
         elif evidence.media_kind == MEDIA_IMAGE:
             base = "photo"
