@@ -76,6 +76,8 @@ DEFAULTS: dict[str, Any] = {
     "automation": {
         "enabled": False,
         "state_relative_path": ".state/file-intelligence",
+        # Absolute override, for a drill or a test. Normally unset.
+        "state_dir": None,
     },
     "exclusions": {
         "dir_names": [
@@ -235,6 +237,10 @@ class TriageConfig:
 class AutomationConfig:
     enabled: bool = False
     state_relative_path: str = ".state/file-intelligence"
+    # An absolute state directory, for a drill or a test that must not write
+    # into the developer's checkout. `state_relative_path` stays relative-only
+    # so a stray config value can never point run state at `/`.
+    state_dir_override: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -283,6 +289,8 @@ class IngestConfig:
 
     @property
     def state_dir(self) -> Path:
+        if self.automation.state_dir_override is not None:
+            return self.automation.state_dir_override
         return self.repo_root / self.automation.state_relative_path
 
     @property
@@ -386,9 +394,17 @@ def load_config(path: Path | None = None) -> IngestConfig:
         raise ValueError("triage.min_ingest_confidence must be between 0 and 1")
 
     automation_raw = merged["automation"]
+    override_raw = automation_raw.get("state_dir")
+    state_dir_override = _expand(str(override_raw)) if override_raw else None
+    if state_dir_override is not None:
+        if not state_dir_override.is_absolute():
+            raise ValueError("automation.state_dir must be an absolute path")
+        if state_dir_override == Path(state_dir_override.root):
+            raise ValueError("automation.state_dir may not be a filesystem root")
     automation = AutomationConfig(
         enabled=bool(automation_raw["enabled"]),
         state_relative_path=str(automation_raw["state_relative_path"]),
+        state_dir_override=state_dir_override,
     )
     if Path(automation.state_relative_path).is_absolute() or ".." in Path(automation.state_relative_path).parts:
         raise ValueError("automation.state_relative_path must be a relative path inside the checkout")

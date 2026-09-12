@@ -42,7 +42,10 @@ def fi_config(
             config.sources,
             screenshots=ScreenshotsConfig(path=screenshots, enabled=screenshots_enabled and screenshots is not None),
         ),
-        automation=dataclasses.replace(config.automation, state_relative_path=".state/test-file-intelligence"),
+        # Every test gets its own state directory inside its own temp root.
+        # A shared one under the checkout would leak ledger rows between tests
+        # and write into the developer's working copy (§19).
+        automation=dataclasses.replace(config.automation, state_dir_override=root / "state"),
     )
     for key, value in overrides.items():
         config = dataclasses.replace(config, **{key: value})

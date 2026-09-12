@@ -167,6 +167,12 @@ automation:
   # Run lock, last-run status, and logs. Relative to the checkout.
   state_relative_path: ".state/file-intelligence"
 
+  # An absolute state directory, if run state must live outside the
+  # checkout (an acceptance drill, a test). Normally left unset;
+  # `state_relative_path` is deliberately relative-only so a stray value
+  # can never point run state at a filesystem root.
+  state_dir: null
+
 exclusions:
   # Directory names skipped anywhere in a source tree (not reported individually).
   dir_names:
