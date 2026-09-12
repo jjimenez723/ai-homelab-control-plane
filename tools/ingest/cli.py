@@ -677,6 +677,156 @@ def cmd_correct_name(args: argparse.Namespace, prober: VolumeProber | None = Non
     return 0
 
 
+def cmd_evidence(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """Report what the perception layer has seen. Strictly read-only.
+
+    Two modes, because there are two different questions. With no path it
+    summarizes the whole corpus: how much evidence exists, from which
+    producers, at which statuses. With a path it explains one file: the
+    content hash the evidence describes, which routing rules fired and why,
+    which producer and version answered each stage, and what went wrong.
+
+    What it deliberately does not print is the extracted text. A terminal
+    dump of every contract, medical letter, and tax return on the disk is a
+    far larger disclosure than this feature is worth, and an `organize` run
+    piped to a log file would persist it. `--show-text` is the explicit,
+    per-invocation act of asking for a bounded excerpt anyway.
+    """
+    config = config if config is not None else load_config(args.config)
+    if not config.local_ledger_path.exists():
+        print("No local ledger yet. Run `organize triage all` first.")
+        return 0
+
+    path: Path | None = getattr(args, "path", None)
+    with LocalLedger(config.local_ledger_path) as ledger:
+        if path is None:
+            return _print_evidence_summary(ledger, config)
+        return _print_evidence_for_path(ledger, path, show_text=bool(getattr(args, "show_text", False)))
+
+
+def _print_evidence_summary(ledger: LocalLedger, config: IngestConfig) -> int:
+    summary = ledger.evidence_summary()
+    print(f"Evidence layer: {'enabled' if config.evidence.enabled else 'disabled'}")
+    print(f"  OCR backend:    {config.evidence.ocr.backend}"
+          f"{'' if config.evidence.ocr.enabled else '  (disabled)'}")
+    print(f"  Vision backend: {config.evidence.vision.backend}"
+          f"{'' if config.evidence.vision.enabled else '  (disabled)'}")
+    print()
+    if not summary["total"]:
+        print("No evidence recorded yet.")
+        return 0
+    print(f"{summary['total']} cached evidence record(s), keyed by content hash.\n")
+    for label, counts in (
+        ("by kind", summary["by_kind"]),
+        ("by producer", summary["by_producer"]),
+        ("by status", summary["by_status"]),
+    ):
+        print(f"  {label}:")
+        for name, count in sorted(counts.items()):
+            print(f"    {name}: {count}")
+    print("\nEvidence is perception only. Nothing here renames, moves, or deletes a file.")
+    return 0
+
+
+def _print_evidence_for_path(ledger: LocalLedger, path: Path, *, show_text: bool) -> int:
+    row = _local_file_row(ledger, path)
+    if row is None:
+        print(f"Not in the ledger: {path}")
+        print("Run `organize triage all` over its source folder first.")
+        return 1
+    sha256 = row["sha256"]
+    if not sha256:
+        print(f"{path}: no verified content hash recorded yet.")
+        return 1
+
+    records = ledger.file_evidence_for_content(sha256)
+    print(f"{row['current_path']}")
+    print(f"  content sha256: {sha256}")
+    if not records:
+        print("  no evidence recorded for these bytes")
+        return 0
+
+    for record in records:
+        model = f"  model={record['model']}/{record['model_version']}" if record["model"] else ""
+        print(f"\n  [{record['evidence_kind']}] {record['producer']} v{record['producer_version']}{model}")
+        print(f"    pipeline: {record['pipeline_version']}   status: {record['status']}")
+        print(f"    generated: {record['generated_at']}")
+        if record["route_reason"]:
+            print(f"    routed because: {record['route_reason']}")
+        for warning in record["warnings"]:
+            print(f"    warning [{warning.get('stage')}]: {warning.get('code')} {warning.get('detail', '')}".rstrip())
+        _print_evidence_payload(record, show_text=show_text)
+
+    print("\nEvidence is perception only. Nothing here renames, moves, or deletes a file.")
+    return 0
+
+
+def _print_evidence_payload(record: dict, *, show_text: bool) -> None:
+    """Describe one cached record's payload without reproducing its content."""
+    payload = record.get("payload") or {}
+    native = payload.get("native_text")
+    if native:
+        print(f"    text: {native.get('char_count', 0)} chars"
+              f"{', truncated' if native.get('truncated') else ''}"
+              f", {len(native.get('sections') or [])} section(s)")
+        if show_text:
+            _print_excerpt(native.get("text") or "")
+    structure = payload.get("structure")
+    if structure:
+        print(f"    structure: {len(structure.get('headings') or [])} heading(s), "
+              f"{len(structure.get('regions') or [])} region(s), "
+              f"{len(structure.get('tables') or [])} table(s)")
+    ocr = payload.get("ocr")
+    if ocr:
+        blocks = ocr.get("blocks") or []
+        confidences = [float(block.get("confidence", 0.0)) for block in blocks]
+        mean = sum(confidences) / len(confidences) if confidences else 0.0
+        print(f"    ocr: {len(blocks)} block(s), mean confidence {mean:.2f}")
+        if show_text:
+            ordered = sorted(blocks, key=lambda block: (block.get("page", 1), block.get("reading_order", 0)))
+            _print_excerpt("\n".join(str(block.get("text", "")) for block in ordered))
+    visual = payload.get("visual")
+    if visual:
+        print(f"    visual: {visual.get('image_kind')} (confidence {float(visual.get('confidence', 0.0)):.2f})")
+        if visual.get("description"):
+            print(f"      {visual['description']}")
+        if visual.get("context"):
+            print(f"      context: {visual['context']}")
+        if visual.get("entities"):
+            print(f"      entities: {', '.join(visual['entities'])}")
+
+
+def _print_excerpt(text: str, *, limit: int = 800) -> None:
+    """Print a bounded excerpt of stored text, indented and clearly marked.
+
+    The text is already sanitized at the point it was stored
+    (`evidence/types.py::sanitize_extracted_text` strips the control and bidi
+    characters that let a terminal be driven by file content), so this only
+    has to bound the volume.
+    """
+    if not text.strip():
+        print("      (no text)")
+        return
+    excerpt = text[:limit]
+    print("      --- extracted text (untrusted file content) ---")
+    for line in excerpt.splitlines():
+        print(f"      | {line}")
+    if len(text) > limit:
+        print(f"      | ... ({len(text) - limit} more characters)")
+
+
+def _local_file_row(ledger: LocalLedger, path: Path) -> dict | None:
+    """The ledger row for a path, by the identity that survives a rename."""
+    try:
+        stat = path.stat()
+    except OSError:
+        # The file may have been renamed or removed since it was scanned; the
+        # ledger still knows it by its recorded path.
+        target = str(path)
+        return next((row for row in ledger.local_files() if row["current_path"] == target), None)
+    return ledger.get_local_file(local_file_id_for(LOCAL_VOLUME_ID, stat.st_dev, stat.st_ino))
+
+
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, default=None, help="Path to ingest.yaml (default: config/ingest.yaml).")
     parser.add_argument(
@@ -757,6 +907,21 @@ def build_parser() -> argparse.ArgumentParser:
         decide.add_argument("--reason", default="", help="Why, for the audit trail.")
         _add_common_arguments(decide)
 
+    evidence = subparsers.add_parser(
+        "evidence",
+        help="What the perception layer has seen. Read-only; never prints file text by default.",
+    )
+    evidence.add_argument(
+        "path", type=Path, nargs="?", default=None,
+        help="A file to explain. Omit for a corpus-wide summary.",
+    )
+    evidence.add_argument(
+        "--show-text", action="store_true",
+        help="Also print a bounded excerpt of the extracted text. Off by default: "
+             "the evidence corpus contains the contents of the owner's documents.",
+    )
+    _add_common_arguments(evidence)
+
     correct = subparsers.add_parser(
         "correct-name",
         help="Record a name you chose yourself. Nothing automatic overrides it afterwards.",
@@ -778,6 +943,7 @@ def main(argv: list[str] | None = None, prober: VolumeProber | None = None) -> i
         "doctor": cmd_doctor,
         "review": cmd_review,
         "duplicates": cmd_duplicates,
+        "evidence": cmd_evidence,
         "correct-name": cmd_correct_name,
         "keep": cmd_decide,
         "ignore": cmd_decide,

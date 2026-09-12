@@ -77,3 +77,30 @@ def duplicate_observation_id_for(kind: str, left_ref: str, right_ref: str) -> st
 
 def short_hash(value: str, length: int = 8) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+
+
+def evidence_id_for(
+    content_sha256: str,
+    kind: str,
+    producer: str,
+    producer_version: str,
+    model: str,
+    model_version: str,
+    pipeline_version: str,
+) -> str:
+    """Identity for one cached slice of perceived evidence about a file's bytes.
+
+    Every input that could change the answer is part of the key: the content
+    hash, which evidence kind this is (native text / ocr / visual /
+    structure), which extractor or backend produced it and at what version,
+    which model and model version (empty string when there is no model), and
+    the evidence pipeline version as a whole. Bumping any one component -- an
+    OCR engine upgrade, a new tesseract binary, a pipeline-wide format change
+    -- must miss the cache for that kind only, while every other cached kind
+    for the same bytes keeps hitting. See `tools/ingest/evidence/cache.py`.
+    """
+    key = (
+        f"evidence:{content_sha256}:{kind}:{producer}:{producer_version}:"
+        f"{model}:{model_version}:{pipeline_version}"
+    )
+    return str(uuid.uuid5(ASSET_NAMESPACE, key))

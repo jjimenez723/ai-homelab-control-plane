@@ -213,6 +213,57 @@ exclusions:
   # self-exclusion of this repository and the resolved T7 root.
   extra_paths: []
 
+# -- Visual & document evidence layer ----------------------------------------
+#
+# Perception only. This layer reads native text, runs OCR, and asks a vision
+# backend to describe an image -- and caches the result, content-hash-keyed,
+# in the local ledger. It grants NO authority to rename, move, delete, or
+# ingest anything: nothing under `naming:`, `triage:`, or `automation:` above
+# reads a value produced here, in this phase or any other change in this PR.
+# Extracted text is stored only on this Mac (never on the T7/Angel catalog)
+# and only up to `max_text_chars`; see the evidence-layer spec for the full
+# privacy posture.
+evidence:
+  enabled: true
+
+  # Files above this size are skipped entirely: nothing is rasterized and no
+  # backend is invoked.
+  max_bytes: 104857600  # 100 MiB
+
+  # A document past this many pages only has its first pages perceived.
+  max_pages: 20
+
+  # Resolution used when rasterizing a PDF/document page to an in-memory PNG
+  # for OCR/vision. Higher improves OCR accuracy on small text; also raises
+  # memory use per page.
+  raster_dpi: 200
+
+  # Decompression-bomb guard for a rasterized page, mirroring the same
+  # guard the deterministic image probe applies to source images.
+  raster_max_pixels: 40000000
+
+  # Extracted text (native or OCR) is capped at this many characters per
+  # file before it is stored; truncation is recorded, never silent.
+  max_text_chars: 20000
+
+  ocr:
+    enabled: true
+    # "null" performs no OCR at all -- the safe default until an operator
+    # opts into "tesseract" on a machine that actually has it installed.
+    backend: "null"
+    timeout_seconds: 30
+    # An OCR result with more text regions than this is truncated, with a
+    # warning, rather than accepted unbounded.
+    max_blocks: 2000
+
+  vision:
+    enabled: true
+    # "heuristic" makes no model call: it is a deterministic, offline
+    # description built only from already-measured facts. "null" performs
+    # no vision perception at all.
+    backend: "heuristic"
+    timeout_seconds: 30
+
 media:
   heic_to_jpeg:
     enabled: true

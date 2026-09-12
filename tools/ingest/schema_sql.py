@@ -138,3 +138,35 @@ CREATE TABLE IF NOT EXISTS duplicate_observations (
 CREATE INDEX IF NOT EXISTS duplicate_observations_by_left
   ON duplicate_observations(left_ref);
 """
+
+# A content-keyed cache of perceived evidence (OCR, native text, vision
+# description, layout structure) -- not a decision ledger. `evidence_id`
+# already encodes content hash + producer/model/pipeline identity (see
+# `identity.evidence_id_for`), so there is exactly one correct row per key and
+# re-deriving the same measurement is expected to overwrite it rather than
+# accumulate history the way `naming_history`/`classification_runs` do. See
+# `tools/ingest/evidence/cache.py` for the cache contract this backs.
+#
+# Mac-side (`LocalLedger`) only in this phase, deliberately: extracted text is
+# never stored in the T7 catalog (see the evidence-layer spec's privacy
+# posture). This table is therefore not part of `catalog.py`'s migration
+# chain.
+FILE_EVIDENCE_SQL = """
+CREATE TABLE IF NOT EXISTS file_evidence (
+  evidence_id TEXT PRIMARY KEY,
+  content_sha256 TEXT NOT NULL,
+  evidence_kind TEXT NOT NULL,
+  producer TEXT NOT NULL,
+  producer_version TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  model_version TEXT NOT NULL DEFAULT '',
+  pipeline_version TEXT NOT NULL,
+  route_reason TEXT,
+  status TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  warnings TEXT NOT NULL,
+  generated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS file_evidence_by_content ON file_evidence(content_sha256);
+CREATE INDEX IF NOT EXISTS file_evidence_by_kind ON file_evidence(content_sha256, evidence_kind);
+"""

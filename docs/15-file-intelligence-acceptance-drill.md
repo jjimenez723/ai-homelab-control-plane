@@ -5,7 +5,7 @@ matters. It uses throwaway files in a scratch directory and a scratch T7 root.
 **It never points at your real Desktop, Documents, Downloads, Screenshots
 folder, or the real Angel volume.**
 
-Nine things get demonstrated, each separately:
+Ten things get demonstrated, each separately:
 
 1. a badly named screenshot is renamed but **not** selected for Angel;
 2. a badly named screenshot is renamed **and**, once you say so, selected
@@ -16,7 +16,8 @@ Nine things get demonstrated, each separately:
 6. a durable document is ingested through the verified transaction path;
 7. disconnecting Angel prevents ingestion and any source deletion;
 8. a second run changes nothing;
-9. a name you chose yourself survives every future scan.
+9. a name you chose yourself survives every future scan;
+10. the perception layer sees what is in a file and changes no decision.
 
 Budget about ten minutes.
 
@@ -342,6 +343,43 @@ organize duplicates
 
 ---
 
+## 6a. What the file actually contains — perception, with no authority
+
+The evidence layer ran during every `organize triage` above. It read the
+Markdown and PDF text, described the images, and cached all of it keyed by
+content hash. It changed none of the decisions you just watched.
+
+```bash
+organize evidence
+organize evidence "$DRILL/Downloads/roof-survey-north-elevation.png"
+```
+
+The summary reports how much evidence exists, from which producers, at which
+statuses. The per-file view reports the content hash the evidence describes,
+which routing rules fired, which producer and version answered each stage, the
+confidences, and any warnings — and **no extracted text**. Ask for the text
+explicitly if you want it:
+
+```bash
+organize evidence "$DRILL/Downloads/notes.md" --show-text 2>/dev/null || true
+```
+
+Two things worth checking here:
+
+* The default OCR backend is `null`, so a screenshot's OCR stage records
+  `backend_unavailable` rather than silently producing nothing. An absent
+  backend leaves evidence of its absence.
+* Run `organize triage all --apply` once more and watch `evidence_cache_hits`
+  rise while nothing is re-measured. Then rename a file by hand and run again:
+  the evidence still hits, because the cache is keyed by the bytes and not by
+  the name.
+
+Nothing in this step can move, rename, or delete anything. `organize evidence`
+is read-only, and the evidence layer as a whole performs no filesystem writes
+at all.
+
+---
+
 ## 7. Clean up
 
 ```bash
@@ -370,6 +408,7 @@ Worth being explicit about, so the green result is not read as more than it is:
   proposer names from measured facts only; a screenshot becomes
   `2026-09-12_screen-capture-2560x1440.png`, not
   `2026-09-12_github-actions-python-tests-failing.png`. Reading what a
-  screenshot *shows* needs OCR and image understanding — the worker layer,
-  which this phase deliberately does not build. When it exists it implements
-  `NameProposer` and nothing downstream changes.
+  screenshot *shows* is now possible — see step 8 and
+  `docs/17-file-evidence.md` — but that perception is deliberately not an
+  input to naming yet (D-029). When it becomes one it will do so through a
+  `NameProposer`, and nothing downstream will change.

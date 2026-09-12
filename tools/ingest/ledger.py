@@ -28,6 +28,7 @@ from tools.ingest.migrations import add_column_if_missing, apply_migrations, con
 from tools.ingest.schema_sql import (
     CLASSIFICATION_RUNS_SQL,
     DUPLICATE_OBSERVATIONS_SQL,
+    FILE_EVIDENCE_SQL,
     MEDIA_METADATA_SQL,
     NAMING_HISTORY_SQL,
 )
@@ -404,6 +405,125 @@ class LedgerTables:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    # -- evidence cache (perception, not decisions) --------------------------
+    #
+    # `file_evidence` is a *cache of facts*, not an append-only decision
+    # ledger like `naming_history`/`classification_runs` above. Those tables
+    # are append-only because their entire promise is auditable history of
+    # what a person or a model *decided*, in an order that is itself part of
+    # the authority model (D-028, invariant 12). A row here instead records
+    # what one (content hash, producer, model, pipeline version) combination
+    # *measured* -- and `evidence_id` already encodes every one of those
+    # components (see `identity.evidence_id_for`), so there is exactly one
+    # correct current row per key. Re-running the same deterministic
+    # measurement is supposed to land on the same row; upserting it is not a
+    # loss of history, because there was never more than one true answer for
+    # that exact key to begin with. A version bump changes the key, which is
+    # what makes the *old* answer for the *old* key stay put as a distinct row
+    # instead of being silently overwritten.
+    #
+    # These accessors currently only have a home in `LocalLedger`: the
+    # `file_evidence` table is Mac-side only in this phase (see
+    # `schema_sql.FILE_EVIDENCE_SQL` and the evidence-layer spec's privacy
+    # posture), so calling them against a `Catalog` will raise until/unless a
+    # later phase deliberately extends the T7 schema to match.
+
+    def get_file_evidence(self, evidence_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM file_evidence WHERE evidence_id = ?", (evidence_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        record["payload"] = json.loads(record["payload"])
+        record["warnings"] = json.loads(record["warnings"])
+        return record
+
+    def record_file_evidence(
+        self,
+        *,
+        evidence_id: str,
+        content_sha256: str,
+        evidence_kind: str,
+        producer: str,
+        producer_version: str,
+        model: str,
+        model_version: str,
+        pipeline_version: str,
+        route_reason: str | None,
+        status: str,
+        payload: dict[str, Any],
+        warnings: list[dict[str, Any]],
+        created_at: str,
+    ) -> None:
+        """Upsert one cached slice of evidence, keyed by `evidence_id`.
+
+        `ON CONFLICT ... DO UPDATE` is correct here, unlike in
+        `append_naming`/`append_classification`: this table's key is the full
+        content+producer+model+pipeline identity, so a second write to the
+        same `evidence_id` is by construction a re-measurement of the exact
+        same question, not a competing decision that would need to be kept
+        alongside the first.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO file_evidence(
+                evidence_id, content_sha256, evidence_kind, producer, producer_version,
+                model, model_version, pipeline_version, route_reason, status, payload,
+                warnings, generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(evidence_id) DO UPDATE SET
+                content_sha256=excluded.content_sha256, evidence_kind=excluded.evidence_kind,
+                producer=excluded.producer, producer_version=excluded.producer_version,
+                model=excluded.model, model_version=excluded.model_version,
+                pipeline_version=excluded.pipeline_version, route_reason=excluded.route_reason,
+                status=excluded.status, payload=excluded.payload, warnings=excluded.warnings,
+                generated_at=excluded.generated_at
+            """,
+            (
+                evidence_id, content_sha256, evidence_kind, producer, producer_version,
+                model, model_version, pipeline_version, route_reason, status,
+                json.dumps(payload, sort_keys=True), json.dumps(warnings, sort_keys=True),
+                created_at,
+            ),
+        )
+
+    def file_evidence_for_content(self, content_sha256: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM file_evidence WHERE content_sha256 = ? ORDER BY evidence_kind, producer",
+            (content_sha256,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            record = dict(row)
+            record["payload"] = json.loads(record["payload"])
+            record["warnings"] = json.loads(record["warnings"])
+            result.append(record)
+        return result
+
+    def evidence_summary(self) -> dict[str, Any]:
+        """Counts by kind/producer/status, for a quick status overview.
+
+        Deliberately never returns `payload` or extracted text -- this is the
+        shape a CLI summary or a doctor check needs, not a way to read
+        evidence content back out in bulk.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT evidence_kind, producer, status, COUNT(*) AS n
+            FROM file_evidence
+            GROUP BY evidence_kind, producer, status
+            """
+        ).fetchall()
+        summary: dict[str, Any] = {"total": 0, "by_kind": {}, "by_producer": {}, "by_status": {}}
+        for row in rows:
+            count = int(row["n"])
+            summary["total"] += count
+            summary["by_kind"][row["evidence_kind"]] = summary["by_kind"].get(row["evidence_kind"], 0) + count
+            summary["by_producer"][row["producer"]] = summary["by_producer"].get(row["producer"], 0) + count
+            summary["by_status"][row["status"]] = summary["by_status"].get(row["status"], 0) + count
+        return summary
+
 
 LOCAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS local_files (
@@ -468,7 +588,20 @@ def _local_migration_2_generation(conn: sqlite3.Connection) -> None:
     add_column_if_missing(conn, "classification_runs", "generation", "INTEGER NOT NULL DEFAULT 0")
 
 
-LOCAL_MIGRATIONS = (_local_migration_1, _local_migration_2_generation)
+def _local_migration_3_evidence(conn: sqlite3.Connection) -> None:
+    """Add the perception evidence cache (`file_evidence`).
+
+    Purely additive: one new table plus its indexes, guarded by
+    `IF NOT EXISTS` exactly like every existing shared table here. Nothing
+    about an existing column or row changes. Mac-side only by deliberate
+    design -- see the module-level comment on `LedgerTables.record_file_evidence`
+    and the evidence-layer spec's privacy posture -- so this is not mirrored
+    into `catalog.py`'s migration chain in this phase.
+    """
+    conn.executescript(FILE_EVIDENCE_SQL)
+
+
+LOCAL_MIGRATIONS = (_local_migration_1, _local_migration_2_generation, _local_migration_3_evidence)
 
 
 @dataclass(frozen=True)
