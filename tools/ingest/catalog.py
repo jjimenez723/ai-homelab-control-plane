@@ -279,7 +279,11 @@ MIGRATIONS = (
 
 
 def now_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    # Preserve sub-second ordering for filesystem safety checks. File mtimes and
+    # ctimes commonly carry finer-than-second precision; truncating observations
+    # to whole seconds makes an unchanged file touched earlier in the same
+    # second look newer than the ledger record on the next scan.
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
 
 
 @dataclass
