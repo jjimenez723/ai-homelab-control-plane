@@ -15,6 +15,15 @@ import unittest
 from pathlib import Path
 
 from tools.ingest.catalog import MIGRATIONS, SCHEMA, Catalog
+
+# Reproduce the actual Phase 1A on-disk table shape. The live SCHEMA describes
+# new catalogs, so it intentionally no longer carries the legacy path-unique
+# constraint that this fixture exists to migrate away from.
+PHASE_1A_SCHEMA = SCHEMA.replace(
+    "  updated_at TEXT NOT NULL\n);",
+    "  updated_at TEXT NOT NULL,\n  UNIQUE(source_volume_id, original_path)\n);",
+    1,
+)
 from tools.ingest.ledger import LOCAL_MIGRATIONS, LocalLedger
 from tools.ingest.migrations import add_column_if_missing, apply_migrations
 
@@ -26,7 +35,7 @@ def make_v1_catalog(path: Path) -> str:
     migration 1 have to be a no-op over an already-populated tree.
     """
     connection = sqlite3.connect(str(path))
-    connection.executescript(SCHEMA)
+    connection.executescript(PHASE_1A_SCHEMA)
     connection.execute(
         """
         INSERT INTO assets(
@@ -125,6 +134,9 @@ class CatalogMigrationTests(unittest.TestCase):
             self.assertFalse(unique_source_path)
             self.assertEqual(
                 catalog._conn.execute("PRAGMA foreign_keys").fetchone()[0], 1
+            )
+            self.assertEqual(
+                catalog._conn.execute("PRAGMA foreign_key_check").fetchall(), []
             )
 
     def test_migration_is_idempotent(self):
