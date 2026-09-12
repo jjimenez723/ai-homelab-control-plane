@@ -36,7 +36,7 @@ from tools.ingest.catalog import (
 )
 from tools.ingest.exclusions import is_settled
 from tools.ingest.hashing import CHUNK_SIZE, sha256_file
-from tools.ingest.identity import asset_id_for
+from tools.ingest.identity import asset_id_for, source_ref_id_for
 from tools.ingest.t7 import ResolvedT7
 
 
@@ -179,6 +179,126 @@ def destination_holds(final_path: Path, expected_sha256: str | None) -> bool:
         return False
 
 
+def _stat_fingerprint(source_path: Path) -> tuple[int, int, int, int]:
+    stat = source_path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _missing_source_outcome(
+    catalog: Catalog,
+    planned: PlannedTransfer,
+    resolved_t7: ResolvedT7,
+    hooks: TransferFaultHooks,
+) -> TransferOutcome:
+    """Reconcile a retry when there are no bytes left at the source path.
+
+    Path lookup is allowed only in this branch because there is nothing to hash.
+    It can finish bookkeeping for the latest known occurrence, but it never
+    authorizes deleting another file.
+    """
+    existing = catalog.get_latest_asset_for_source(
+        planned.source_volume_id, planned.rel_path
+    )
+    if existing is None:
+        return TransferOutcome(
+            asset_id=source_ref_id_for(planned.source_volume_id, planned.rel_path),
+            state=STATE_FAILED_ERROR,
+            success=False,
+            skipped_reason="source_vanished",
+        )
+
+    asset_id = existing.row["asset_id"]
+    state = existing.row["transfer_state"]
+    expected_sha256 = existing.row["sha256"]
+    final_path = Path(existing.row["final_path"]) if existing.row["final_path"] else None
+    staging_path = _staging_path(resolved_t7, asset_id)
+
+    if state == STATE_SOURCE_UNLINKED:
+        return TransferOutcome(
+            asset_id=asset_id,
+            state=STATE_SOURCE_UNLINKED,
+            success=True,
+            final_path=final_path,
+            skipped_reason="already_completed",
+        )
+
+    if state == STATE_COMMITTED:
+        if final_path is not None and destination_holds(final_path, expected_sha256):
+            return _finish_unlink(
+                catalog,
+                asset_id,
+                str(final_path),
+                planned.source_path,
+                resolved_t7,
+                hooks,
+                expected_sha256=expected_sha256,
+            )
+        catalog.update_asset(
+            asset_id,
+            transfer_state=STATE_NEEDS_REVIEW,
+            error_state="destination_lost",
+            error_message=f"committed asset no longer verifiable at {existing.row['final_path']}",
+        )
+        return TransferOutcome(
+            asset_id=asset_id,
+            state=STATE_NEEDS_REVIEW,
+            success=False,
+            final_path=final_path,
+            error_message="committed destination is missing or altered and the source is gone",
+        )
+
+    if state == STATE_VERIFIED:
+        if staging_path.exists():
+            try:
+                if sha256_file(staging_path) == expected_sha256:
+                    if final_path is None:
+                        raise ValueError("verified asset has no final_path")
+                    return _finalize_and_commit(
+                        catalog,
+                        asset_id,
+                        staging_path,
+                        final_path,
+                        planned.source_path,
+                        resolved_t7,
+                        hooks,
+                        expected_sha256=expected_sha256,
+                    )
+            except OSError:
+                pass
+        if final_path is not None and destination_holds(final_path, expected_sha256):
+            return _finalize_and_commit(
+                catalog,
+                asset_id,
+                staging_path,
+                final_path,
+                planned.source_path,
+                resolved_t7,
+                hooks,
+                rename_needed=False,
+                expected_sha256=expected_sha256,
+            )
+        catalog.update_asset(
+            asset_id,
+            transfer_state=STATE_NEEDS_REVIEW,
+            error_state="verified_copy_lost",
+            error_message="verified asset has neither a valid staging copy nor destination and the source is gone",
+        )
+        return TransferOutcome(
+            asset_id=asset_id,
+            state=STATE_NEEDS_REVIEW,
+            success=False,
+            final_path=final_path,
+            error_message="verified copy is missing or altered and the source is gone",
+        )
+
+    return TransferOutcome(
+        asset_id=asset_id,
+        state=STATE_FAILED_ERROR,
+        success=False,
+        skipped_reason="source_vanished",
+    )
+
+
 def transfer_file(
     catalog: Catalog,
     planned: PlannedTransfer,
@@ -188,125 +308,156 @@ def transfer_file(
     hooks: TransferFaultHooks | None = None,
 ) -> TransferOutcome:
     hooks = hooks or TransferFaultHooks()
-    asset_id = asset_id_for(planned.source_volume_id, planned.rel_path)
+
+    if not planned.source_path.exists():
+        return _missing_source_outcome(catalog, planned, resolved_t7, hooks)
+
+    if not is_settled(planned.source_path, settle_seconds):
+        return TransferOutcome(
+            asset_id=source_ref_id_for(planned.source_volume_id, planned.rel_path),
+            state=STATE_PENDING,
+            success=False,
+            skipped_reason="still_changing",
+        )
+
+    # Identity is established from bytes, not from a pathname. Stat on both
+    # sides of hashing so a writer cannot hand us a hash for a moving target.
+    try:
+        stat_before = _stat_fingerprint(planned.source_path)
+        source_sha256 = sha256_file(planned.source_path)
+        stat_after = _stat_fingerprint(planned.source_path)
+    except OSError:
+        return TransferOutcome(
+            asset_id=source_ref_id_for(planned.source_volume_id, planned.rel_path),
+            state=STATE_FAILED_ERROR,
+            success=False,
+            skipped_reason="source_vanished",
+        )
+
+    if stat_before != stat_after:
+        return TransferOutcome(
+            asset_id=source_ref_id_for(planned.source_volume_id, planned.rel_path),
+            state=STATE_PENDING,
+            success=False,
+            skipped_reason="source_changed_during_hash",
+            error_message="source metadata changed while hashing; retry after it settles",
+        )
+
+    # Existing pre-migration rows keep their old IDs. If one already describes
+    # these exact bytes at this exact source path, resume it rather than fork
+    # the history. New rows use the content-aware ID.
+    existing = catalog.get_asset_for_source_content(
+        planned.source_volume_id, planned.rel_path, source_sha256
+    )
+    asset_id = (
+        existing.row["asset_id"]
+        if existing is not None
+        else asset_id_for(planned.source_volume_id, planned.rel_path, source_sha256)
+    )
     staging_path = _staging_path(resolved_t7, asset_id)
-    existing = catalog.get_asset(asset_id)
 
     if existing is not None and existing.row["transfer_state"] == STATE_SOURCE_UNLINKED:
-        if not planned.source_path.exists():
-            return TransferOutcome(asset_id=asset_id, state=STATE_SOURCE_UNLINKED, success=True, skipped_reason="already_completed")
-        # Something is at a path this row says was emptied. Either the same file
-        # came back, or -- far more likely -- an unrelated file now has that
-        # name. Claiming success would leave a file that was never copied
-        # neither archived nor reported.
-        if source_is_the_recorded_file(planned.source_path, existing.row["sha256"]):
+        final_path = Path(existing.row["final_path"]) if existing.row["final_path"] else None
+        if final_path is not None and destination_holds(final_path, source_sha256):
             return _finish_unlink(
-                catalog, asset_id, existing.row["final_path"], planned.source_path, resolved_t7, hooks,
-                expected_sha256=existing.row["sha256"],
+                catalog,
+                asset_id,
+                str(final_path),
+                planned.source_path,
+                resolved_t7,
+                hooks,
+                expected_sha256=source_sha256,
+                expected_stat=stat_after,
             )
-        return _refuse_identity_collision(catalog, asset_id, existing, planned)
+        # The archived copy disappeared or changed. The source still exists, so
+        # repair the archive from it rather than deleting or parking it.
 
     if existing is not None and existing.row["transfer_state"] == STATE_COMMITTED:
-        # A prior run copied and committed but could not unlink (read-only card,
-        # locked file). Two separate things have to be true before finishing
-        # that unlink: the destination still holds the exact bytes, *and* the
-        # file at the source path is the one they came from.
         final_path = Path(existing.row["final_path"]) if existing.row["final_path"] else None
-        if final_path is not None and destination_holds(final_path, existing.row["sha256"]):
-            if source_is_the_recorded_file(planned.source_path, existing.row["sha256"]):
-                return _finish_unlink(
-                    catalog, asset_id, str(final_path), planned.source_path, resolved_t7, hooks,
-                    expected_sha256=existing.row["sha256"],
-                )
-            if planned.source_path.exists():
-                return _refuse_identity_collision(catalog, asset_id, existing, planned)
-            # Source already gone and the destination verified: the previous
-            # run's unlink did land, only its bookkeeping did not.
+        if final_path is not None and destination_holds(final_path, source_sha256):
             return _finish_unlink(
-                    catalog, asset_id, str(final_path), planned.source_path, resolved_t7, hooks,
-                    expected_sha256=existing.row["sha256"],
-                )
-        if not planned.source_path.exists():
-            # Destination gone *and* source gone: nothing left to recover here,
-            # and nothing this function may delete. Surface it loudly.
-            catalog.update_asset(
+                catalog,
                 asset_id,
-                transfer_state=STATE_NEEDS_REVIEW,
-                error_state="destination_lost",
-                error_message=f"committed asset no longer verifiable at {existing.row['final_path']}",
+                str(final_path),
+                planned.source_path,
+                resolved_t7,
+                hooks,
+                expected_sha256=source_sha256,
+                expected_stat=stat_after,
             )
-            return TransferOutcome(
-                asset_id=asset_id, state=STATE_NEEDS_REVIEW, success=False,
-                error_message="committed destination is missing or altered and the source is gone",
-            )
-        # Source survives: redo the transfer from scratch rather than delete it.
+        # Destination is no longer trustworthy but the source survives: redo.
 
     if existing is not None and existing.row["transfer_state"] == STATE_VERIFIED:
-        final_path = Path(existing.row["final_path"])
-        if staging_path.exists():
+        final_path = Path(existing.row["final_path"]) if existing.row["final_path"] else None
+        if final_path is not None and staging_path.exists():
             try:
-                if sha256_file(staging_path) != existing.row["sha256"]:
-                    # corrupted partial from an interrupted prior attempt; redo the copy.
-                    pass
-                else:
+                if sha256_file(staging_path) == source_sha256:
                     return _finalize_and_commit(
-                        catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks,
-                        expected_sha256=existing.row["sha256"],
+                        catalog,
+                        asset_id,
+                        staging_path,
+                        final_path,
+                        planned.source_path,
+                        resolved_t7,
+                        hooks,
+                        expected_sha256=source_sha256,
+                        expected_stat=stat_after,
                     )
             except OSError:
                 pass
-        elif destination_holds(final_path, existing.row["sha256"]):
-            # The rename did land before the crash; only the DB commit is
-            # outstanding. Existence alone would not be enough: an unrelated
-            # file at this path would otherwise authorise deleting the source.
+        if final_path is not None and destination_holds(final_path, source_sha256):
             return _finalize_and_commit(
-                catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks,
-                rename_needed=False, expected_sha256=existing.row["sha256"],
+                catalog,
+                asset_id,
+                staging_path,
+                final_path,
+                planned.source_path,
+                resolved_t7,
+                hooks,
+                rename_needed=False,
+                expected_sha256=source_sha256,
+                expected_stat=stat_after,
             )
-        # neither a valid partial nor a verified destination exists: source is still safe, redo from scratch.
+        # Neither persisted copy is trustworthy. Source survives, so recopy.
 
-    if not planned.source_path.exists():
-        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, skipped_reason="source_vanished")
-
-    if not is_settled(planned.source_path, settle_seconds):
-        return TransferOutcome(asset_id=asset_id, state=STATE_PENDING, success=False, skipped_reason="still_changing")
-
-    try:
-        stat = planned.source_path.stat()
-    except OSError:
-        # Vanished in the window between the exists() check above and here
-        # (unplugged card, concurrent delete) -- source was never touched.
-        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, skipped_reason="source_vanished")
+    stat_size = stat_after[2]
     catalog.ensure_pending_asset(
         asset_id,
         source_volume_id=planned.source_volume_id,
         source_class=planned.source_class,
         original_path=planned.rel_path,
         original_filename=planned.source_path.name,
-        size=stat.st_size,
+        size=stat_size,
     )
 
-    try:
-        source_sha256 = sha256_file(planned.source_path)
-    except OSError as exc:
-        catalog.update_asset(asset_id, transfer_state=STATE_FAILED_ERROR, error_state="hash_failed", error_message=str(exc))
-        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, error_message=str(exc))
-
     mime, _ = mimetypes.guess_type(planned.source_path.name)
-    catalog.upsert_blob(source_sha256, size=stat.st_size, mime=mime)
+    catalog.upsert_blob(source_sha256, size=stat_size, mime=mime)
     catalog.update_asset(
         asset_id,
         sha256=source_sha256,
+        size=stat_size,
         mime=mime,
         transfer_started_at=now_iso(),
         transfer_state=STATE_COPYING,
+        error_state=None,
+        error_message=None,
     )
 
     try:
         _copy_with_fsync(planned.source_path, staging_path, hooks)
     except OSError as exc:
-        catalog.update_asset(asset_id, transfer_state=STATE_FAILED_ERROR, error_state="copy_failed", error_message=str(exc))
-        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, error_message=str(exc))
+        catalog.update_asset(
+            asset_id,
+            transfer_state=STATE_FAILED_ERROR,
+            error_state="copy_failed",
+            error_message=str(exc),
+        )
+        return TransferOutcome(
+            asset_id=asset_id,
+            state=STATE_FAILED_ERROR,
+            success=False,
+            error_message=str(exc),
+        )
 
     if hooks.after_copy is not None:
         hooks.after_copy(staging_path)
@@ -315,8 +466,19 @@ def transfer_file(
     try:
         dest_sha256 = sha256_file(staging_path)
     except OSError as exc:
-        catalog.update_asset(asset_id, transfer_state=STATE_FAILED_ERROR, error_state="dest_hash_failed", error_message=str(exc))
-        return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, error_message=str(exc))
+        catalog.update_asset(
+            asset_id,
+            transfer_state=STATE_FAILED_ERROR,
+            error_state="dest_hash_failed",
+            error_message=str(exc),
+        )
+        return TransferOutcome(
+            asset_id=asset_id,
+            state=STATE_FAILED_ERROR,
+            success=False,
+            error_message=str(exc),
+        )
+
     if hooks.after_dest_hash is not None:
         hooks.after_dest_hash(dest_sha256)
 
@@ -334,7 +496,14 @@ def transfer_file(
             error_message="destination hash did not match source after copy",
         )
 
-    final_path = _resolve_final_path(catalog, asset_id, resolved_t7.inbox_dir, planned.source_class, planned.rel_path, source_sha256)
+    final_path = _resolve_final_path(
+        catalog,
+        asset_id,
+        resolved_t7.inbox_dir,
+        planned.source_class,
+        planned.rel_path,
+        source_sha256,
+    )
 
     try:
         if hooks.before_verify_commit is not None:
@@ -346,41 +515,24 @@ def transfer_file(
             final_path=str(final_path),
             final_filename=final_path.name,
         )
-    except Exception as exc:  # noqa: BLE001 - deliberately broad: any DB failure here must not touch source
-        return TransferOutcome(asset_id=asset_id, state=STATE_COPYING, success=False, error_message=f"catalog write failed before commit: {exc}")
+    except Exception as exc:  # noqa: BLE001 - any DB failure here must not touch source
+        return TransferOutcome(
+            asset_id=asset_id,
+            state=STATE_COPYING,
+            success=False,
+            error_message=f"catalog write failed before commit: {exc}",
+        )
 
     return _finalize_and_commit(
-        catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks,
+        catalog,
+        asset_id,
+        staging_path,
+        final_path,
+        planned.source_path,
+        resolved_t7,
+        hooks,
         expected_sha256=source_sha256,
-        # Sampled when the bytes were read, re-checked at the moment of deletion.
-        expected_stat=(stat.st_size, stat.st_mtime_ns),
-    )
-
-
-def _refuse_identity_collision(catalog: Catalog, asset_id: str, existing, planned: PlannedTransfer) -> TransferOutcome:
-    """Two different files share one catalog row. Refuse, loudly, and touch nothing.
-
-    Identity is (source volume, relative path), so the schema cannot currently
-    hold two files that have occupied the same path. Both available actions are
-    destructive -- deleting the new source, or overwriting the archived asset --
-    so this does neither and puts the file in front of a person instead.
-
-    Conservative on purpose: the cost is a file that waits for a decision, and
-    the alternative cost is a file that no longer exists. Content-addressed
-    asset identity is the real fix and needs its own migration.
-    """
-    message = (
-        f"{planned.rel_path} is a different file from the one already recorded at this path "
-        f"(recorded sha256 {existing.row['sha256']}). Refusing to touch either. "
-        "Rename or move one of them, or resolve the catalog row by hand."
-    )
-    catalog.update_asset(asset_id, error_state="source_identity_collision", error_message=message)
-    return TransferOutcome(
-        asset_id=asset_id,
-        state=STATE_NEEDS_REVIEW,
-        success=False,
-        error_message=message,
-        skipped_reason="source_identity_collision",
+        expected_stat=stat_after,
     )
 
 
@@ -395,7 +547,7 @@ def _finalize_and_commit(
     *,
     rename_needed: bool = True,
     expected_sha256: str | None = None,
-    expected_stat: tuple[int, int] | None = None,
+    expected_stat: tuple[int, int, int, int] | None = None,
 ) -> TransferOutcome:
     if rename_needed:
         try:
@@ -470,13 +622,21 @@ def _finish_unlink(
     `committed`, the owner moves on, and a different file later takes the same
     name.
 
-    `expected_stat` is `(size, mtime_ns)` sampled when the bytes were read. A
-    writer that preserves mtime (`curl -R`, `rsync -a`, a sync client) can make
-    a half-written file look settled, and the source hash then matches the
-    truncated prefix we copied. Re-checking size and mtime at the moment of
-    deletion catches the writer that resumed in between.
+    `expected_stat` is `(device, inode, size, mtime_ns)` sampled around the
+    source hash. Re-checking it catches both an in-place writer and a different
+    file being swapped into the pathname. The content hash is still checked
+    immediately before deletion because metadata alone is never identity.
     """
     final_path = Path(final_path_str)
+
+    if expected_sha256 is None or not destination_holds(final_path, expected_sha256):
+        return _refuse_source_mismatch(
+            catalog,
+            asset_id,
+            final_path,
+            source_path,
+            "the destination no longer contains the verified bytes",
+        )
 
     if source_path.exists():
         # Cheap check first, and it also gives the more useful diagnosis: size
@@ -484,8 +644,7 @@ def _finish_unlink(
         # which is a different problem from an unrelated file taking the name.
         if expected_stat is not None:
             try:
-                stat = source_path.stat()
-                if (stat.st_size, stat.st_mtime_ns) != expected_stat:
+                if _stat_fingerprint(source_path) != expected_stat:
                     return _refuse_source_mismatch(
                         catalog, asset_id, final_path, source_path,
                         "the source file changed after it was read; a writer may still hold it open",
