@@ -763,6 +763,32 @@ class RescanCostTests(FileIntelligenceTestCase):
         _, reads = self._run_counting_reads(targets=("screenshots",), apply=True)
         self.assertEqual(reads, [renamed.name], "a changed file must be read again")
 
+    def test_same_size_rewrite_with_restored_mtime_is_read_again(self):
+        """ctime must invalidate the hash cache when mtime is forged/restored."""
+        path = make_blob(
+            self.downloads / "client-meeting-notes.pdf",
+            b"A" * 60_000,
+        )
+        original_stat = path.stat()
+        _, first_reads = self._run_counting_reads(targets=("downloads",), apply=True)
+        self.assertEqual(first_reads, [path.name])
+
+        # Rewrite in place with the exact same size, then restore the old mtime
+        # as rsync/curl-style workflows can. The bytes changed; only ctime tells
+        # the cache that the old SHA-256 is stale.
+        path.write_bytes(b"B" * 60_000)
+        os.utime(
+            path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+
+        _, second_reads = self._run_counting_reads(targets=("downloads",), apply=True)
+        self.assertEqual(
+            second_reads,
+            [path.name],
+            "a same-size rewrite must not inherit the previous cached hash",
+        )
+
     def test_a_file_moved_to_a_new_path_is_read_again(self):
         path = make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(1600, 900))
         report, _ = self._run_counting_reads(targets=("screenshots",), apply=True)
