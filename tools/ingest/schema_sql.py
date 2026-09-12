@@ -47,10 +47,10 @@ CREATE TABLE IF NOT EXISTS naming_history (
   human_corrected INTEGER NOT NULL DEFAULT 0,
   policy_outcome TEXT,
   created_at TEXT NOT NULL,
-  -- Which generation of `local_file_id` this row describes. Inode numbers are
-  -- reused, so one local identity can name two unrelated files over time; the
-  -- earlier file's rows are kept but must never be read back as this file's
-  -- history (see `LedgerTables._current_generation`). Rows on the T7 side are
+  -- Which content generation of `local_file_id` this row describes. Inodes
+  -- are reused and can also be rewritten in place, so one local identity can
+  -- describe different bytes over time; earlier rows stay as audit history but
+  -- must never be read back as the current bytes' history (D-028). T7 rows are
   -- reached by asset and simply carry the generation they were written with.
   generation INTEGER NOT NULL DEFAULT 0
 );
