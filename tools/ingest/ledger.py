@@ -102,14 +102,12 @@ class LedgerTables:
     def _current_generation(self, subject_id: str) -> int | None:
         """Which generation of this local identity a lineage query is about.
 
-        `local_file_id` is (volume, device, inode), and inode numbers are
-        reused: after a delete, an unrelated file can land on the identity of
-        one this system already named. `LocalLedger.observe_file` detects that
-        and starts a new generation. The earlier file's rows stay -- they are
-        real history of a real file -- but they are not *this* file's history,
-        and returning them is how a stranger's file inherits a human naming
-        lock, and how `attach_local_provenance` would write a filename the
-        ingested file never had into Angel's durable record.
+        `local_file_id` is (volume, device, inode), which is stable across a
+        rename but not across content generations: an inode can be reused or
+        rewritten in place. `LocalLedger.observe_file` starts a new generation
+        whenever the verified hash changes. Earlier rows stay as real audit
+        history, but returning them for the new bytes would leak old naming or
+        retention authority into a different content generation.
 
         None means "not generation-scoped", which is the right answer for the
         T7 catalog: it mixes these accessors in, reaches its rows by asset, and
