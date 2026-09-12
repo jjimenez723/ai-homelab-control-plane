@@ -39,6 +39,7 @@ from tools.ingest.pipeline import PipelineReport, run_pipeline
 from tools.ingest.provenance import attach_local_provenance, read_local_provenance
 from tools.ingest.status import collect_status, render_doctor, render_status
 from tools.ingest.derivatives import maybe_generate_heic_derivative
+from tools.ingest.enrichment import enrich_asset
 from tools.ingest.exclusions import ExclusionReason
 from tools.ingest.git_repos import inspect_git_repo
 from tools.ingest.identity import asset_id_for
@@ -248,6 +249,15 @@ def cmd_organize(
                         error_message=str(exc),
                     )
                 outcomes.append(outcome)
+                if outcome.final_path is not None and outcome.state in (STATE_COMMITTED, STATE_SOURCE_UNLINKED):
+                    # Deterministic enrichment of the copy that is now on Angel.
+                    # Reads the destination, because the source is gone by now.
+                    enrich_asset(
+                        catalog,
+                        asset_id=outcome.asset_id,
+                        final_path=outcome.final_path,
+                        sidecars_dir=resolved_t7.sidecars_dir,
+                    )
                 if provenance is not None and outcome.state in (STATE_COMMITTED, STATE_SOURCE_UNLINKED):
                     try:
                         attach_local_provenance(
