@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from tools.ingest.ledger import (
@@ -474,3 +475,83 @@ class SymlinkRenameTests(unittest.TestCase):
         self.assertEqual(secret.read_bytes(), b"irreplaceable")
         self.assertEqual(secret.stat().st_nlink, 1, "nothing outside the source root was hardlinked")
         self.assertEqual([p.name for p in self.downloads.iterdir()], ["IMG_0007.png"])
+
+
+class RenameFailureTests(unittest.TestCase):
+    """What happens when the rename half-succeeds.
+
+    From an adversarial review: `os.link` succeeding and `os.unlink` failing
+    leaves the file under two names. Once is documented and survivable. The
+    problem was that nothing stopped it happening again on the next run, and
+    the next -- one extra hard link per run, forever.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_a_failed_unlink_unwinds_the_link_instead_of_leaving_two_names(self):
+        source = self.root / "IMG_4242.png"
+        source.write_bytes(b"photo bytes")
+
+        real_unlink = os.unlink
+        attempts = []
+
+        def refuse_to_unlink_the_source(path, *args, **kwargs):
+            if Path(path) == source:
+                attempts.append(path)
+                raise OSError("source is locked")
+            return real_unlink(path, *args, **kwargs)
+
+        with unittest.mock.patch("tools.ingest.naming.policy.os.unlink", refuse_to_unlink_the_source):
+            with self.assertRaises(OSError):
+                policy.safe_rename(source, "2026-09-12_a-useful-name.png", disambiguator="abcdef")
+
+        self.assertTrue(attempts, "the unlink must actually have been attempted")
+        self.assertTrue(source.exists(), "the original must survive a failed rename")
+        self.assertEqual(
+            sorted(p.name for p in self.root.iterdir()), ["IMG_4242.png"],
+            "the half-made link must be unwound, leaving exactly the file we started with",
+        )
+        self.assertEqual(source.stat().st_nlink, 1, "no extra hard link may be left behind")
+
+    def test_repeated_failures_do_not_accumulate_names(self):
+        source = self.root / "IMG_4242.png"
+        source.write_bytes(b"photo bytes")
+        real_unlink = os.unlink
+
+        def refuse_to_unlink_the_source(path, *args, **kwargs):
+            if Path(path) == source:
+                raise OSError("source is locked")
+            return real_unlink(path, *args, **kwargs)
+
+        for _ in range(4):
+            with unittest.mock.patch("tools.ingest.naming.policy.os.unlink", refuse_to_unlink_the_source):
+                with self.assertRaises(OSError):
+                    policy.safe_rename(source, "2026-09-12_a-useful-name.png", disambiguator="abcdef")
+
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["IMG_4242.png"])
+        self.assertEqual(source.stat().st_nlink, 1)
+
+
+class ProposalTypeTests(unittest.TestCase):
+    """A proposer's *type* is as untrusted as its content."""
+
+    def test_a_non_string_proposal_is_a_policy_rejection_not_a_traceback(self):
+        for proposed in (b"bytes", 42, ["a", "list"], {"a": "dict"}, None, object()):
+            with self.subTest(proposed=type(proposed).__name__):
+                with self.assertRaises(policy.NamePolicyError):
+                    policy.validate_proposal(
+                        proposed, original_filename="IMG_6909.JPG", max_filename_length=120
+                    )
+
+    def test_an_object_with_a_hostile_str_cannot_smuggle_a_path(self):
+        class Hostile:
+            def __str__(self):
+                return "../../../../etc/passwd"
+
+        with self.assertRaises(policy.NamePolicyError):
+            policy.validate_proposal(
+                Hostile(), original_filename="IMG_6909.JPG", max_filename_length=120
+            )

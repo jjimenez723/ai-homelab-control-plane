@@ -136,6 +136,12 @@ def validate_proposal(
     Raises `NamePolicyError` when the proposal cannot be salvaged. A rejection
     is a normal outcome, recorded in the ledger; the file is left alone.
     """
+    # A proposer is the one place model output enters this system. Its type is
+    # as untrusted as its content: bytes, an int, or an object with a hostile
+    # `__str__` would otherwise escape as a raw TypeError/AttributeError rather
+    # than the recorded `rejected_policy` this is supposed to produce.
+    if not isinstance(proposed, str):
+        raise NamePolicyError(f"proposal is not a string: {type(proposed).__name__}")
     if not proposed or not proposed.strip():
         raise NamePolicyError("empty proposal")
 
@@ -200,7 +206,24 @@ def _link_rename(source: Path, target: Path) -> bool:
         if exc.errno in (errno.EPERM, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK, errno.ENOSYS):
             return False  # e.g. exFAT, which has no hardlinks
         raise
-    os.unlink(source)
+
+    try:
+        os.unlink(source)
+    except OSError:
+        # The link landed but the old name will not go away (a locked file,
+        # `chflags uchg`, a read-only directory). Leaving both names looks
+        # harmless -- same inode, no data at risk -- but the next run sees the
+        # original name again, proposes again, and links again: one extra name
+        # per run, forever. Undo our half instead and report the failure, so
+        # the file is exactly as it was before this attempt.
+        try:
+            os.unlink(target)
+        except OSError:
+            raise NamePolicyError(
+                f"linked {source.name} to {target.name} but could not remove either name; "
+                "the file now has two names and needs a human"
+            ) from None
+        raise
     return True
 
 
