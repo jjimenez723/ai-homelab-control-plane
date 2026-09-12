@@ -433,13 +433,12 @@ class ProvenanceAcrossCommandsTests(FileIntelligenceTestCase):
         self.assertEqual(row["original_filename"], "unseen-report.pdf")
 
 
-class InodeReuseLineageTests(FileIntelligenceTestCase):
-    """A reused inode must not inherit the previous file's lineage.
+class LocalGenerationLineageTests(FileIntelligenceTestCase):
+    """Different bytes must not inherit the previous content's lineage.
 
-    `local_file_id` is (volume, device, inode) and inode numbers are reused:
-    delete a file and an unrelated one can land on the identity of one this
-    system already named. `observe_file` detects that and starts a new
-    generation -- but the lineage accessors have to agree with it, because
+    `local_file_id` is (volume, device, inode), which survives renames but not
+    necessarily byte identity. `observe_file` starts a new generation on a
+    verified hash change, and the lineage accessors have to agree because
     `provenance.attach_local_provenance` copies whatever `naming_history`
     returns onto the asset's durable record in Angel. A record that asserts a
     filename the file never had is worse than no record at all.
