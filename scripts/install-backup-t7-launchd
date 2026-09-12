@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Render (if necessary) and load both agents for the logged-in user.
+set -euo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENT_DIR="$HOME/Library/LaunchAgents"
+BACKUP="$AGENT_DIR/com.ai-homelab.t7-backup.plist"
+CHECK="$AGENT_DIR/com.ai-homelab.t7-check.plist"
+
+# Always render from this checkout. This prevents an install after a checkout
+# move from silently reloading plists that still point at the old location.
+"$ROOT_DIR/scripts/render-backup-t7-launchd" --replace "$AGENT_DIR"
+for plist in "$BACKUP" "$CHECK"; do
+  plutil -lint "$plist" >/dev/null
+  launchctl bootout "gui/$UID" "$plist" 2>/dev/null || true
+  launchctl bootstrap "gui/$UID" "$plist"
+done
+echo "Installed com.ai-homelab.t7-backup and com.ai-homelab.t7-check for gui/$UID"

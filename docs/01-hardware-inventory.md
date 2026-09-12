@@ -27,9 +27,12 @@
 - Broken display
 - Candidate lightweight infrastructure node
 
-### `t7`
-- Samsung T7 external SSD
-- Capacity, filesystem, encryption state, SMART/health, and measured throughput still to verify
+### `t7` (volume `angel`)
+- Samsung T7 external SSD, 2.0 TB (2,000,398,893,056 bytes)
+- Filesystem: **APFS (Encrypted)**, volume `Angel` at `/Volumes/Angel`, container `disk5` on physical store `disk4s1` (USB) — erased and recreated 2026-09-11 (D-019)
+- Identity of record: the macOS Volume UUID, held only in the gitignored `config/ingest.yaml` (`t7.volume_uuid`). It is deliberately not duplicated into this tracked file; read it with `diskutil info /Volumes/Angel`.
+- Verified 2026-09-11 on `mac-m4pro`: mounted, unlocked, writable, SMART status Verified
+- Still to verify: serial number and measured throughput (`dd`/`fio`)
 
 ## Inventory commands to capture later
 
@@ -58,7 +61,6 @@ diskutil list
 - any discrete AMD/NVIDIA GPU present in the Precision;
 - Ethernet capabilities of each node;
 - Wi-Fi generation;
-- T7 capacity and current filesystem;
 - available internal-disk space on each worker;
 - whether workers can use wired Ethernet;
 - thermal condition/battery health;

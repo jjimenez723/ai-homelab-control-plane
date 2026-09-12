@@ -24,12 +24,12 @@ Nothing in this phase needs a Dell, a queue, or a model.
 
 ## Phase 1 — T7 confirm, bootstrap, dump, inventory, hash (days 7–21)
 
-- [ ] **Do not reformat the T7.** Confirm the existing filesystem remains exFAT and Samsung Magician password/security is enabled (D-017). Record serial, capacity, `VolumeUUID`, filesystem, security/unlock behavior, and measured throughput (`dd`/`fio`) in `docs/01-hardware-inventory.md`.
-- [ ] `scripts/bootstrap-t7.sh /Volumes/T7`.
+- [x] **The T7 was erased and recreated as APFS (Encrypted) on 2026-09-11 (D-019); do not reformat it again.** Volume `Angel` at `/Volumes/Angel` is confirmed APFS, unlocked, and writable, and its Volume UUID is recorded in the gitignored `config/ingest.yaml` (`t7.volume_uuid`) — deliberately not in tracked docs. Still to record in `docs/01-hardware-inventory.md`: serial, capacity, and measured throughput (`dd`/`fio`).
+- [x] `scripts/bootstrap-t7.sh /Volumes/Angel` (run 2026-09-11 on the recreated APFS volume; creates directories only).
 - [ ] Exclude the T7 from Spotlight (`mdutil -i off`) and from Time Machine.
-- [ ] Copy (never move) legacy sources into `00-inbox/legacy-dump/<source>/` using an exFAT-compatible copy path that preserves file bytes, names, timestamps where supported, and a per-source transfer log in `90-system/migration-reports/`. Do not rely on POSIX ownership, ACL, symlink, hardlink, or xattr preservation on exFAT.
+- [ ] Copy (never move) legacy sources into `00-inbox/legacy-dump/<source>/` using a copy path that preserves file bytes, names, and timestamps, and a per-source transfer log in `90-system/migration-reports/`. The destination is APFS again (D-019), so POSIX ownership, ACLs, symlinks, and xattrs now survive the copy — but the restored pre-erase snapshot is the authority on what those metadata were.
 - [ ] Build `tools/ingest/inventory.py`: walk, stat, sha256 (one pass, ≥ 700 MB/s measured), MIME sniff, `.git` detection with remotes/dirty/unpushed/stash state, write `90-system/catalog.sqlite` (schema in review §11).
-- [ ] After inventory verifies file count + total bytes, write an immutable checksum manifest and enforce legacy-dump protection in the ingest/application layer. Do not rely on `chflags`, POSIX permissions, APFS snapshots, or filesystem immutability on exFAT.
+- [ ] After inventory verifies file count + total bytes, write an immutable checksum manifest and enforce legacy-dump protection in the ingest/application layer. APFS makes `chflags`, POSIX permissions, and snapshots available again (D-019), but they remain defence in depth: the application layer stays the mechanism of record.
 - [ ] First restic snapshot of `00-inbox/` to the D-018 dedicated Google Drive repository and `restic check`; add the D-004 Dell append-only copy when that host is ready.
 - [ ] Produce `90-system/migration-reports/unpushed-repos.md` — the one list the owner must act on manually (unpushed commits cannot be inferred).
 
@@ -71,7 +71,7 @@ This is the normal day-to-day cleanup path after the one-time legacy dump. It is
 
 - [ ] Pick one small client shoot (≤ 500 files). Run metadata → keyframes → VLM tags → canonical-name proposal → embeddings.
 - [ ] Human-label 100 assets as the canary set; store in `corrections` table.
-- [ ] Materialize the derived view only when useful using verified ordinary copies or catalog-backed references compatible with exFAT; never use hardlinks and do not assume APFS clonefile support. `--dry-run` first; report additional disk usage; abort if > 20% of proposals change between runs.
+- [ ] Materialize the derived view only when useful using verified ordinary copies or catalog-backed references; never use hardlinks. `clonefile`/`cp -c` works again under D-019 but stays unused until a decision adopts it. `--dry-run` first; report additional disk usage; abort if > 20% of proposals change between runs.
 - [ ] Search CLI: `tools/search "vertical countertop install clips"` returns ranked assets from sqlite-vec.
 
 **Gate 3:** precision of client/project inference ≥ 95% and of tags ≥ 80% on the canary set; a deliberate model swap to a worse model is caught by the canary diff; view regeneration is idempotent (second run makes zero changes).

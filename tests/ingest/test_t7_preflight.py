@@ -47,6 +47,27 @@ class T7PreflightTests(unittest.TestCase):
             with self.assertRaises(VolumeError):
                 resolve_t7(config, prober, for_apply=True)
 
+    def test_volume_with_the_right_name_but_a_stale_uuid_is_refused(self):
+        """A reformat keeps the Finder name and issues a new Volume UUID (D-019).
+
+        An impostor -- or the same drive after an erase -- can therefore be
+        mounted at exactly the expected path under exactly the expected name.
+        Only the UUID may decide, so this must fail even though everything a
+        human would look at matches.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "Desktop"
+            angel_mount = Path(tmp) / "Angel"
+            angel_mount.mkdir()
+            config = build_config(desktop=desktop, t7_volume_uuid=T7_TEST_UUID)
+            impostor = make_volume(
+                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", angel_mount, label="Angel"
+            )
+            prober = fake_prober([impostor])
+
+            with self.assertRaises(VolumeError):
+                resolve_t7(config, prober, for_apply=True)
+
     def test_t7_read_only_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "Desktop"

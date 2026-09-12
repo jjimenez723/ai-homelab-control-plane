@@ -10,7 +10,7 @@
 
 t7:
   # Preferred: pin the T7 by its stable volume UUID (see `diskutil info /Volumes/<name>`).
-  # The T7 stays exFAT (D-017); `diskutil` reports a VolumeUUID for exFAT too.
+  # The T7 is APFS (Encrypted) after the 2026-09-11 erase/recreate (D-019).
   # `organize` refuses to run --apply if no mounted volume has this UUID.
   volume_uuid: "REPLACE-WITH-T7-VOLUME-UUID"
 
@@ -102,12 +102,24 @@ backup:
   keychain_service: "ai-homelab-t7-restic"
   rclone_keychain_service: "ai-homelab-rclone-config"
   retention:
-    keep_daily: 30
-    keep_weekly: 12
-    keep_monthly: 24
-    keep_yearly: 5
-  # Only incomplete ingestion artifacts are excluded. Originals, catalog,
-  # sidecars, manifests, and derivatives remain protected.
+    # Preview is always safe. Keep this false until a tested restore drill and
+    # explicit operator decision authorize a future forget/prune run.
+    enabled: false
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+    keep_yearly: 0
+  # Relative to the UUID-verified T7 root. Choose a small durable marker or
+  # directory for the monthly restore drill; null disables the drill safely.
+  restore_drill_relative_path: null
+  # Only incomplete ingestion artifacts and macOS volume metadata are
+  # excluded. Originals, catalog, sidecars, manifests, and derivatives remain
+  # protected. `.Spotlight-V100` is SIP-protected and unreadable even to the
+  # owner; without excluding it restic exits 3 on every otherwise-healthy run.
   exclude_patterns:
     - "90-system/staging/**"
     - "**/*.partial"
+    - ".Spotlight-V100"
+    - ".fseventsd"
+    - ".TemporaryItems"
+    - ".Trashes"

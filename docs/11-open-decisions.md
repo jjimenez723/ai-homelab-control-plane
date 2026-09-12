@@ -7,7 +7,7 @@ Decided: T7 filesystem/security (D-017, superseding D-002), T7 host (D-003 as mo
 Still **OPEN** pending measurement: embedding model choice, rename confidence threshold, keyframe sampling policy, GPU purchase, whether `dell-i7` becomes the dedicated Kronos box.
 
 ## Storage
-- **DECIDED (D-017):** keep the populated T7 as exFAT with Samsung Magician password/security; do not reformat for V0.
+- **DECIDED (D-019, superseding D-017):** the T7 was erased and recreated as APFS (Encrypted) on 2026-09-11; its Volume UUID in `config/ingest.yaml` is the identity of record.
 - **DECIDED (D-003/D-017):** T7 remains Mac-attached for ingestion; Linux workers receive job payloads/copies rather than using it as their active working filesystem.
 - **DECIDED:** active developer work stays on native internal filesystems; T7 is storage/archive/media, not the primary package-manager workspace.
 - **DECIDED (D-018):** immediate off-site protection is encrypted restic repository data via rclone in the dedicated Google Drive path. D-004's append-only Dell and B2 path remains a later independent failure domain.

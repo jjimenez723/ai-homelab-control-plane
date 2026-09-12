@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,9 +25,21 @@ def _emit(result) -> int:  # type: ignore[no-untyped-def]
     return result.returncode
 
 
+def _notify_failure(operation: str, message: str) -> None:
+    """Best-effort local alert for launchd; failures here must never mask restic."""
+    script = f"display notification {json.dumps(message[:300])} with title {json.dumps('T7 ' + operation + ' failed')}"
+    try:
+        subprocess.run(["osascript", "-e", script], check=False, capture_output=True, text=True)
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="T7 angel encrypted Google Drive backups")
-    parser.add_argument("command", choices=("backup", "init", "snapshots", "check", "restore", "retention"))
+    parser.add_argument(
+        "command",
+        choices=("backup", "init", "snapshots", "check", "restore", "retention", "restore-drill", "status", "scheduled"),
+    )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--tag", default=None, help="Additional lifecycle tag, e.g. pre-organize.")
     parser.add_argument("--deep", action="store_true", help="For check: read all repository data.")
@@ -59,9 +73,25 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(service.restore(args.snapshot, args.target, args.include))
         if args.command == "retention":
             return _emit(service.retention(apply=args.apply, confirmed_after_restore=args.confirmed_after_restore))
+        if args.command == "restore-drill":
+            return _emit(service.restore_drill(args.snapshot or "latest"))
+        if args.command == "status":
+            print(json.dumps(service.status(), indent=2, sort_keys=True))
+            return 0
+        if args.command == "scheduled":
+            if args.snapshot not in {"backup", "check"}:
+                raise BackupError("scheduled requires one of: backup, check")
+            result = service.backup() if args.snapshot == "backup" else service.check()
+            code = _emit(result)
+            if code != 0:
+                _notify_failure(args.snapshot, f"Restic exited with code {code}. See .state/backup/status.json")
+            return code
         raise AssertionError("unreachable")
     except (BackupError, ValueError, FileNotFoundError) as exc:
         print(f"backup: {exc}", file=sys.stderr)
+        if args.command == "scheduled":
+            operation = args.snapshot if args.snapshot in {"backup", "check"} else "scheduled job"
+            _notify_failure(operation, f"{exc}. See .state/backup/status.json")
         return 1
 
 

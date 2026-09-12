@@ -34,7 +34,7 @@ For every media migration:
 ## Immediate V0 architecture (D-018)
 
 ```text
-T7 / `angel` (exFAT + Samsung Magician password, Mac-attached)   primary working copy
+T7 / `angel` (APFS Encrypted, Mac-attached, pinned by Volume UUID)   primary working copy
    |
    | encrypted, deduplicated restic snapshots
    v
@@ -43,8 +43,8 @@ Google Drive: AI-Homelab-Backups/T7-restic                  immediate off-site c
 ```
 
 Rules:
-- The dedicated Google Drive repository is `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`; it contains only encrypted restic repository data, never a browsable T7 mirror.
-- The source is pinned by `t7.volume_uuid`, never `/Volumes/T7` or its current Finder name. If Samsung security is locked, the disk is disconnected, or the UUID differs, backup exits without making an empty snapshot.
+- The dedicated Google Drive repository is `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`; it contains only encrypted restic repository data, never a browsable T7 mirror. Every operation verifies its stable Restic repository ID before proceeding, so repointing the mutable rclone alias cannot silently select a different repository.
+- The source is pinned by `t7.volume_uuid`, never `/Volumes/Angel` or its current Finder name. If the encrypted volume is locked/unmounted, the disk is disconnected, or the UUID differs, backup exits without making an empty snapshot.
 - The repository passphrase is held only in macOS Keychain (`ai-homelab-t7-restic`) and read by `RESTIC_PASSWORD_COMMAND`. **Losing it permanently loses access to this backup.** Never place it in Drive, Git, `.env`, config, or logs.
 - If rclone configuration encryption is enabled, its separate passphrase belongs in Keychain (`ai-homelab-rclone-config`) and is supplied through `RCLONE_PASSWORD_COMMAND`; manual and scheduled rclone calls stay noninteractive.
 - Google Drive is not immutable or append-only. It is useful immediate off-site protection, but does not eliminate the later append-only `dell-xeon` restic repository and independent B2 failure domain from D-004.
@@ -57,7 +57,7 @@ Rules:
 All commands use `config/ingest.yaml` (ignored by Git) and inherit the source UUID from `t7.volume_uuid`.
 
 ```bash
-./scripts/backup-t7-init                    # safe: initializes only if repository does not exist
+./scripts/backup-t7-init                    # safe: verifies the pinned repository; never initializes
 ./scripts/backup-t7 --preflight             # read-only source, remote, Keychain, and size report
 ./scripts/backup-t7                         # normal snapshot: t7, angel, automatic tags
 ./scripts/backup-t7 --tag pre-organize      # lifecycle snapshot: t7, angel, pre-organize
@@ -66,16 +66,42 @@ All commands use `config/ingest.yaml` (ignored by Git) and inherit the source UU
 ./scripts/backup-t7-check                   # metadata + random 5% data reads
 ./scripts/backup-t7-check --deep            # full data read, schedule periodically
 ./scripts/backup-t7-retention               # report only; no deletion
-./scripts/backup-t7-retention --apply --confirmed-after-restore
 ./scripts/restore-t7 SNAPSHOT_ID --target ~/T7-Restore
 ./scripts/restore-t7 SNAPSHOT_ID --target ~/T7-Restore --include /path/in/snapshot
+./scripts/restore-t7-drill                  # monthly configured, isolated hash-checked drill
+./scripts/backup-t7-status                  # durable local operational state
 ```
 
 Restores require `--target`; `/`, the home directory itself, the live T7, and a path inside the live T7 are refused. For a drill, restore a small non-sensitive source subset into a temporary local directory, hash both copies, then remove only that temporary restored copy after verification. `restic diff SNAPSHOT_A SNAPSHOT_B` is useful for comparing snapshots.
 
-The normal backup writes non-secret JSONL metadata (start/end, source UUID, repository, tags, processed bytes/files, snapshot ID, and outcome) under ignored `.state/backup-logs/`. The excluded paths are intentionally narrow: T7 ingest staging and `*.partial` transfer artifacts. Originals, catalog, SQLite sidecars, manifests, human corrections, and JPEG derivatives are included.
+The normal backup writes owner-only, non-secret JSONL metadata and atomically updated status under ignored `.state/backup/` on the Mac—not on the backed-up Angel volume. A machine-global lock under `~/Library/Application Support/ai-homelab-control-plane/backup/` serializes old and new checkouts as well as backup/check/restore operations. `status.json` records last attempt, last successful backup/snapshot, Restic result, duration, check status, restore-drill status, and a useful failure message. Exit code **3 is always failure**, never a successful backup. The excluded paths are intentionally narrow: T7 ingest staging, `*.partial` transfer artifacts, and macOS volume metadata (`.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`, `.Trashes`). Originals, catalog, SQLite sidecars, manifests, human corrections, and JPEG derivatives are included.
 
-`launchd/com.ai-homelab.t7-backup.plist.template` is a nightly 02:15 template. `./scripts/render-backup-t7-launchd` only renders a private LaunchAgent; it never loads or enables it. Do not load it until manual backup, check, and restore acceptance are recorded. A missing/locked T7 exits cleanly, and launchd does not contain credentials.
+## Unattended scheduling
+
+`com.ai-homelab.t7-backup` runs daily at 02:15 and `com.ai-homelab.t7-check` runs Sunday at 03:15 (metadata plus a 5% data sample). Both call the same lock-protected runner, explicitly set a minimal system/Homebrew `PATH`, and use Keychain commands rather than launchd credential fields. A missing, locked, or UUID-mismatched Angel exits safely; the scheduler does not mount any disk. Failed scheduled runs display a local macOS notification using `osascript` and retain stdout/stderr under `.state/backup/logs/`.
+
+```bash
+./scripts/render-backup-t7-launchd             # render both plists only; safe to inspect
+./scripts/install-backup-t7-launchd            # rerender from this checkout, validate, and load both
+./scripts/uninstall-backup-t7-launchd          # unload both; leaves plists for inspection
+launchctl print "gui/$UID/com.ai-homelab.t7-backup"
+launchctl print "gui/$UID/com.ai-homelab.t7-check"
+./scripts/backup-t7-status
+```
+
+The backup job never runs retention. Retention is separate and is **disabled by default** in `config/ingest.yaml`. Its proposed policy is 7 daily / 4 weekly / 6 monthly (no yearly retention). `./scripts/backup-t7-retention` is a repository-pinned `restic forget --dry-run` preview. Even with `--apply --confirmed-after-restore`, destructive `forget --prune` refuses unless `backup.retention.enabled: true` is set deliberately. Do not enable it yet: this protects snapshot `277aff3a` from accidental removal while its questionable historical provenance is preserved.
+
+For a monthly restore drill, configure `backup.restore_drill_relative_path` to a small stable path relative to Angel's UUID-verified root. `restore-t7-drill` restores only that path into a temporary directory below `.state/backup/restore-drills`, compares SHA-256 hashes, and removes that temporary target. It never writes to Angel or a production recovery target.
+
+## Fresh-Mac disaster recovery
+
+1. Install Restic, rclone, and uv (for example, `brew install restic rclone uv`), clone this control-plane repository, then recreate its environment with `uv venv .venv && uv pip install --python .venv/bin/python -r requirements-ingest.txt -r requirements-social-video.txt`. Never copy an old virtualenv between checkouts.
+2. Copy `config/ingest.example.yaml` to ignored `config/ingest.yaml`; set the actual Angel APFS UUID. Do not copy a secret config into Git.
+3. Run `rclone config` interactively to create `gdrive-backup` and authorize the Google Drive account. If its config is encrypted, store that config password in Keychain under the configured rclone service. Store the Restic repository password in Keychain under the configured Restic service. Credentials, OAuth tokens, and passwords are never committed.
+4. Confirm access: `./scripts/backup-t7 --preflight`, then `./scripts/backup-t7-snapshots` to locate a snapshot.
+5. Validate before recovery: `./scripts/backup-t7-check` (or `--deep` when time allows).
+6. Restore only to an empty, local recovery directory: `./scripts/restore-t7 SNAPSHOT_ID --target ~/T7-Recovery`. Add `--include /path/in/snapshot` for a scoped recovery. Never target Angel, `/`, or the home directory itself.
+7. On a replacement Mac, render and install the LaunchAgents from the new checkout with `./scripts/install-backup-t7-launchd`, then inspect both jobs with `launchctl print` before forcing a test run.
 
 ### One-time credential setup
 
@@ -93,7 +119,67 @@ If you enabled rclone configuration encryption, also run this once and enter the
 security add-generic-password -U -a "$USER" -s ai-homelab-rclone-config -w
 ```
 
-After the remote and Keychain report are green, run `./scripts/backup-t7-init`, then `./scripts/backup-t7 --preflight`. Review that output and obtain explicit approval before running the first `./scripts/backup-t7` upload.
+After the remote and Keychain report are green, run `./scripts/backup-t7-init` to verify the existing pinned repository, then `./scripts/backup-t7 --preflight`. This workflow deliberately cannot create or reinitialize a missing repository; changing the repository requires an explicit reviewed code change. Review the preflight output and obtain explicit approval before running the first `./scripts/backup-t7` upload.
+
+## Status (verified 2026-09-11 on `mac-m4pro`)
+
+| Item | State |
+|---|---|
+| Source volume | `angel` / `Angel`, APFS (Encrypted), mounted at `/Volumes/Angel`, writable |
+| Source identity | pinned by Volume UUID in `config/ingest.yaml` (`t7.volume_uuid`); updated after the 2026-09-11 erase (D-019) |
+| Repository | `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic` — **already existed; reused, not re-initialized** (`backup-t7-init` reported "Repository already exists") |
+| Keychain | `ai-homelab-t7-restic` and `ai-homelab-rclone-config` both resolve; no secret appears in argv, config, or logs |
+| Integrity | `backup-t7-check` (metadata + 5% packfile read) — "no errors were found" across all 4 snapshots |
+| Restore drill | snapshot `2b5de56e` restored to an isolated temp directory with `--include`; all three test files SHA-256 identical to the source; the temporary restored copy and the disposable test directory were then removed |
+| Backup run | `9f674b9f` (tag `post-fix-verify`) completed with **exit 0 / `"outcome": "success"`** and zero error lines after the `.Spotlight-V100` exclusion landed |
+| Stored in Drive | 378 objects, 5.883 GiB, laid out as a real restic repository (`config`, `data/`, `index/`, `keys/`, `locks/`, `snapshots/`); sampled objects are ciphertext, not browsable files |
+| Deep check | `backup-t7-check --deep` not yet run |
+| Scheduling | nightly LaunchAgent still **not** rendered or loaded |
+
+Snapshot `277aff3a` (2026-09-11 08:08, 7.906 GiB, 361,572 files) predates the erase and carries the retired volume UUID. **It is a partial snapshot of a failing disk, not a complete copy of the old T7** — see the coverage section below. Do not run `backup-t7-retention --apply`, `restic forget`, or `restic prune` against this repository.
+
+### Resolved: restic exit 3 caused by `.Spotlight-V100`
+
+macOS keeps `/Volumes/Angel/.Spotlight-V100` unreadable even to the owner (`openfile for readdirnames failed: operation not permitted`), so restic reported one unreadable path and exited **3** on every run. The snapshot was always complete, but `tools/backup.py` maps any non-zero exit to `"outcome": "restic_failure"`, which made healthy backups look failed — both 2026-09-11 runs before the fix show this.
+
+Fixed 2026-09-11 by adding macOS volume metadata to `backup.exclude_patterns` (code defaults in `tools/ingest/config.py`, mirrored in `config/ingest.example.yaml`), so restic never descends into those paths. The next run exited 0 with `"outcome": "success"`.
+
+Optional and still worthwhile, per PLAN.md Phase 1: `sudo mdutil -i off /Volumes/Angel` stops Spotlight indexing the T7 altogether, saving write wear and CPU. It needs an interactive sudo password and is not required for backups to succeed.
+
+## Pre-erase salvage coverage (the 2026-09-11 exFAT failure)
+
+The old exFAT `Angel` volume failed before it was erased: `~/Desktop/angel-recovery-logs/rclone-recovery.log` records **31,769 input/output errors** across a 2h37m `rclone copy /Volumes/Angel "gdrive-backup:Angel Backup"` run that ended with 44,802 total errors and only 508 files transferred. The restic run the same morning hit the same wall and exited 3. Neither salvage is complete, and they captured **different** subsets. The volume was then erased and recreated as APFS, so neither can be re-run.
+
+Two independent partial copies exist in Google Drive:
+
+- `AI-Homelab-Backups/T7-restic`, snapshot `277aff3a` — encrypted restic. Holds `App spec` (247,308 entries), `BiteSites` (113,907), `CAAH QA` (290), `CAAH Clips` (20). Everything alphabetically after `CAAH QA` is present only as a zero-content `._name` AppleDouble stub.
+- `Angel Backup/` — plain rclone copy, 510 files / 6.034 GiB. Holds `Henry's Animal Hospital Take` (3.4 GiB), `CAAH QA` (1.8 GiB), `CAAH Clips` (882 MiB), `Fine Line Group LLC` (3.4 MiB), and small fragments of `App spec`/`BiteSites`/`Mafi`. Its other top-level folders are empty directory shells.
+
+| Pre-erase folder | restic `277aff3a` | Drive `Angel Backup` | Local Mac / Drive Desktop | Status |
+|---|---|---|---|---|
+| App spec | full (247k entries) | 72 files | `~/Documents/App spec` (574M) | covered |
+| BiteSites | full (114k entries) | 76 files | `~/Documents/BiteSites` (270M) | covered |
+| CAAH Clips | 20 entries | 882 MiB / 20 files | — | Drive-only |
+| CAAH QA | 290 entries | 1.8 GiB / 103 files | — | Drive-only |
+| Fine Line Group LLC | stub only | 3.4 MiB / 23 files | — | Drive-only, likely partial |
+| Henry's Animal Hospital Take | stub only | 3.4 GiB / 124 files | `~/Documents` (3.7G) | covered |
+| Mafi | stub only | 735 KiB / 69 files | `~/Documents/Mafi` (6.8G) | covered locally |
+| NJCCC Photos | absent | empty shell | — | **no copy found** |
+| NodeVideo | stub only | — | `~/Documents/NodeVideo` (empty) | unknown; local dir is empty |
+| Oasis Pure Water | absent | empty shell | `~/Documents` (726M) | covered locally |
+| Oasis Pure Water Video | stub only | empty shell | `~/Desktop` (1.3G) | covered locally |
+| Pupusa Loca Menu Images | stub only | empty shell | `~/Documents` (59M) | covered locally |
+| SCREENSHOTS | stub only | empty shell | — | **no copy found** |
+| Stone Bellisimo | stub only | empty shell | Drive Desktop (237 files) | covered in Drive |
+| dashboard-demos | stub only | 2 empty files | `~/Documents` (5.1G) | covered locally |
+| fonts | stub only | empty shell | `~/Documents` (444K) | covered locally |
+| huggingface | stub only | empty shell | `~/Documents` (24K) | covered locally (re-downloadable) |
+| kronos-quant-lab | stub only | 1 empty file | `~/Documents` (3.9G) | covered locally |
+| tlc-dashboard | stub only | empty shell | `~/Documents` (1.0G) | covered locally |
+
+Unresolved: **`NJCCC Photos`** and **`SCREENSHOTS`** have no located copy in either salvage or on the Mac. `Fine Line Group LLC` exists only as the 23-file rclone fragment. Confirm from memory whether those folders held anything irreplaceable before treating them as lost.
+
+This is the concrete argument for D-004's independent failure domain: the immediate Drive repository was configured, but the first real test of it was a dying disk, and a backup that had never completed a verified run could not protect what had not yet been captured.
 
 ## Recovery objectives
 

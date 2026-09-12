@@ -1,13 +1,48 @@
 #!/usr/bin/env bash
-# Render a per-checkout LaunchAgent without loading/enabling it.
+# Render per-checkout LaunchAgents without loading/enabling either one.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET="${1:-$HOME/Library/LaunchAgents/com.ai-homelab.t7-backup.plist}"
-if [[ -e "$TARGET" ]]; then
-  echo "Refusing to overwrite existing LaunchAgent: $TARGET" >&2
+
+REPLACE=0
+if [[ "${1:-}" == "--replace" ]]; then
+  REPLACE=1
+  shift
+fi
+if [[ "$#" -gt 1 ]]; then
+  echo "Usage: $0 [--replace] [target-directory]" >&2
+  exit 2
+fi
+TARGET_DIR="${1:-$HOME/Library/LaunchAgents}"
+BACKUP_TARGET="$TARGET_DIR/com.ai-homelab.t7-backup.plist"
+CHECK_TARGET="$TARGET_DIR/com.ai-homelab.t7-check.plist"
+if [[ "$REPLACE" -eq 0 && ( -e "$BACKUP_TARGET" || -e "$CHECK_TARGET" ) ]]; then
+  echo "Refusing to overwrite an existing LaunchAgent in: $TARGET_DIR" >&2
   exit 1
 fi
-mkdir -p "$(dirname "$TARGET")" "$ROOT_DIR/.state/backup-logs"
-sed "s|__REPOSITORY_ROOT__|$ROOT_DIR|g" "$ROOT_DIR/launchd/com.ai-homelab.t7-backup.plist.template" > "$TARGET"
-chmod 600 "$TARGET"
-echo "Rendered but did not load: $TARGET"
+mkdir -p "$TARGET_DIR" "$ROOT_DIR/.state/backup/logs"
+chmod 700 "$ROOT_DIR/.state" "$ROOT_DIR/.state/backup" "$ROOT_DIR/.state/backup/logs"
+
+# The repository root is XML text and a sed replacement. Escape it for both
+# layers so checkouts containing spaces, ampersands, or other legal path
+# characters still produce valid plists.
+XML_ROOT="$(printf '%s' "$ROOT_DIR" | sed \
+  -e 's/&/\&amp;/g' \
+  -e 's/</\&lt;/g' \
+  -e 's/>/\&gt;/g' \
+  -e 's/"/\&quot;/g' \
+  -e "s/'/\&apos;/g")"
+SED_ROOT="$(printf '%s' "$XML_ROOT" | sed 's/[\\&|]/\\&/g')"
+
+STAGING_DIR="$(mktemp -d "$TARGET_DIR/.t7-launchd.XXXXXX")"
+trap 'rm -rf "$STAGING_DIR"' EXIT
+for name in backup check; do
+  staged="$STAGING_DIR/com.ai-homelab.t7-$name.plist"
+  sed "s|__REPOSITORY_ROOT__|$SED_ROOT|g" "$ROOT_DIR/launchd/com.ai-homelab.t7-$name.plist.template" > "$staged"
+  chmod 600 "$staged"
+  plutil -lint "$staged" >/dev/null
+done
+for name in backup check; do
+  mv -f "$STAGING_DIR/com.ai-homelab.t7-$name.plist" "$TARGET_DIR/com.ai-homelab.t7-$name.plist"
+done
+echo "Rendered but did not load: $BACKUP_TARGET"
+echo "Rendered but did not load: $CHECK_TARGET"

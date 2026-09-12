@@ -13,16 +13,24 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Iterator, Sequence
+
+import fcntl
+import hashlib
 
 from tools.ingest.config import BackupConfig, IngestConfig
-from tools.ingest.volumes import MountedVolume, VolumeError, VolumeProber, find_volume_by_uuid
+from tools.ingest.volumes import MountedVolume, VolumeProber, find_volume_by_uuid
 
 REPOSITORY = "rclone:gdrive-backup:AI-Homelab-Backups/T7-restic"
+REPOSITORY_ID = "49548ef63ed7b91439a59c67979607ea3f22cc40ade8630e8b97674b4505f2cd"
 RCLONE_REMOTE = "gdrive-backup:"
+COMMAND_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 KEYCHAIN_SERVICE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -77,14 +85,20 @@ def validate_backup_config(config: BackupConfig) -> None:
         raise BackupError("backup Keychain service contains unsupported characters")
 
 
-def resolve_backup_source(config: IngestConfig, prober: VolumeProber) -> BackupSource:
+def resolve_backup_source(
+    config: IngestConfig,
+    prober: VolumeProber,
+    *,
+    allow_storage_root_override: bool = False,
+) -> BackupSource:
     """Resolve the T7 by UUID, without trusting a Finder volume name."""
     uuid = config.t7.volume_uuid
     if not uuid:
         raise BackupError("no t7.volume_uuid configured; refusing to back up an unspecified source")
 
     if config.t7.storage_root_override is not None:
-        # Retained solely for isolated project tests / development fixtures.
+        if not allow_storage_root_override:
+            raise BackupError("t7.storage_root_override is test-only and is refused for backups")
         root = config.t7.storage_root_override
         label = "development override"
     else:
@@ -106,14 +120,31 @@ def resolve_backup_source(config: IngestConfig, prober: VolumeProber) -> BackupS
     return BackupSource(root=resolved, volume_uuid=uuid, label=label)
 
 
-def validate_restore_target(target: Path, config: IngestConfig, prober: VolumeProber) -> Path:
+def validate_restore_target(
+    target: Path,
+    config: IngestConfig,
+    prober: VolumeProber,
+    *,
+    allow_storage_root_override: bool = False,
+) -> Path:
     """Reject the source T7 itself (and filesystem root/home) as a restore target."""
     resolved = target.expanduser().resolve(strict=False)
     home = Path.home().resolve()
     if resolved in (Path("/"), home):
         raise BackupError("restore target must be a dedicated directory, not / or the home directory")
+    if _is_relative_to(resolved, Path("/Volumes")):
+        raise BackupError("restore target must be local and may not be under /Volumes")
+    if target.is_symlink():
+        raise BackupError("restore target must not be a symlink")
+    if resolved.exists():
+        if not resolved.is_dir() or any(resolved.iterdir()):
+            raise BackupError("restore target must be a nonexistent or empty directory")
     try:
-        source = resolve_backup_source(config, prober).root
+        source = resolve_backup_source(
+            config,
+            prober,
+            allow_storage_root_override=allow_storage_root_override,
+        ).root
     except BackupError:
         # A disconnected T7 cannot be overwritten. Restoration to an isolated
         # local directory is still useful in that normal recovery case.
@@ -132,13 +163,159 @@ class BackupService:
         runner: Runner = subprocess_runner,
         hostname: str | None = None,
         log_dir: Path | None = None,
+        state_dir: Path | None = None,
+        lock_path: Path | None = None,
+        allow_test_source_override: bool = False,
     ) -> None:
         validate_backup_config(config.backup)
         self.config = config
         self.prober = prober
         self.runner = runner
         self.hostname = hostname or platform.node() or "mac"
-        self.log_dir = log_dir or (config.repo_root / ".state" / "backup-logs")
+        self.state_dir = state_dir or (config.repo_root / ".state" / "backup")
+        self.log_dir = log_dir or (self.state_dir / "logs")
+        self.lock_path = lock_path or (
+            self.state_dir / "restic.lock"
+            if state_dir is not None
+            else Path.home()
+            / "Library"
+            / "Application Support"
+            / "ai-homelab-control-plane"
+            / "backup"
+            / "restic.lock"
+        )
+        self.allow_test_source_override = allow_test_source_override
+
+    @property
+    def status_path(self) -> Path:
+        return self.state_dir / "status.json"
+
+    @contextmanager
+    def _job_lock(self) -> Iterator[None]:
+        """Serialize all restic jobs without relying on restic's own lock alone."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.lock_path.parent.chmod(0o700)
+        with self.lock_path.open("a+", encoding="utf-8") as handle:
+            self.lock_path.chmod(0o600)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise BackupError("another T7 restic job is already running; refusing an overlapping run") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _read_status(self) -> dict[str, object]:
+        try:
+            return json.loads(self.status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _write_status(self, changes: dict[str, object]) -> None:
+        """Atomically replace small local status state; it never contains secrets."""
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.state_dir.chmod(0o700)
+            status = self._read_status()
+            status.update(changes)
+            fd, temporary = tempfile.mkstemp(prefix="status-", suffix=".json", dir=self.state_dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(status, handle, indent=2, sort_keys=True)
+                    handle.write("\n")
+                os.replace(temporary, self.status_path)
+                self.status_path.chmod(0o600)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        except OSError as exc:
+            raise BackupError(f"unable to persist backup status: {exc}") from exc
+
+    def status(self) -> dict[str, object]:
+        return self._read_status()
+
+    def _record_operation(
+        self,
+        operation: str,
+        callback: Callable[[], CommandResult],
+        *,
+        backup: bool = False,
+        check: bool = False,
+        restore_drill: bool = False,
+    ) -> CommandResult:
+        """Run a job once, recording nonzero restic codes as failures (including 3)."""
+        started = datetime.now(UTC)
+        monotonic_started = time.monotonic()
+        self._write_status(
+            {
+                "last_attempt_at": started.isoformat(),
+                "last_operation": operation,
+                "last_outcome": "running",
+                "restic_exit_code": None,
+                "failure_message": None,
+            }
+        )
+        try:
+            with self._job_lock():
+                result = callback()
+        except BackupError as exc:
+            finished = datetime.now(UTC)
+            elapsed = round(time.monotonic() - monotonic_started, 3)
+            changes: dict[str, object] = {
+                "last_operation": operation,
+                "last_attempt_at": started.isoformat(),
+                "last_finished_at": finished.isoformat(),
+                "last_outcome": "failure",
+                "restic_exit_code": None,
+                "elapsed_seconds": elapsed,
+                "failure_message": str(exc),
+            }
+            if check:
+                changes["check_status"] = "failure"
+            if restore_drill:
+                changes["restore_drill_status"] = "failure"
+            self._write_status(changes)
+            self._write_log({"event": operation, "started_at": started.isoformat(), "finished_at": finished.isoformat(), "outcome": "failure", "returncode": None, "failure_message": str(exc)})
+            raise
+        finished = datetime.now(UTC)
+        elapsed = round(time.monotonic() - monotonic_started, 3)
+        success = result.returncode == 0
+        changes = {
+            "last_operation": operation,
+            "last_attempt_at": started.isoformat(),
+            "last_finished_at": finished.isoformat(),
+            "last_outcome": "success" if success else "failure",
+            "restic_exit_code": result.returncode,
+            "elapsed_seconds": elapsed,
+            "failure_message": None if success else f"restic exited with code {result.returncode}",
+        }
+        if backup and success:
+            snapshot_id = self._summary(result.stdout).get("snapshot_id")
+            changes["last_successful_backup_at"] = finished.isoformat()
+            if snapshot_id:
+                changes["last_successful_snapshot_id"] = snapshot_id
+        if check:
+            changes["check_status"] = "success" if success else "failure"
+            if success:
+                changes["last_successful_check_at"] = finished.isoformat()
+        if restore_drill:
+            changes["restore_drill_status"] = "success" if success else "failure"
+            if success:
+                changes["last_successful_restore_drill_at"] = finished.isoformat()
+        self._write_status(changes)
+        self._write_log(
+            {
+                "event": operation,
+                "started_at": started.isoformat(),
+                "finished_at": finished.isoformat(),
+                "outcome": "success" if success else "failure",
+                "returncode": result.returncode,
+                "elapsed_seconds": elapsed,
+                "failure_message": changes["failure_message"],
+            }
+        )
+        return result
 
     @property
     def password_command(self) -> str:
@@ -153,7 +330,17 @@ class BackupService:
 
     def _env(self) -> dict[str, str]:
         env = dict(os.environ)
-        env.pop("RESTIC_PASSWORD", None)
+        # launchd does not read interactive shell startup files. Keep command
+        # discovery deterministic for both direct and scheduled invocations.
+        env["PATH"] = COMMAND_PATH
+        for name in (
+            "RESTIC_PASSWORD",
+            "RESTIC_PASSWORD_FILE",
+            "RESTIC_PASSWORD_COMMAND",
+            "RCLONE_CONFIG_PASS",
+            "RCLONE_PASSWORD_COMMAND",
+        ):
+            env.pop(name, None)
         env["RESTIC_PASSWORD_COMMAND"] = self.password_command
         # Restic's rclone backend inherits this when it invokes rclone, so
         # direct validation and scheduled backups remain noninteractive.
@@ -202,11 +389,26 @@ class BackupService:
     def _require_repository_access(self) -> None:
         self.ensure_remote()
         self.ensure_keychain()
+        self._verify_repository_identity()
+
+    def _verify_repository_identity(self) -> None:
+        result = self._restic("cat", "config")
+        if result.returncode != 0:
+            raise BackupError("unable to read the dedicated restic repository identity")
+        try:
+            repository_id = json.loads(result.stdout)["id"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise BackupError("dedicated restic repository returned an invalid identity") from exc
+        if repository_id != REPOSITORY_ID:
+            raise BackupError("restic repository identity mismatch; refusing the configured remote")
 
     def preflight(self) -> BackupSource:
-        source = resolve_backup_source(self.config, self.prober)
-        self.ensure_remote()
-        self.ensure_keychain()
+        source = resolve_backup_source(
+            self.config,
+            self.prober,
+            allow_storage_root_override=self.allow_test_source_override,
+        )
+        self._require_repository_access()
         return source
 
     @staticmethod
@@ -241,26 +443,18 @@ class BackupService:
 
     def initialize(self) -> str:
         self._require_repository_access()
-        existing = self._restic("cat", "config")
-        if existing.returncode == 0:
-            return "Repository already exists; no initialization performed."
-        if existing.returncode != 10:
-            raise BackupError("unable to determine whether the dedicated restic repository already exists")
-        created = self._restic("init")
-        if created.returncode != 0:
-            raise BackupError("restic repository initialization failed")
-        return "Repository initialized."
+        return "Pinned repository already exists; no initialization performed."
 
     def _write_log(self, event: dict[str, object]) -> None:
         try:
-            self.log_dir.mkdir(parents=True, exist_ok=True)
+            self.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.log_dir.chmod(0o700)
             log_file = self.log_dir / f"backup-{datetime.now(UTC).strftime('%Y-%m')}.jsonl"
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
-        except OSError:
-            # Logging is observability only. A log-directory problem must not
-            # turn a completed backup into a data-source failure.
-            pass
+            log_file.chmod(0o600)
+        except OSError as exc:
+            raise BackupError(f"unable to persist backup log: {exc}") from exc
 
     @staticmethod
     def _summary(output: str) -> dict[str, int | str]:
@@ -277,78 +471,147 @@ class BackupService:
         return summary
 
     def backup(self, extra_tag: str | None = None) -> CommandResult:
-        source = self.preflight()
-        if extra_tag is not None and not TAG_RE.fullmatch(extra_tag):
-            raise BackupError("backup tag must use letters, numbers, dots, underscores, or hyphens")
-        tags = ["t7", "angel"] + ([extra_tag] if extra_tag else ["automatic"])
-        command = [
-            "backup",
-            "--json",
-            "--host",
-            self.hostname,
-            "--one-file-system",
-        ]
-        for tag in tags:
-            command.extend(["--tag", tag])
-        for pattern in self.config.backup.exclude_patterns:
-            command.extend(["--exclude", pattern])
-        command.append(str(source.root))
-        started = datetime.now(UTC)
-        result = self._restic(*command)
-        summary = self._summary(result.stdout)
-        self._write_log(
-            {
-                "event": "backup",
-                "started_at": started.isoformat(),
-                "finished_at": datetime.now(UTC).isoformat(),
-                "outcome": "success" if result.returncode == 0 else "restic_failure",
-                "returncode": result.returncode,
-                "repository": self.config.backup.repository,
-                "source_uuid": source.volume_uuid,
-                "source_label": source.label,
-                "tags": tags,
-                **summary,
-            }
-        )
-        return result
+        def run() -> CommandResult:
+            source = self.preflight()
+            if extra_tag is not None and not TAG_RE.fullmatch(extra_tag):
+                raise BackupError("backup tag must use letters, numbers, dots, underscores, or hyphens")
+            tags = ["t7", "angel"] + ([extra_tag] if extra_tag else ["automatic"])
+            command = ["backup", "--json", "--host", self.hostname, "--one-file-system"]
+            for tag in tags:
+                command.extend(["--tag", tag])
+            for pattern in self.config.backup.exclude_patterns:
+                command.extend(["--exclude", pattern])
+            command.append(str(source.root))
+            result = self._restic(*command)
+            summary = self._summary(result.stdout)
+            self._write_log(
+                {
+                    "event": "backup",
+                    "outcome": "success" if result.returncode == 0 else "restic_failure",
+                    "returncode": result.returncode,
+                    "repository": self.config.backup.repository,
+                    "source_uuid": source.volume_uuid,
+                    "source_label": source.label,
+                    "tags": tags,
+                    **summary,
+                }
+            )
+            return result
+
+        return self._record_operation("backup", run, backup=True)
 
     def snapshots(self) -> CommandResult:
         self._require_repository_access()
         return self._restic("snapshots")
 
     def check(self, *, deep: bool = False) -> CommandResult:
-        self._require_repository_access()
-        return self._restic("check", "--read-data" if deep else "--read-data-subset=5%")
+        def run() -> CommandResult:
+            self._require_repository_access()
+            return self._restic("check", "--read-data" if deep else "--read-data-subset=5%")
+
+        return self._record_operation("check", run, check=True)
 
     def restore(self, snapshot: str, target: Path, includes: Sequence[str] = ()) -> CommandResult:
-        if not snapshot or snapshot.startswith("-"):
-            raise BackupError("a valid restic snapshot ID (or 'latest') is required")
-        destination = validate_restore_target(target, self.config, self.prober)
-        self._require_repository_access()
-        destination.mkdir(parents=True, exist_ok=True)
-        command = ["restore", snapshot, "--target", str(destination), "--verify"]
-        for include in includes:
-            command.extend(["--include", include])
-        return self._restic(*command)
+        def run() -> CommandResult:
+            if not snapshot or snapshot.startswith("-"):
+                raise BackupError("a valid restic snapshot ID (or 'latest') is required")
+            destination = validate_restore_target(
+                target,
+                self.config,
+                self.prober,
+                allow_storage_root_override=self.allow_test_source_override,
+            )
+            self._require_repository_access()
+            destination.mkdir(parents=True, exist_ok=True)
+            command = ["restore", snapshot, "--target", str(destination), "--verify"]
+            for include in includes:
+                command.extend(["--include", include])
+            return self._restic(*command)
+
+        return self._record_operation("restore", run)
 
     def retention(self, *, apply: bool = False, confirmed_after_restore: bool = False) -> CommandResult:
-        self._require_repository_access()
-        if apply and not confirmed_after_restore:
-            raise BackupError("refusing destructive prune: also pass --confirmed-after-restore")
-        retention = self.config.backup.retention
-        command = [
-            "forget",
-            "--keep-daily",
-            str(retention.keep_daily),
-            "--keep-weekly",
-            str(retention.keep_weekly),
-            "--keep-monthly",
-            str(retention.keep_monthly),
-            "--keep-yearly",
-            str(retention.keep_yearly),
-        ]
-        if apply:
-            command.append("--prune")
+        def run() -> CommandResult:
+            self._require_repository_access()
+            if apply and not self.config.backup.retention.enabled:
+                raise BackupError("retention is disabled in config; refusing destructive forget/prune")
+            if apply and not confirmed_after_restore:
+                raise BackupError("refusing destructive prune: also pass --confirmed-after-restore")
+            retention = self.config.backup.retention
+            command = [
+                "forget", "--keep-daily", str(retention.keep_daily), "--keep-weekly", str(retention.keep_weekly),
+                "--keep-monthly", str(retention.keep_monthly), "--keep-yearly", str(retention.keep_yearly),
+            ]
+            command.append("--prune" if apply else "--dry-run")
+            return self._restic(*command)
+
+        return self._record_operation("retention", run)
+
+    @staticmethod
+    def _hash_tree(path: Path) -> dict[str, str]:
+        if path.is_file():
+            paths = [path]
+            base = path.parent
+        elif path.is_dir():
+            paths = [candidate for candidate in path.rglob("*") if candidate.is_file()]
+            base = path
         else:
-            command.append("--dry-run")
-        return self._restic(*command)
+            raise BackupError(f"restore drill source disappeared or is not a file/directory: {path}")
+        hashes: dict[str, str] = {}
+        for candidate in paths:
+            digest = hashlib.sha256()
+            try:
+                with candidate.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError as exc:
+                raise BackupError(f"unable to hash restore drill source: {candidate}") from exc
+            hashes[str(candidate.relative_to(base))] = digest.hexdigest()
+        return hashes
+
+    def restore_drill(self, snapshot: str = "latest") -> CommandResult:
+        """Restore a configured small path to a disposable local directory and compare SHA-256s."""
+        def run() -> CommandResult:
+            relative = self.config.backup.restore_drill_relative_path
+            if not relative:
+                raise BackupError("backup.restore_drill_relative_path is not configured; refusing an unspecified drill")
+            relative_path = Path(relative)
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                raise BackupError("backup.restore_drill_relative_path must be a safe path relative to the T7 root")
+            if relative_path == Path("."):
+                raise BackupError("restore drill may not target the entire T7 volume")
+            source_root = resolve_backup_source(
+                self.config,
+                self.prober,
+                allow_storage_root_override=self.allow_test_source_override,
+            ).root
+            try:
+                source = (source_root / relative_path).resolve(strict=True)
+            except OSError as exc:
+                raise BackupError("restore drill source is unavailable") from exc
+            if not _is_relative_to(source, source_root):
+                raise BackupError("backup.restore_drill_relative_path escapes the T7 root")
+            source_hashes = self._hash_tree(source)
+            if not source_hashes:
+                raise BackupError("restore drill source has no files to verify")
+            self._require_repository_access()
+            drills_dir = self.state_dir / "restore-drills"
+            drills_dir.mkdir(parents=True, exist_ok=True)
+            target = Path(tempfile.mkdtemp(prefix="drill-", dir=drills_dir))
+            include = str(source)
+            try:
+                result = self._restic("restore", snapshot, "--target", str(target), "--verify", "--include", include)
+                if result.returncode != 0:
+                    return result
+                restored = target / source.relative_to(source.anchor)
+                if self._hash_tree(restored) != source_hashes:
+                    raise BackupError("restore drill hash verification failed")
+                return result
+            finally:
+                # target is created directly beneath our private state path.
+                try:
+                    shutil.rmtree(target)
+                except OSError as exc:
+                    raise BackupError("restore drill cleanup failed") from exc
+
+        return self._record_operation("restore_drill", run, restore_drill=True)

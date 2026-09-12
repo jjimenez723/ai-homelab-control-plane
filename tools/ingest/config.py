@@ -79,14 +79,29 @@ DEFAULTS: dict[str, Any] = {
         "keychain_service": "ai-homelab-t7-restic",
         "rclone_keychain_service": "ai-homelab-rclone-config",
         "retention": {
-            "keep_daily": 30,
-            "keep_weekly": 12,
-            "keep_monthly": 24,
-            "keep_yearly": 5,
+            "enabled": False,
+            "keep_daily": 7,
+            "keep_weekly": 4,
+            "keep_monthly": 6,
+            "keep_yearly": 0,
         },
-        # The only default exclusions are incomplete transfer artifacts. Do
-        # not add valuable data classes here without an explicit decision.
-        "exclude_patterns": ["90-system/staging/**", "**/*.partial"],
+        # A relative path on the T7 for the monthly, isolated restore drill.
+        # null disables the drill until an operator chooses a durable marker.
+        "restore_drill_relative_path": None,
+        # The only default exclusions are incomplete transfer artifacts and
+        # macOS volume metadata that is either unreadable or meaningless in a
+        # restore. `.Spotlight-V100` is SIP-protected: restic cannot open it
+        # even as the owner, which otherwise makes every backup exit 3 and be
+        # logged as a failure. Do not add valuable data classes here without
+        # an explicit decision.
+        "exclude_patterns": [
+            "90-system/staging/**",
+            "**/*.partial",
+            ".Spotlight-V100",
+            ".fseventsd",
+            ".TemporaryItems",
+            ".Trashes",
+        ],
     },
 }
 
@@ -143,10 +158,11 @@ class SourcesConfig:
 
 @dataclass(frozen=True)
 class BackupRetentionConfig:
-    keep_daily: int = 30
-    keep_weekly: int = 12
-    keep_monthly: int = 24
-    keep_yearly: int = 5
+    enabled: bool = False
+    keep_daily: int = 7
+    keep_weekly: int = 4
+    keep_monthly: int = 6
+    keep_yearly: int = 0
 
 
 @dataclass(frozen=True)
@@ -155,7 +171,15 @@ class BackupConfig:
     keychain_service: str = "ai-homelab-t7-restic"
     rclone_keychain_service: str = "ai-homelab-rclone-config"
     retention: BackupRetentionConfig = field(default_factory=BackupRetentionConfig)
-    exclude_patterns: tuple[str, ...] = ("90-system/staging/**", "**/*.partial")
+    restore_drill_relative_path: str | None = None
+    exclude_patterns: tuple[str, ...] = (
+        "90-system/staging/**",
+        "**/*.partial",
+        ".Spotlight-V100",
+        ".fseventsd",
+        ".TemporaryItems",
+        ".Trashes",
+    )
 
 
 @dataclass(frozen=True)
@@ -244,18 +268,24 @@ def load_config(path: Path | None = None) -> IngestConfig:
     backup_raw = merged["backup"]
     retention_raw = backup_raw["retention"]
     retention = BackupRetentionConfig(
+        enabled=bool(retention_raw.get("enabled", False)),
         keep_daily=int(retention_raw["keep_daily"]),
         keep_weekly=int(retention_raw["keep_weekly"]),
         keep_monthly=int(retention_raw["keep_monthly"]),
         keep_yearly=int(retention_raw["keep_yearly"]),
     )
-    if any(value < 1 for value in (retention.keep_daily, retention.keep_weekly, retention.keep_monthly, retention.keep_yearly)):
-        raise ValueError("backup retention values must each be at least 1")
+    if any(value < 0 for value in (retention.keep_daily, retention.keep_weekly, retention.keep_monthly, retention.keep_yearly)):
+        raise ValueError("backup retention values may not be negative")
     backup = BackupConfig(
         repository=str(backup_raw["repository"]),
         keychain_service=str(backup_raw["keychain_service"]),
         rclone_keychain_service=str(backup_raw["rclone_keychain_service"]),
         retention=retention,
+        restore_drill_relative_path=(
+            str(backup_raw["restore_drill_relative_path"])
+            if backup_raw.get("restore_drill_relative_path")
+            else None
+        ),
         exclude_patterns=tuple(str(pattern) for pattern in backup_raw["exclude_patterns"]),
     )
 

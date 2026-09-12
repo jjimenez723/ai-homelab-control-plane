@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.ai-homelab.t7-check</string>
+  <key>ProgramArguments</key><array><string>__REPOSITORY_ROOT__/scripts/backup-t7-scheduled</string><string>check</string></array>
+  <key>WorkingDirectory</key><string>__REPOSITORY_ROOT__</string>
+  <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>7</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>__REPOSITORY_ROOT__/.state/backup/logs/launchd-check.out.log</string>
+  <key>StandardErrorPath</key><string>__REPOSITORY_ROOT__/.state/backup/logs/launchd-check.err.log</string>
+</dict></plist>

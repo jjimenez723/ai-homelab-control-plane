@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Unload only; retain rendered plists for inspection/reinstallation.
+set -euo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+for label in com.ai-homelab.t7-backup com.ai-homelab.t7-check; do
+  launchctl bootout "gui/$UID/$label" 2>/dev/null || true
+done
+echo "Unloaded T7 backup LaunchAgents; plist files were retained."
