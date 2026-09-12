@@ -538,14 +538,16 @@ class LocalLedger(LedgerTables):
     ) -> ObservedFile:
         """Record that a file exists, returning its stable local identity.
 
-        Inode reuse is the one way (device, inode) can lie: the file we knew is
-        deleted and an unrelated file lands on the same inode. The signature of
-        that is unmistakable -- different content *and* the path we last saw is
-        gone -- and it must reset the lineage, because inheriting the old
-        record would let a stranger's file inherit a human naming lock.
+        (device, inode) survives renames but it does not prove byte identity.
+        An inode can be reused after delete/create, and many applications save
+        by rewriting an existing inode in place. Those cases are impossible to
+        distinguish reliably after the fact, so a changed content hash always
+        starts a new generation.
 
-        Different content at a path that still exists is the opposite case: the
-        owner edited the file in place. That keeps its lineage and its lock.
+        This is intentionally conservative. The filename already on disk is
+        left untouched, so a human-authored useful name survives physically,
+        but model decisions, retention state, and human authority recorded for
+        the previous bytes are not silently inherited by different bytes.
         """
         local_file_id = local_file_id_for(source_volume_id, device, inode)
         existing = self.get_local_file(local_file_id)
@@ -555,8 +557,7 @@ class LocalLedger(LedgerTables):
         if existing is not None:
             generation = int(existing["generation"])
             content_changed = bool(existing["sha256"]) and existing["sha256"] != sha256
-            previous_path = Path(existing["current_path"])
-            if content_changed and not previous_path.exists() and previous_path != path:
+            if content_changed:
                 is_new_generation = True
                 generation += 1
 
