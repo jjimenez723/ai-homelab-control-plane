@@ -51,6 +51,37 @@ class ExclusionTests(unittest.TestCase):
             self.assertEqual(scan.eligible, [])
             self.assertEqual(scan.exclusion_counts.get(ExclusionReason.INCOMPLETE_DOWNLOAD), 3)
 
+    def test_final_looking_name_is_excluded_while_download_sidecar_exists(self):
+        """A final pathname beside a browser temp marker is still in progress."""
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = Path(tmp) / "Downloads"
+            final = write_file(downloads / "archive.zip", age_seconds=3600)
+            write_file(downloads / "archive.zip.crdownload", age_seconds=3600)
+            config = build_config(desktop=Path(tmp) / "Desktop", downloads=downloads)
+
+            scan = scan_source(downloads, config=config)
+            self.assertEqual(scan.eligible, [])
+            self.assertEqual(scan.exclusion_counts.get(ExclusionReason.INCOMPLETE_DOWNLOAD), 2)
+
+            (downloads / "archive.zip.crdownload").unlink()
+            scan = scan_source(downloads, config=config)
+            self.assertEqual([item.path for item in scan.eligible], [final])
+
+    def test_safari_download_directory_blocks_final_looking_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = Path(tmp) / "Downloads"
+            final = write_file(downloads / "report.pdf", age_seconds=3600)
+            (downloads / "report.pdf.download").mkdir(parents=True)
+            config = build_config(desktop=Path(tmp) / "Desktop", downloads=downloads)
+
+            scan = scan_source(downloads, config=config)
+            self.assertEqual(scan.eligible, [])
+            self.assertEqual(scan.exclusion_counts.get(ExclusionReason.INCOMPLETE_DOWNLOAD), 1)
+
+            (downloads / "report.pdf.download").rmdir()
+            scan = scan_source(downloads, config=config)
+            self.assertEqual([item.path for item in scan.eligible], [final])
+
     def test_top_level_git_repo_is_excluded_and_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "Desktop"
