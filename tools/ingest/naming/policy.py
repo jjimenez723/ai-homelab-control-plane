@@ -269,6 +269,20 @@ def collision_free_name(directory: Path, filename: str, *, disambiguator: str) -
     raise NamePolicyError(f"could not find a free filename for {filename} in {directory}")
 
 
+def _is_same_file(left: Path, right: Path) -> bool:
+    """Whether two paths name the same inode on the same device.
+
+    The question `left == right` cannot answer on a case-insensitive or
+    normalization-insensitive filesystem, which is the default on macOS.
+    """
+    try:
+        left_stat = left.stat()
+        right_stat = right.stat()
+    except OSError:
+        return False
+    return (left_stat.st_dev, left_stat.st_ino) == (right_stat.st_dev, right_stat.st_ino)
+
+
 def safe_rename(source: Path, target_name: str, *, disambiguator: str) -> Path:
     """Rename `source` to `target_name` in its own directory. Never overwrites.
 
@@ -287,6 +301,21 @@ def safe_rename(source: Path, target_name: str, *, disambiguator: str) -> Path:
         raise NamePolicyError(f"refusing to rename a symlink: {source}")
 
     directory = source.parent
+
+    # `exists()` on APFS is case- and Unicode-normalization-insensitive, so a
+    # rename that changes only case (`Kitchen-Layout.JPG` -> `.jpg`) or only
+    # NFD->NFC reports a collision against the very file being renamed, and the
+    # file ends up with a pointless `-<hash>` suffix. Compare inodes rather than
+    # paths: if the "collision" is this same file, the rename is a no-op that
+    # macOS performs in place.
+    naive_target = directory / target_name
+    if naive_target != source and _is_same_file(naive_target, source):
+        try:
+            os.rename(source, naive_target)  # same inode: this cannot clobber
+            return naive_target
+        except OSError:
+            return source
+
     resolved_name = collision_free_name(directory, target_name, disambiguator=disambiguator)
     target = directory / resolved_name
     if target == source:

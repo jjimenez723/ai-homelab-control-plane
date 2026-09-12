@@ -239,12 +239,30 @@ class RenameAuthorityTests(unittest.TestCase):
                     offenders.append(f"{relative}:{line} {name}")
         self.assertEqual(offenders, [], "unexpected rename authority: " + ", ".join(offenders))
 
-    def test_os_rename_is_never_used_to_move_a_local_file(self):
-        """`os.rename` overwrites silently on POSIX, so it is banned here."""
+    def test_os_rename_is_only_used_where_it_provably_cannot_clobber(self):
+        """`os.rename` overwrites silently on POSIX, so its use is confined.
+
+        One use is allowed, and only one: renaming a file to a name that macOS
+        already considers the same file (a case-only or NFD/NFC-only change on
+        a case-insensitive volume). There the "target" *is* the source inode,
+        so there is nothing it could destroy -- and `os.link` and `O_EXCL`
+        cannot express it, because both refuse a target the filesystem reports
+        as existing.
+
+        The guard is what makes it safe, so this asserts the guard is there
+        rather than merely counting the calls.
+        """
         source = (INGEST / "naming" / "policy.py").read_text(encoding="utf-8")
-        self.assertNotIn("os.rename(", source)
         self.assertIn("os.link(", source)  # the atomic, non-clobbering path
         self.assertIn("O_EXCL", source)  # the fallback reservation
+
+        uses = [line.strip() for line in source.splitlines() if "os.rename(" in line]
+        self.assertEqual(len(uses), 1, f"os.rename is confined to one site; found {uses}")
+
+        # It must sit under the same-inode check, not merely somewhere nearby.
+        before, _, _ = source.partition("os.rename(")
+        guard = before.rsplit("def ", 1)[-1]
+        self.assertIn("_is_same_file(", guard, "os.rename must be guarded by a same-inode check")
 
 
 if __name__ == "__main__":

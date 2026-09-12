@@ -35,6 +35,7 @@ from tools.ingest.sources import ScreenshotsNotConfigured, resolve_screenshots_r
 from tools.ingest.t7 import resolve_t7
 
 from tests.ingest.fi_helpers import (
+    aged,
     fi_config,
     fresh,
     make_blob,
@@ -550,3 +551,72 @@ class OwnerDecisionTests(FileIntelligenceTestCase):
         self.assertEqual(runs[-1]["human_corrected"], 1)
         self.assertIn("kitchen layout", runs[-1]["reason"])
         self.assertEqual(runs[0]["human_corrected"], 0)
+
+
+class RescanCostTests(FileIntelligenceTestCase):
+    """An hourly agent must not read every byte of every file, every hour.
+
+    The risk of caching is deciding against stale bytes, so these check both
+    halves: an untouched file is not re-read, and a file that changed *is*.
+    """
+
+    def _run_counting_reads(self, **kwargs):
+        from unittest import mock
+
+        import tools.ingest.pipeline as pipeline_module
+
+        reads = []
+        real = pipeline_module.sha256_file
+
+        def counting(path, *args, **kw):
+            reads.append(Path(path).name)
+            return real(path, *args, **kw)
+
+        with mock.patch.object(pipeline_module, "sha256_file", counting):
+            report = self.run_pipeline(**kwargs)
+        return report, reads
+
+    def test_an_untouched_file_is_not_rehashed_on_the_next_run(self):
+        make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(1600, 900))
+        first, first_reads = self._run_counting_reads(targets=("screenshots",), apply=True)
+        self.assertEqual(len(first_reads), 1, "the first run must read the file")
+
+        _, second_reads = self._run_counting_reads(targets=("screenshots",), apply=True)
+        self.assertEqual(second_reads, [], "an unchanged file must not be read again")
+
+    def test_a_file_that_changed_is_read_again(self):
+        path = make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(1600, 900))
+        report, _ = self._run_counting_reads(targets=("screenshots",), apply=True)
+        renamed = report.sources[0].outcomes[0].path
+
+        # Grow the file, then let it settle again -- a download that resumed
+        # and finished. A file whose mtime is still fresh is skipped by the
+        # settle check long before the cache is consulted, which would make
+        # this test pass for the wrong reason.
+        renamed.write_bytes(renamed.read_bytes() + b"appended bytes")
+        aged(renamed)
+
+        _, reads = self._run_counting_reads(targets=("screenshots",), apply=True)
+        self.assertEqual(reads, [renamed.name], "a changed file must be read again")
+
+    def test_a_file_moved_to_a_new_path_is_read_again(self):
+        path = make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(1600, 900))
+        report, _ = self._run_counting_reads(targets=("screenshots",), apply=True)
+        renamed = report.sources[0].outcomes[0].path
+
+        moved = renamed.parent / "moved-by-the-owner.png"
+        renamed.rename(moved)
+
+        _, reads = self._run_counting_reads(targets=("screenshots",), apply=True)
+        self.assertEqual(reads, [moved.name], "the same inode at a new path must be re-read")
+
+    def test_the_cached_verdict_matches_a_full_read(self):
+        """The fast path must not change any decision, only its cost."""
+        make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(1600, 900))
+        first = self.run_pipeline(targets=("screenshots",), apply=True)
+        second = self.run_pipeline(targets=("screenshots",), apply=True)
+
+        a = first.sources[0].outcomes[0]
+        b = second.sources[0].outcomes[0]
+        self.assertEqual(a.sha256, b.sha256)
+        self.assertEqual(a.retention, b.retention)

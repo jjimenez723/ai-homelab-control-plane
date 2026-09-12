@@ -21,6 +21,7 @@ its ledger lives on the Mac (D-021).
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,7 @@ from tools.ingest.catalog import Catalog, now_iso
 from tools.ingest.config import IngestConfig
 from tools.ingest.exclusions import is_incomplete_download, is_settled
 from tools.ingest.hashing import sha256_file
+from tools.ingest.identity import local_file_id_for
 from tools.ingest.ledger import (
     DECISION_PROPOSED,
     DECISION_RENAMED,
@@ -37,7 +39,7 @@ from tools.ingest.ledger import (
     RETENTION_REVIEW,
     LocalLedger,
 )
-from tools.ingest.media.probe import probe_file
+from tools.ingest.media.probe import PROBE_VERSION, MediaFacts, probe_file
 from tools.ingest.naming.evidence import gather_evidence
 from tools.ingest.naming.quality import QUALITY_GOOD, assess
 from tools.ingest.naming.proposer import DeterministicProposer, DisabledProposer, NameProposer
@@ -53,6 +55,9 @@ from tools.ingest.sources import (
 from tools.ingest.t7 import ResolvedT7
 from tools.ingest.transaction import PlannedTransfer, TransferOutcome, transfer_file
 from tools.ingest.triage.policy import RetentionDecision, human_decision, may_auto_ingest, triage
+
+LOCAL_VOLUME_ID = "mac-local"
+
 
 @dataclass
 class FileOutcome:
@@ -267,6 +272,52 @@ def run_source(
     return report
 
 
+def _unchanged_since_last_scan(ledger: LocalLedger, path: Path, stat) -> tuple[str, MediaFacts] | None:
+    """The stored hash and probe, if this file demonstrably has not changed.
+
+    The test is deliberately strict, because being wrong here means naming and
+    triage decisions made against stale bytes:
+
+    * the ledger already knows this (device, inode);
+    * it is at the same path under the same name;
+    * the size is identical;
+    * the file's mtime is older than the moment we last looked at it;
+    * and we have a stored hash and a probe from *this* probe version.
+
+    Any of those failing means a full read. mtime is trivially forgeable by a
+    writer, which is exactly why this returns cached data rather than skipping
+    work that protects a file -- `transfer_file` still hashes independently
+    before it removes anything.
+    """
+    row = ledger.get_local_file(local_file_id_for(LOCAL_VOLUME_ID, stat.st_dev, stat.st_ino))
+    if row is None or not row["sha256"]:
+        return None
+    if row["current_path"] != str(path) or row["size"] != stat.st_size:
+        return None
+
+    last_seen = row["last_seen_at"]
+    if not last_seen:
+        return None
+    try:
+        seen_at = dt.datetime.fromisoformat(last_seen).timestamp()
+    except ValueError:
+        return None
+    if stat.st_mtime >= seen_at:
+        return None
+
+    stored = ledger.get_media_metadata(row["local_file_id"], "local_file")
+    if stored is None or stored["probe_version"] != PROBE_VERSION:
+        return None
+
+    return row["sha256"], MediaFacts(
+        media_kind=stored["media_kind"],
+        mime=stored["mime"],
+        facts=stored["facts"],
+        probe=stored["probe"],
+        probe_version=stored["probe_version"],
+    )
+
+
 def _process_file(
     config: IngestConfig,
     ledger: LocalLedger,
@@ -289,14 +340,28 @@ def _process_file(
 
     try:
         stat = path.stat()
-        sha256 = sha256_file(path)
     except OSError as exc:
         report.errors.append(f"{path.name}: unreadable: {exc}")
         return None
 
     mime, _ = mimetypes.guess_type(path.name)
-    facts = probe_file(path, mime=mime)
     now = now_iso()
+
+    # Reading every byte of every file on every run is what an hourly agent
+    # over a Downloads folder would otherwise do -- forever, to reach a verdict
+    # that is almost always "already named". Reuse the stored hash and probe
+    # only when the file provably has not been touched since we last read it;
+    # anything unclear falls through to the full read.
+    cached = _unchanged_since_last_scan(ledger, path, stat)
+    if cached is not None:
+        sha256, facts = cached
+    else:
+        try:
+            sha256 = sha256_file(path)
+        except OSError as exc:
+            report.errors.append(f"{path.name}: unreadable: {exc}")
+            return None
+        facts = probe_file(path, mime=mime)
 
     observed = ledger.observe_file(
         path=path,
