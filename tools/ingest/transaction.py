@@ -91,26 +91,29 @@ def _copy_with_fsync(source_path: Path, staging_path: Path, hooks: TransferFault
 
 def _resolve_final_path(catalog: Catalog, asset_id: str, inbox_dir: Path, source_class: str, rel_path: str, source_sha256: str) -> Path:
     base = inbox_dir / source_class / rel_path
-    if not base.exists():
-        return base
 
+    # Catalog ownership is authoritative even when the physical file is
+    # temporarily absent. A verified row may have recorded its destination and
+    # then crashed before the staging rename. Letting another asset take that
+    # path creates two catalog claims and makes the old resume ambiguous.
     owner_asset_id = catalog.get_asset_id_by_final_path(str(base))
     if owner_asset_id == asset_id:
         return base  # this asset already owns this path (resuming a prior attempt)
+    if owner_asset_id is not None:
+        return base.parent / f"{base.stem}__{asset_id[:8]}{base.suffix}"
 
-    if owner_asset_id is None:
-        # No catalog row claims this path -- a foreign, pre-existing file.
-        # Content equality here means it's a genuine duplicate, safe to reuse.
-        try:
-            if base.is_file() and sha256_file(base) == source_sha256:
-                return base
-        except OSError:
-            pass
+    if not base.exists():
+        return base
 
-    # A different asset already owns this path (possibly from a different
-    # source volume with the same relative path), or content differs:
-    # disambiguate using this asset's own identity, not just content, so two
-    # unrelated assets never end up sharing one final path.
+    # No catalog row claims this path -- a foreign, pre-existing file.
+    # Content equality here means it is safe for this one asset to adopt.
+    try:
+        if base.is_file() and sha256_file(base) == source_sha256:
+            return base
+    except OSError:
+        pass
+
+    # Unclaimed path with different/unknown content: preserve the foreign file.
     return base.parent / f"{base.stem}__{asset_id[:8]}{base.suffix}"
 
 
