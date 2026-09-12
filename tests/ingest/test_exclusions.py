@@ -51,6 +51,21 @@ class ExclusionTests(unittest.TestCase):
             self.assertEqual(scan.eligible, [])
             self.assertEqual(scan.exclusion_counts.get(ExclusionReason.INCOMPLETE_DOWNLOAD), 3)
 
+    def test_final_looking_file_waits_for_incomplete_sidecar_to_disappear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = Path(tmp) / "Downloads"
+            final = write_file(downloads / "archive.zip", age_seconds=3600)
+            write_file(downloads / "archive.zip.crdownload", age_seconds=3600)
+            config = build_config(desktop=Path(tmp) / "Desktop", downloads=downloads, settle_seconds=1)
+
+            scan = scan_source(downloads, config=config)
+            self.assertEqual(scan.eligible, [])
+            self.assertEqual(scan.exclusion_counts.get(ExclusionReason.INCOMPLETE_DOWNLOAD), 2)
+
+            (downloads / "archive.zip.crdownload").unlink()
+            scan = scan_source(downloads, config=config)
+            self.assertEqual([item.path for item in scan.eligible], [final])
+
     def test_incomplete_download_package_is_not_descended_into(self):
         """Safari can represent an active download as a .download directory."""
         with tempfile.TemporaryDirectory() as tmp:
