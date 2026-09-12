@@ -33,6 +33,7 @@ from tools.ingest.ledger import (
     RETENTION_REVIEW,
     LocalLedger,
 )
+from tools.ingest.evidence.raster import pdfium_available
 from tools.ingest.media.probe import ffprobe_available, pypdf_available
 from tools.ingest.sources import (
     ScreenshotsNotConfigured,
@@ -228,6 +229,23 @@ def _describe_error(run: dict[str, Any] | None) -> str:
     return f"{run.get('finished_at') or run.get('started_at')}  {run.get('error_message') or run.get('status')}"
 
 
+def _ocr_backend_note(backend: str) -> str:
+    """Whether the configured OCR backend can actually run on this machine.
+
+    Reported rather than acted on, in the same spirit as the screenshot
+    location: `doctor` answers "is the thing I think is enabled actually
+    enabled", and a backend named in config that is not installed is exactly
+    the kind of silent gap that question exists to surface.
+    """
+    if backend == "null":
+        return "  (performs no OCR; the safe default)"
+    import shutil
+
+    if backend == "tesseract":
+        return "" if shutil.which("tesseract") else "  -- NOT INSTALLED; OCR will record its own absence"
+    return ""
+
+
 def render_doctor(config: IngestConfig, data: StatusData) -> str:
     """Configuration checks, phrased as what to do about each one."""
     lines: list[str] = ["Configuration"]
@@ -277,6 +295,25 @@ def render_doctor(config: IngestConfig, data: StatusData) -> str:
     lines.append(f"  state directory:        {config.state_dir}")
     lines.append(f"  ffprobe (video facts):  {'available' if ffprobe_available() else 'not installed -- video metadata will be skipped'}")
     lines.append(f"  pypdf (PDF facts):      {'available' if pypdf_available() else 'not installed -- PDF page counts/titles will be skipped'}")
+
+    lines.append("")
+    lines.append("Perception (evidence layer -- reads files, decides nothing)")
+    evidence = config.evidence
+    lines.append(f"  evidence:               {'enabled' if evidence.enabled else 'disabled'}")
+    lines.append(
+        f"  OCR backend:            {evidence.ocr.backend}"
+        f"{'' if evidence.ocr.enabled else '  (disabled in config)'}"
+        f"{_ocr_backend_note(evidence.ocr.backend)}"
+    )
+    lines.append(
+        f"  vision backend:         {evidence.vision.backend}"
+        f"{'' if evidence.vision.enabled else '  (disabled in config)'}"
+    )
+    lines.append(
+        f"  pypdfium2 (rasterize):  "
+        f"{'available' if pdfium_available() else 'not installed -- scanned PDFs cannot be rendered for OCR'}"
+    )
+    lines.append("  evidence never renames, moves, deletes, or ingests anything (D-029).")
 
     lines.append("")
     lines.append("Scheduling")

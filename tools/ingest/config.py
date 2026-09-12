@@ -115,6 +115,43 @@ DEFAULTS: dict[str, Any] = {
             "normalize_orientation": True,
         }
     },
+    "evidence": {
+        # Perception only: native text, OCR, a vision description, layout.
+        # This layer never renames, moves, deletes, or ingests anything --
+        # it measures a file's bytes and caches the result for a separate,
+        # later decision to read. See the evidence-layer spec for the full
+        # invariant (FACTS != INTERPRETATIONS != DECISIONS).
+        "enabled": True,
+        # Files larger than this are skipped outright -- nothing rasterized,
+        # no backend invoked -- rather than silently truncated mid-page.
+        "max_bytes": 104_857_600,
+        # A PDF/document past this many pages has only its first pages
+        # perceived; the rest is left unread rather than raising.
+        "max_pages": 20,
+        "raster_dpi": 200,
+        # Decompression-bomb guard for rasterized pages, mirroring
+        # `media.probe.MAX_DECODE_PIXELS`'s reasoning for source images.
+        "raster_max_pixels": 40_000_000,
+        # Extracted text is bounded before it is ever stored; see
+        # `evidence/types.py::sanitize_extracted_text`.
+        "max_text_chars": 20_000,
+        "ocr": {
+            "enabled": True,
+            # "null" performs no OCR at all -- the safe default until an
+            # operator opts into "tesseract" on a machine that has it.
+            "backend": "null",
+            "timeout_seconds": 30,
+            "max_blocks": 2000,
+        },
+        "vision": {
+            "enabled": True,
+            # "heuristic" makes no model call; it is a deterministic,
+            # offline description built from measured facts. "null" performs
+            # no vision perception at all.
+            "backend": "heuristic",
+            "timeout_seconds": 30,
+        },
+    },
     "backup": {
         # This is intentionally constrained in code to the one dedicated
         # Google Drive repository for this machine. It is not a general
@@ -233,6 +270,48 @@ class TriageConfig:
     min_interesting_bytes: int = 4096
 
 
+# Backend names the evidence layer knows how to build. Anything else in
+# config is a typo or a not-yet-implemented backend, and is refused at load
+# time rather than silently falling back to a default the operator didn't ask
+# for -- the same posture as the screenshots-path guard above.
+VALID_OCR_BACKENDS = frozenset({"null", "tesseract"})
+VALID_VISION_BACKENDS = frozenset({"null", "heuristic"})
+
+
+@dataclass(frozen=True)
+class OCRConfig:
+    enabled: bool = True
+    backend: str = "null"  # "null" | "tesseract"
+    timeout_seconds: int = 30
+    max_blocks: int = 2000
+
+
+@dataclass(frozen=True)
+class VisionConfig:
+    enabled: bool = True
+    backend: str = "heuristic"  # "null" | "heuristic"
+    timeout_seconds: int = 30
+
+
+@dataclass(frozen=True)
+class EvidenceConfig:
+    """Perception only -- see `tools/ingest/evidence/__init__.py`.
+
+    Nothing under this key is permitted to change a naming, retention, or
+    ingestion decision; it governs what gets measured and cached, not what
+    happens to a file.
+    """
+
+    enabled: bool = True
+    max_bytes: int = 104_857_600
+    max_pages: int = 20
+    raster_dpi: int = 200
+    raster_max_pixels: int = 40_000_000
+    max_text_chars: int = 20_000
+    ocr: OCRConfig = field(default_factory=OCRConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
+
+
 @dataclass(frozen=True)
 class AutomationConfig:
     enabled: bool = False
@@ -279,6 +358,7 @@ class IngestConfig:
     media: MediaConfig
     naming: NamingConfig = field(default_factory=NamingConfig)
     triage: TriageConfig = field(default_factory=TriageConfig)
+    evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     automation: AutomationConfig = field(default_factory=AutomationConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     config_path: Path | None = None
@@ -393,6 +473,58 @@ def load_config(path: Path | None = None) -> IngestConfig:
     if not 0.0 <= triage.min_ingest_confidence <= 1.0:
         raise ValueError("triage.min_ingest_confidence must be between 0 and 1")
 
+    evidence_raw = merged["evidence"]
+    ocr_raw = evidence_raw["ocr"]
+    vision_raw = evidence_raw["vision"]
+    if ocr_raw["backend"] not in VALID_OCR_BACKENDS:
+        raise ValueError(
+            f"evidence.ocr.backend must be one of {sorted(VALID_OCR_BACKENDS)}, got {ocr_raw['backend']!r}"
+        )
+    if vision_raw["backend"] not in VALID_VISION_BACKENDS:
+        raise ValueError(
+            f"evidence.vision.backend must be one of {sorted(VALID_VISION_BACKENDS)}, "
+            f"got {vision_raw['backend']!r}"
+        )
+    ocr = OCRConfig(
+        enabled=bool(ocr_raw["enabled"]),
+        backend=str(ocr_raw["backend"]),
+        timeout_seconds=int(ocr_raw["timeout_seconds"]),
+        max_blocks=int(ocr_raw["max_blocks"]),
+    )
+    if not 1 <= ocr.timeout_seconds <= 600:
+        raise ValueError("evidence.ocr.timeout_seconds must be between 1 and 600")
+    if ocr.max_blocks <= 0:
+        raise ValueError("evidence.ocr.max_blocks must be a positive integer")
+
+    vision = VisionConfig(
+        enabled=bool(vision_raw["enabled"]),
+        backend=str(vision_raw["backend"]),
+        timeout_seconds=int(vision_raw["timeout_seconds"]),
+    )
+    if not 1 <= vision.timeout_seconds <= 600:
+        raise ValueError("evidence.vision.timeout_seconds must be between 1 and 600")
+
+    evidence = EvidenceConfig(
+        enabled=bool(evidence_raw["enabled"]),
+        max_bytes=int(evidence_raw["max_bytes"]),
+        max_pages=int(evidence_raw["max_pages"]),
+        raster_dpi=int(evidence_raw["raster_dpi"]),
+        raster_max_pixels=int(evidence_raw["raster_max_pixels"]),
+        max_text_chars=int(evidence_raw["max_text_chars"]),
+        ocr=ocr,
+        vision=vision,
+    )
+    if evidence.max_bytes <= 0:
+        raise ValueError("evidence.max_bytes must be a positive integer")
+    if not 1 <= evidence.max_pages <= 10_000:
+        raise ValueError("evidence.max_pages must be between 1 and 10000")
+    if not 1 <= evidence.raster_dpi <= 1200:
+        raise ValueError("evidence.raster_dpi must be between 1 and 1200")
+    if evidence.raster_max_pixels <= 0:
+        raise ValueError("evidence.raster_max_pixels must be a positive integer")
+    if evidence.max_text_chars <= 0:
+        raise ValueError("evidence.max_text_chars must be a positive integer")
+
     automation_raw = merged["automation"]
     override_raw = automation_raw.get("state_dir")
     state_dir_override = _expand(str(override_raw)) if override_raw else None
@@ -471,6 +603,7 @@ def load_config(path: Path | None = None) -> IngestConfig:
         media=media,
         naming=naming,
         triage=triage,
+        evidence=evidence,
         automation=automation,
         backup=backup,
         config_path=resolved_path,

@@ -6,6 +6,8 @@ Read this before changing anything under `tools/ingest/naming/`, `tools/ingest/t
 
 Decisions of record: D-016 (manual-first ingestion), D-019 (the T7 volume-UUID boundary), D-020 (naming vs retention), D-021 (the local ledger), D-022 (a model proposes, trusted code disposes), D-023 (`00-inbox/organized` keeps its name), D-024 (opt-in automation), D-025 (screenshots are configured, never inferred), D-026 (`storage_root_override` needs an explicit flag).
 
+`docs/17-file-evidence.md` is the layer underneath this one: what a file's bytes actually contain (native text, OCR, a vision description). It is perception only — nothing in it reaches any decision described here, and a test enforces that no module under `naming/` or `triage/` imports from `evidence/` (D-029).
+
 `docs/15-file-intelligence-acceptance-drill.md` is the companion: a ten-minute hand-run drill against a scratch directory and a scratch T7 root that demonstrates the guarantees described here. Run it once before trusting the pipeline with anything that matters.
 
 ## The four stages, and why they are separate
@@ -130,7 +132,7 @@ Screenshots are a first-class source for **naming** and are explicitly not a vac
 
 Detection itself is by filename prefix (`screenshot`, `screen shot`, `cleanshot`, and the common localized spellings) — far more reliable than inferring from pixels. The probe's `is_probably_screenshot` (a PNG with no camera EXIF) is explicitly a heuristic and is treated as a secondary cue only: enough to route a file to review, never enough to justify a retention decision on its own.
 
-Retention for screenshots is deliberately unresolved. Telling a disposable UI state from durable design reference requires reading what is *in* the image, which needs OCR and vision — the worker layer, which does not exist. So screenshots triage to `REVIEW` at confidence 0.5 and are reported rather than guessed at.
+Retention for screenshots is deliberately unresolved. Telling a disposable UI state from durable design reference requires reading what is *in* the image, which needs OCR and vision. Those now exist as a perception layer (`docs/17-file-evidence.md`) — but perception is not yet allowed to influence a decision (D-029), so screenshots still triage to `REVIEW` at confidence 0.5 and are reported rather than guessed at. That is the same answer as before, now reached with the evidence sitting beside it rather than absent.
 
 ## Downloads triage states
 
@@ -184,6 +186,11 @@ organize triage all --apply --automated      runs once, exits. Not a daemon.
 ## Every filesystem-mutating code path in the new code
 
 This is the complete list. If you add to it, add to this table.
+
+The evidence layer (`tools/ingest/evidence/`, `docs/17-file-evidence.md`) adds **no rows to
+this table**: it performs zero filesystem writes of any kind, and an AST guard over the whole
+package enforces that with no justification entries permitted. Rasterized pages and crops are
+in-memory bytes; the only persistence is ledger rows.
 
 | Path | What it does | Why it is safe |
 |---|---|---|

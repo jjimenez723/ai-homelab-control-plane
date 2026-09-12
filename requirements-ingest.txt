@@ -6,3 +6,16 @@ pillow-heif==1.7.0
 # a generic name, so it is a declared dependency rather than an optional one.
 # `tools/ingest/media/probe.py` still degrades gracefully if it is missing.
 pypdf==6.18.1
+# Renders PDF pages to pixels so a scanned document (one with no usable
+# embedded text layer) can be OCRed or shown to a vision backend at all --
+# `tools/ingest/evidence/raster.py` is dead without it, and scanned-PDF OCR
+# routing produces no pixels to route. Declared rather than optional because
+# that failure mode (a whole class of document silently getting no OCR) is
+# worth surfacing at install time; the evidence layer still degrades
+# gracefully at runtime if it is missing (`pdfium_available()` reports False,
+# rasterization returns an empty result plus a `backend_unavailable`
+# warning, nothing raises). Chosen over PyMuPDF/fitz, which renders PDF
+# pages just as well, because PyMuPDF is AGPL-licensed; pypdfium2 wraps
+# Google's PDFium and ships under Apache-2.0/BSD-3-Clause with prebuilt
+# wheels and no system library dependency.
+pypdfium2==5.13.0

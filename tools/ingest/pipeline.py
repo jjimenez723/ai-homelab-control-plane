@@ -16,6 +16,15 @@ The two independent questions, in order:
 
 Angel being disconnected disables only step 2. Naming keeps working, because
 its ledger lives on the Mac (D-021).
+
+A third thing happens, and it is deliberately not a question:
+
+3. **What is in this file?** Perception -- native text, OCR, a vision
+   description -- runs *after* both decisions above are final, and feeds
+   neither of them. It builds the evidence corpus a later intelligent namer
+   will read. Until that namer exists and has been proved, evidence here is
+   recorded and inspectable but carries no authority at all, which is why the
+   call sits below the decisions rather than above them.
 """
 
 from __future__ import annotations
@@ -39,6 +48,8 @@ from tools.ingest.ledger import (
     RETENTION_REVIEW,
     LocalLedger,
 )
+from tools.ingest.evidence.extract import collect_evidence
+from tools.ingest.evidence.types import EvidenceSource
 from tools.ingest.media.probe import PROBE_VERSION, MediaFacts, probe_file
 from tools.ingest.naming.evidence import gather_evidence
 from tools.ingest.naming.quality import QUALITY_GOOD, assess
@@ -78,6 +89,12 @@ class FileOutcome:
     ingested: bool = False
     transfer: TransferOutcome | None = None
     note: str = ""
+    # Perception, recorded alongside the decisions but deliberately not an
+    # input to any of them in this phase. See `evidence/extract.py`.
+    evidence_route: tuple[str, ...] = ()
+    evidence_kinds: tuple[str, ...] = ()
+    evidence_warnings: tuple[str, ...] = ()
+    evidence_cache_hits: int = 0
 
 
 @dataclass
@@ -90,6 +107,8 @@ class SourceReport:
     skipped: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     outcomes: list[FileOutcome] = field(default_factory=list)
+    evidence_collected: int = 0
+    evidence_cache_hits: int = 0
 
     def skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -131,6 +150,8 @@ class SourceReport:
             "needs_review": self.needs_review,
             "ignored": self.ignored,
             "ingested": self.ingested,
+            "evidence_collected": self.evidence_collected,
+            "evidence_cache_hits": self.evidence_cache_hits,
             "skipped": dict(self.skipped),
             "errors": list(self.errors),
         }
@@ -518,6 +539,26 @@ def _process_file(
         retention_reason=decision.reason,
     )
 
+    # -- 2a. perception --------------------------------------------------
+    #
+    # Deliberately *after* naming and retention, and deliberately feeding
+    # neither. This phase builds the evidence corpus a later intelligent
+    # namer will read; wiring it into the decisions now would hand model
+    # output authority before the perception itself has been proved
+    # trustworthy. The ordering makes that structural rather than polite:
+    # both decisions above are already final by the time anything here runs.
+    _collect_file_evidence(
+        config, ledger, current_path,
+        sha256=sha256,
+        mime=mime,
+        facts=facts,
+        screenshot_by_name=evidence.screenshot_by_name,
+        size=stat.st_size,
+        now=now,
+        outcome=outcome,
+        report=report,
+    )
+
     # -- 3. ingestion, only where policy explicitly allows it ---------------
 
     if not may_auto_ingest(decision, config.triage):
@@ -563,6 +604,59 @@ def _process_file(
     else:
         outcome.note = transfer.error_message or transfer.skipped_reason or "transfer did not complete"
     return outcome
+
+
+def _collect_file_evidence(
+    config: IngestConfig,
+    ledger: LocalLedger,
+    path: Path,
+    *,
+    sha256: str,
+    mime: str | None,
+    facts: MediaFacts,
+    screenshot_by_name: bool,
+    size: int,
+    now: str,
+    outcome: FileOutcome,
+    report: SourceReport,
+) -> None:
+    """Perceive one file and record the result. Never affects any decision.
+
+    Failure here is cosmetic by construction: the naming and retention rows
+    are already written, the file has already been left where it belongs, and
+    evidence is a cache of observations. So the whole stage is wrapped -- a
+    backend that crashes, a ledger that is locked, a PDF that is a lie -- and
+    degrades to a note on the outcome plus a line in the run's errors.
+    """
+    if not config.evidence.enabled:
+        return
+    try:
+        collected = collect_evidence(
+            source=EvidenceSource(
+                path=path,
+                sha256=sha256,
+                mime=mime,
+                media_kind=facts.media_kind,
+                size=size,
+            ),
+            facts=facts.facts,
+            screenshot_by_name=screenshot_by_name,
+            config=config.evidence,
+            now=now,
+            ledger=ledger,
+        )
+    except Exception as exc:  # noqa: BLE001 - perception never costs a decision
+        report.errors.append(f"{path.name}: evidence: {type(exc).__name__}: {exc}")
+        return
+
+    kinds = tuple(sorted({record.kind for record in collected.provenance}))
+    outcome.evidence_route = collected.route.rules
+    outcome.evidence_kinds = kinds
+    outcome.evidence_warnings = collected.warning_codes()
+    outcome.evidence_cache_hits = sum(1 for record in collected.provenance if record.cache_hit)
+    if kinds:
+        report.evidence_collected += 1
+    report.evidence_cache_hits += outcome.evidence_cache_hits
 
 
 def _why_not_ingested(recommendation: str, config: IngestConfig) -> str:

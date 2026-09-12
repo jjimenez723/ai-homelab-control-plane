@@ -25,6 +25,15 @@ import re
 import unittest
 from pathlib import Path
 
+from tools.ingest.evidence.types import (
+    EvidenceProvenance,
+    EvidenceSource,
+    FileEvidence,
+    NativeText,
+    OCRBlock,
+    RasterImage,
+    VisualEvidence,
+)
 from tools.ingest.naming.evidence import NamingEvidence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -78,6 +87,43 @@ PURE_MODULES = (
     "migrations.py",
     "schema_sql.py",
     "status.py",
+    # Evidence layer (§20): these five do zero I/O of any kind -- not merely
+    # zero *mutation*, which is all `_mutations_in` can actually detect. The
+    # rest of `evidence/` (text.py, raster.py, preprocess.py, perspective.py,
+    # extract.py, backends/__init__.py, backends/tesseract.py,
+    # backends/heuristic.py) legitimately opens files read-only or decodes
+    # bytes handed to it, so it is exercised by the whole-tree, mutation-only
+    # guard below instead of being asserted "pure" here.
+    "evidence/types.py",
+    "evidence/router.py",
+    "evidence/reading_order.py",
+    "evidence/cache.py",
+    "evidence/backends/null.py",
+)
+
+EVIDENCE = INGEST / "evidence"
+
+# `subprocess` is banned everywhere in the evidence package except this one
+# module, which needs an offline CLI OCR engine and has no Python-native
+# alternative. Justifying it here, in the same register as
+# `DELETION_JUSTIFICATIONS` above, means a second module reaching for
+# `subprocess` fails the guard below rather than silently gaining a process-
+# spawning capability nobody reviewed for it.
+EVIDENCE_SUBPROCESS_JUSTIFICATIONS = {
+    "backends/tesseract.py": (
+        "The only offline OCR engine this project ships that needs no Python "
+        "package, only a system binary. Invoked with a fixed argv and a hard "
+        "timeout, no shell, fed PNG bytes on stdin -- never a path, never a "
+        "user-influenced argument."
+    ),
+}
+
+# Modules `tools.ingest.evidence` may never import, anywhere in the package:
+# network access, process spawning (outside the one justified exception
+# above), unpickling arbitrary bytes, raw C access, and the vendored/native
+# libraries this phase deliberately does not depend on (spec §13).
+EVIDENCE_BANNED_IMPORTS = frozenset(
+    {"socket", "urllib", "requests", "httpx", "pickle", "ctypes", "paddle", "paddleocr", "cv2", "numpy", "fitz"}
 )
 
 
@@ -263,6 +309,160 @@ class RenameAuthorityTests(unittest.TestCase):
         before, _, _ = source.partition("os.rename(")
         guard = before.rsplit("def ", 1)[-1]
         self.assertIn("_is_same_file(", guard, "os.rename must be guarded by a same-inode check")
+
+
+class EvidenceLayerNeverWritesTests(unittest.TestCase):
+    """§20: "evidence never writes", over the whole package at once.
+
+    Stronger than `PureModuleTests` above: that asserts purity of five
+    specific modules; this asserts zero mutation calls anywhere under
+    `tools/ingest/evidence/`, with no per-module justification mechanism at
+    all. A module that needs one does not belong in this package -- see the
+    binding spec's invariant 1 ("the evidence layer performs ZERO filesystem
+    writes").
+    """
+
+    def test_the_whole_evidence_tree_has_zero_filesystem_mutations(self):
+        offenders: list[str] = []
+        for path in sorted(EVIDENCE.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(INGEST).as_posix()
+            for line, name in _mutations_in(path):
+                offenders.append(f"{relative}:{line} {name}")
+        self.assertEqual(
+            offenders, [],
+            "the evidence package must perform zero filesystem mutations: " + ", ".join(offenders),
+        )
+
+
+class EvidenceLayerImportGuardTests(unittest.TestCase):
+    """§20: network, process, and native-library bans, enforced by AST."""
+
+    def _imported_names(self, path: Path) -> list[str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names.append(node.module)
+        return names
+
+    def test_no_evidence_module_imports_a_banned_module(self):
+        offenders: list[str] = []
+        for path in sorted(EVIDENCE.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(INGEST).as_posix()
+            for imported in self._imported_names(path):
+                top_level = imported.split(".")[0]
+                if top_level in EVIDENCE_BANNED_IMPORTS:
+                    offenders.append(f"{relative}: imports {imported!r}")
+        self.assertEqual(offenders, [], "banned import(s) found: " + ", ".join(offenders))
+
+    def test_subprocess_is_confined_to_the_justified_tesseract_module(self):
+        offenders: list[str] = []
+        for path in sorted(EVIDENCE.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(EVIDENCE).as_posix()
+            if "subprocess" in self._imported_names(path) and relative not in EVIDENCE_SUBPROCESS_JUSTIFICATIONS:
+                offenders.append(relative)
+        self.assertEqual(
+            offenders, [],
+            "unjustified subprocess import(s): " + ", ".join(offenders) + "; add a reviewed entry to "
+            "EVIDENCE_SUBPROCESS_JUSTIFICATIONS if this is deliberate.",
+        )
+
+    def test_every_subprocess_justification_is_real_and_substantive(self):
+        for module, reason in EVIDENCE_SUBPROCESS_JUSTIFICATIONS.items():
+            with self.subTest(module=module):
+                self.assertTrue((EVIDENCE / module).exists())
+                self.assertGreater(len(reason), 60)
+
+    def test_no_evidence_module_calls_eval_or_exec(self):
+        offenders: list[str] = []
+        for path in sorted(EVIDENCE.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(INGEST).as_posix()
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec"):
+                    offenders.append(f"{relative}:{node.lineno} {node.func.id}(...)")
+        self.assertEqual(offenders, [], "eval/exec found: " + ", ".join(offenders))
+
+
+class EvidenceValueTypesCarryNoAuthorityTests(unittest.TestCase):
+    """Mirrors `EvidenceBoundaryTests` above, for the new evidence value types."""
+
+    _TYPES = (FileEvidence, RasterImage, OCRBlock, VisualEvidence, NativeText, EvidenceProvenance)
+
+    def test_none_of_the_core_evidence_types_expose_a_path_or_callable(self):
+        allowed_fragments = ("Path", "Callable", "IO")
+        for value_type in self._TYPES:
+            for field in dataclasses.fields(value_type):
+                with self.subTest(type=value_type.__name__, field=field.name):
+                    annotation = str(field.type)
+                    for fragment in allowed_fragments:
+                        self.assertNotIn(
+                            fragment, annotation,
+                            f"{value_type.__name__}.{field.name} exposes a {fragment!r} to a backend/consumer",
+                        )
+
+    def test_all_of_them_are_frozen(self):
+        for value_type in self._TYPES:
+            with self.subTest(type=value_type.__name__):
+                self.assertTrue(value_type.__dataclass_params__.frozen)
+
+    def test_evidence_source_is_the_one_deliberate_exception(self):
+        """`EvidenceSource` DOES carry a `Path` -- on purpose. It is handed
+        only to trusted, deterministic, in-repo `TextExtractor`
+        implementations (which must stream large files from disk), and
+        *never* to a model-facing `OCRBackend`/`VisionBackend`, which receive
+        only `RasterImage` (bytes). This test documents that distinction
+        explicitly, rather than the type simply being absent from
+        `_TYPES` above with no explanation."""
+        fields = {field.name: field for field in dataclasses.fields(EvidenceSource)}
+        self.assertIn("path", fields)
+        self.assertIn("Path", str(fields["path"].type))
+        self.assertTrue(EvidenceSource.__dataclass_params__.frozen)
+
+
+class PaddleOcrAttributionTests(unittest.TestCase):
+    """§20 / §12 of the spec: exactly two files may carry adapted PaddleOCR
+    code, and both must carry the full license header, not just the mention."""
+
+    # Expressed relative to `tools/` (not `tools/ingest/`), because the claim
+    # under test is "no other file in `tools/`", which has to search outside
+    # `ingest/` too -- a path-relative-to-INGEST string would not exist for a
+    # hypothetical carrier living elsewhere under `tools/`.
+    _ATTRIBUTED_MODULES = ("ingest/evidence/reading_order.py", "ingest/evidence/perspective.py")
+    _MARKER = "PaddlePaddle Authors"
+    _LICENSE_LINES = (
+        "Licensed under the Apache License, Version 2.0",
+        "http://www.apache.org/licenses/LICENSE-2.0",
+        "Upstream: https://github.com/PaddlePaddle/PaddleOCR",
+    )
+
+    def test_exactly_the_two_named_modules_carry_the_paddleocr_marker(self):
+        tools_root = REPO_ROOT / "tools"
+        carriers = []
+        for path in sorted(tools_root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            if self._MARKER in path.read_text(encoding="utf-8"):
+                carriers.append(path.relative_to(tools_root).as_posix())
+        self.assertEqual(sorted(carriers), sorted(self._ATTRIBUTED_MODULES))
+
+    def test_both_attributed_modules_carry_the_full_license_header(self):
+        for relative in self._ATTRIBUTED_MODULES:
+            with self.subTest(module=relative):
+                text = (REPO_ROOT / "tools" / relative).read_text(encoding="utf-8")
+                self.assertIn(self._MARKER, text)
+                for line in self._LICENSE_LINES:
+                    self.assertIn(line, text)
 
 
 if __name__ == "__main__":
