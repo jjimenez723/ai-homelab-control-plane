@@ -71,6 +71,7 @@ def attach_local_provenance(
     provenance: LocalProvenance,
     *,
     asset_id: str,
+    sidecars_dir: Path,
 ) -> None:
     """Write a file's pre-ingestion lineage onto its Angel asset.
 
@@ -98,3 +99,9 @@ def attach_local_provenance(
         catalog.append_classification(record)
     ledger.link_naming_to_asset(provenance.local_file_id, asset_id)
     ledger.link_classification_to_asset(provenance.local_file_id, asset_id)
+
+    # The transfer primitive already wrote a sidecar, before any of this
+    # existed on the asset row. Regenerate it, or the durable human-readable
+    # record would show only the post-rename name -- which is exactly the
+    # provenance this function exists to preserve.
+    catalog.write_sidecar(asset_id, sidecars_dir)

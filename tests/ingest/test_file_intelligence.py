@@ -12,6 +12,7 @@ The requirements these encode, in one sentence each:
 from __future__ import annotations
 
 import dataclasses
+import json
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from tools.ingest.automation import RunLockBusy, RunPaths, run_lock
 from tools.ingest.catalog import Catalog
+from tools.ingest.cli import cmd_organize
 from tools.ingest.ledger import (
     DECISION_KEPT,
     DECISION_RENAMED,
@@ -40,6 +42,17 @@ from tests.ingest.fi_helpers import (
     make_png,
     make_zip,
 )
+
+
+class _OrganizeArgs:
+    """The argparse namespace `cmd_organize` consumes."""
+
+    def __init__(self, target: str, *, apply: bool):
+        self.target = target
+        self.apply = apply
+        self.dry_run = not apply
+        self.config = None
+        self.allow_dev_storage_root = True
 
 
 class _TitleProposer:
@@ -313,17 +326,18 @@ class AutoIngestTests(FileIntelligenceTestCase):
         self.assertEqual(len(landed), 1)
         self.assertEqual(landed[0].read_bytes(), expected)
 
-    def test_an_ingested_file_keeps_its_pre_rename_provenance(self):
-        """Invariant 11: the owner can still find the file they remember.
+    def test_triage_judges_the_name_the_owner_gave_it_not_the_one_we_generated(self):
+        """A deliberate asymmetry, worth stating explicitly.
 
-        This is the one path where both things happen to the same file -- a
-        badly named document is renamed, and the *new* name is then good enough
-        for triage to propose ingestion. The catalog has to record both names.
+        Name quality is evidence about value precisely because a person chose
+        to type it. Re-reading it after *we* improved it would be circular --
+        the pipeline would bootstrap its own files into the library by renaming
+        them. So triage sees the filename as it was found.
         """
         config = dataclasses.replace(
             self.config, triage=dataclasses.replace(self.config.triage, auto_ingest=True, min_ingest_confidence=0.5)
         )
-        make_blob(self.downloads / "download (7).pdf", b"%PDF-1.4 " + b"z" * 60_000)
+        badly_named = make_blob(self.downloads / "download (7).pdf", b"%PDF-1.4 " + b"z" * 60_000)
 
         resolved = self.resolved_t7()
         catalog = Catalog(resolved.catalog_path)
@@ -342,18 +356,67 @@ class AutoIngestTests(FileIntelligenceTestCase):
 
         outcome = next(o for o in report.outcomes if o.original_filename == "download (7).pdf")
         self.assertEqual(outcome.naming_decision, DECISION_RENAMED)
-        self.assertEqual(outcome.retention, RETENTION_INGEST)
-        self.assertTrue(outcome.ingested, outcome.note)
+        self.assertEqual(outcome.retention, RETENTION_REVIEW)
+        self.assertFalse(outcome.ingested)
+        self.assertFalse(badly_named.exists())
+        self.assertTrue((self.downloads / "2026-09-12_fine-line-group-scope-of-work.pdf").exists())
 
-        asset_id = outcome.transfer.asset_id
-        asset = catalog.get_asset(asset_id)
-        history = catalog.naming_history_for_asset(asset_id)
-        self.assertEqual(asset.row["first_seen_filename"], "download (7).pdf")
-        self.assertIn("download (7).pdf", {row["original_filename"] for row in history})
-        self.assertIn(
-            "2026-09-12_fine-line-group-scope-of-work.pdf",
-            {row["applied_filename"] for row in history if row["applied_filename"]},
-        )
+
+class ProvenanceAcrossCommandsTests(FileIntelligenceTestCase):
+    """Invariant 11, over the route a renamed file actually takes to Angel.
+
+    `organize triage` renames it and leaves it in Downloads; `organize
+    downloads --apply` ingests it later. By then the name the owner recognises
+    exists nowhere on the filesystem, so the catalog has to carry it.
+    """
+
+    def test_the_original_name_survives_a_rename_then_a_manual_ingest(self):
+        source = make_camera_jpeg(self.downloads / "IMG_6909.JPG")
+
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            report = run_source(
+                self.config, ledger,
+                source_class="downloads",
+                source_volume_id="mac-local",
+                apply=True,
+                settle_seconds=1,
+                resolved_t7=None,
+            )
+        outcome = report.outcomes[0]
+        self.assertEqual(outcome.naming_decision, DECISION_RENAMED)
+        renamed = outcome.path
+        self.assertFalse(source.exists())
+        self.assertTrue(renamed.exists())
+
+        args = _OrganizeArgs("downloads", apply=True)
+        self.assertEqual(cmd_organize(args, prober=lambda: [], config=self.config), 0)
+
+        self.assertFalse(renamed.exists(), "the manual ingest removed the source after verifying it")
+        with Catalog(self.resolved_t7().catalog_path) as catalog:
+            rows = catalog._conn.execute("SELECT * FROM assets WHERE final_path IS NOT NULL").fetchall()
+            self.assertEqual(len(rows), 1)
+            asset_id = rows[0]["asset_id"]
+            self.assertEqual(rows[0]["original_filename"], renamed.name)
+            self.assertEqual(
+                rows[0]["first_seen_filename"], "IMG_6909.JPG",
+                "the name the owner remembers must survive into Angel",
+            )
+            history = catalog.naming_history_for_asset(asset_id)
+            self.assertIn("IMG_6909.JPG", {row["original_filename"] for row in history})
+            self.assertIn(renamed.name, {row["applied_filename"] for row in history if row["applied_filename"]})
+
+            sidecar = json.loads((self.resolved_t7().sidecars_dir / f"{asset_id}.json").read_text())
+        self.assertEqual(sidecar["first_seen_filename"], "IMG_6909.JPG")
+        self.assertTrue(sidecar["naming_history"], "the sidecar must render the lineage, not just the catalog")
+
+    def test_ingesting_a_file_the_pipeline_never_saw_still_works(self):
+        """No ledger row is an ordinary case, not an error."""
+        make_blob(self.downloads / "unseen-report.pdf", b"%PDF-1.4 " + b"z" * 1000)
+        args = _OrganizeArgs("downloads", apply=True)
+        self.assertEqual(cmd_organize(args, prober=lambda: [], config=self.config), 0)
+        with Catalog(self.resolved_t7().catalog_path) as catalog:
+            row = catalog._conn.execute("SELECT * FROM assets WHERE final_path IS NOT NULL").fetchone()
+        self.assertEqual(row["original_filename"], "unseen-report.pdf")
 
 
 class ConcurrencyTests(FileIntelligenceTestCase):

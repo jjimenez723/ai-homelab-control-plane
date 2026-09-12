@@ -250,7 +250,11 @@ def cmd_organize(
                 outcomes.append(outcome)
                 if provenance is not None and outcome.state in (STATE_COMMITTED, STATE_SOURCE_UNLINKED):
                     try:
-                        attach_local_provenance(catalog, ledger, provenance, asset_id=outcome.asset_id)
+                        attach_local_provenance(
+                            catalog, ledger, provenance,
+                            asset_id=outcome.asset_id,
+                            sidecars_dir=resolved_t7.sidecars_dir,
+                        )
                     except Exception as exc:  # noqa: BLE001 - bookkeeping must never undo a verified transfer
                         print(f"  WARNING: could not record local naming history for {f.path.name}: {exc}")
                 if outcome.state == STATE_SOURCE_UNLINKED:

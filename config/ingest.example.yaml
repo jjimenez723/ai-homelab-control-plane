@@ -4,9 +4,13 @@
 # adjust paths/UUIDs for this machine. `organize` looks for `config/ingest.yaml`
 # by default, or a path given with `--config`.
 #
-# Nothing in this file makes ingestion run automatically. Desktop, Documents,
-# and Downloads are only ever scanned/moved when the CLI is invoked by hand
-# (see PLAN.md Phase 1A and DECISIONS.md D-016).
+# Nothing in this file as shipped makes anything run automatically. Desktop and
+# Documents are only ever scanned or moved when the CLI is invoked by hand, and
+# that does not change: the scheduled agent's only sources are Downloads and
+# Screenshots. Unattended running requires `automation.enabled: true` below AND
+# installing the LaunchAgent; transferring anything automatically additionally
+# requires `triage.auto_ingest: true`. Both are false here.
+# (See PLAN.md Phase 1A/1B and DECISIONS.md D-016, D-020, D-024.)
 
 t7:
   # Preferred: pin the T7 by its stable volume UUID (see `diskutil info /Volumes/<name>`).

@@ -39,7 +39,7 @@ from tools.ingest.ledger import (
 )
 from tools.ingest.media.probe import probe_file
 from tools.ingest.naming.evidence import gather_evidence
-from tools.ingest.naming.quality import assess
+from tools.ingest.naming.quality import QUALITY_GOOD, assess
 from tools.ingest.naming.proposer import DeterministicProposer, DisabledProposer, NameProposer
 from tools.ingest.naming.rename import NamingOutcome, evaluate_and_apply
 from tools.ingest.sources import (
@@ -394,6 +394,8 @@ def _process_file(
         config=config.triage,
         duplicate_of_asset=duplicate_asset,
         duplicate_of_local=duplicate_local,
+        # The name the file arrived with, before this run touched it.
+        owner_named=evidence.name_quality == QUALITY_GOOD,
     )
     run_id = ledger.append_classification(
         {

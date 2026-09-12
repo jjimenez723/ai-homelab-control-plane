@@ -65,8 +65,16 @@ def triage(
     config: TriageConfig,
     duplicate_of_asset: str | None = None,
     duplicate_of_local: str | None = None,
+    owner_named: bool = False,
 ) -> RetentionDecision:
-    """Classify one file for retention. Reads facts; touches nothing."""
+    """Classify one file for retention. Reads facts; touches nothing.
+
+    `owner_named` is whether the filename the file *arrived with* was already
+    meaningful -- that is, a person chose it. It is deliberately separate from
+    `evidence.name_quality`, which after a rename describes a name this
+    pipeline generated. Treating the two alike would let the system argue its
+    own output into the durable library.
+    """
     extension = evidence.extension
     size = evidence.size
 
@@ -133,11 +141,21 @@ def triage(
     # -- documents ----------------------------------------------------------
 
     if extension in config.document_extensions or evidence.media_kind == MEDIA_DOCUMENT:
-        if evidence.name_quality == QUALITY_GOOD:
+        # A meaningful filename is evidence of value *because a person typed
+        # it*. A name this pipeline generated is not: counting it would let the
+        # system promote its own output into the library by renaming it. So the
+        # bar here is specifically the name the file arrived with.
+        if owner_named:
             return RetentionDecision(
                 RETENTION_INGEST, 0.78,
                 "document with a meaningful, owner-recognisable filename",
                 tags=tuple(tags + ["document"]),
+            )
+        if evidence.name_quality == QUALITY_GOOD:
+            return RetentionDecision(
+                RETENTION_REVIEW, 0.6,
+                "document whose useful name this pipeline generated, not the owner: worth a look",
+                tags=tuple(tags + ["document", "machine-named"]),
             )
         return RetentionDecision(
             RETENTION_REVIEW, 0.55,
