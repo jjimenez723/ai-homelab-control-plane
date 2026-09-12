@@ -521,23 +521,78 @@ class InodeReuseLineageTests(FileIntelligenceTestCase):
         self.assertEqual(provenance.classification_runs, [])
         self.assertEqual(provenance.first_seen_filename, "IMG_0001.JPG")
 
-    def test_an_edit_in_place_keeps_its_lineage(self):
-        """The counterpart: same inode, same path, new bytes is the owner
-        editing their own file, and it keeps its name and its lock."""
+    def test_changed_bytes_at_the_same_inode_and_path_start_a_new_generation(self):
+        """An in-place save and an unrelated overwrite are indistinguishable.
+
+        The safe choice is to keep the filename on disk but not let different
+        bytes inherit model or human decisions made about the prior content.
+        """
         owned = make_blob(self.downloads / "notes.md", b"first draft" * 100)
         identity = owned.stat()
         with LocalLedger(self.config.local_ledger_path) as ledger:
-            first = self._observe(ledger, owned, identity=identity, sha256="a" * 64, now="2026-09-01T00:00:00+00:00")
+            first = self._observe(
+                ledger, owned, identity=identity, sha256="a" * 64,
+                now="2026-09-01T00:00:00+00:00",
+            )
             ledger.record_human_name(
                 first.local_file_id,
                 filename=owned.name,
                 directory=str(self.downloads),
                 now="2026-09-01T00:00:00+00:00",
             )
-            again = self._observe(ledger, owned, identity=identity, sha256="c" * 64, now="2026-09-03T00:00:00+00:00")
+            ledger.append_classification(
+                {
+                    "local_file_id": first.local_file_id,
+                    "source_volume_id": LOCAL_VOLUME_ID,
+                    "source_class": "downloads",
+                    "recommendation": RETENTION_INGEST,
+                    "reason": "decision about the first draft",
+                    "policy_outcome": "human_authority",
+                    "human_corrected": 1,
+                    "created_at": "2026-09-01T00:00:00+00:00",
+                }
+            )
+
+            owned.write_bytes(b"completely different bytes" * 100)
+            again = self._observe(
+                ledger, owned, identity=identity, sha256="c" * 64,
+                now="2026-09-03T00:00:00+00:00",
+            )
+
+            self.assertTrue(again.is_new_generation)
+            self.assertEqual(again.local_file_id, first.local_file_id)
+            self.assertEqual(ledger.get_local_file(again.local_file_id)["generation"], 1)
+            self.assertFalse(ledger.has_human_naming(again.local_file_id))
+            self.assertEqual(ledger.naming_history(again.local_file_id), [])
+            self.assertEqual(ledger.classification_runs(again.local_file_id), [])
+            self.assertEqual(owned.name, "notes.md", "generation reset must never rename by itself")
+
+            # The earlier decisions remain audit history; they are merely out
+            # of scope for the new bytes.
+            self.assertEqual(
+                ledger._conn.execute(
+                    "SELECT COUNT(*) FROM naming_history WHERE local_file_id = ?",
+                    (first.local_file_id,),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_unchanged_bytes_do_not_start_a_new_generation(self):
+        owned = make_blob(self.downloads / "stable.md", b"same bytes" * 100)
+        identity = owned.stat()
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            first = self._observe(
+                ledger, owned, identity=identity, sha256="a" * 64,
+                now="2026-09-01T00:00:00+00:00",
+            )
+            again = self._observe(
+                ledger, owned, identity=identity, sha256="a" * 64,
+                now="2026-09-03T00:00:00+00:00",
+            )
             self.assertFalse(again.is_new_generation)
-            self.assertTrue(ledger.has_human_naming(again.local_file_id))
-            self.assertEqual(len(ledger.naming_history(again.local_file_id)), 1)
+            self.assertEqual(
+                ledger.get_local_file(first.local_file_id)["generation"], 0
+            )
 
 
 class ConcurrencyTests(FileIntelligenceTestCase):
