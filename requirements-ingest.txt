@@ -1,3 +1,8 @@
 PyYAML==6.0.2
 pillow==12.3.0
 pillow-heif==1.7.0
+# A PDF's own title metadata is the strongest naming evidence available
+# (confidence 0.92). Without pypdf that branch is dead and PDFs fall back to
+# a generic name, so it is a declared dependency rather than an optional one.
+# `tools/ingest/media/probe.py` still degrades gracefully if it is missing.
+pypdf==6.18.1
