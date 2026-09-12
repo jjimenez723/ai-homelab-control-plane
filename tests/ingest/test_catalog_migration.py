@@ -206,3 +206,59 @@ class LocalLedgerMigrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LedgerGrowthTests(unittest.TestCase):
+    """An hourly agent must not grow the ledger by a row per file per run.
+
+    History is the point of these tables, but a re-decision that reaches the
+    same verdict is not history -- it is a record of having scanned, and at one
+    row per file per hour it buries the decisions that did change.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.ledger = LocalLedger(Path(self._tmp.name) / "ledger.sqlite")
+        self.addCleanup(self.ledger.close)
+
+    def _classify(self, recommendation="review", reason="unchanged", when="2026-09-12T00:00:00+00:00"):
+        return self.ledger.append_classification(
+            {
+                "local_file_id": "file-1",
+                "source_volume_id": "mac-local",
+                "source_class": "downloads",
+                "sha256": "a" * 64,
+                "recommendation": recommendation,
+                "reason": reason,
+                "policy_outcome": recommendation,
+                "human_corrected": 0,
+                "created_at": when,
+            }
+        )
+
+    def test_an_unchanged_verdict_does_not_append_a_row(self):
+        for _ in range(10):
+            self._classify()
+        self.assertEqual(len(self.ledger.classification_runs("file-1")), 1)
+
+    def test_a_changed_verdict_does_append(self):
+        self._classify(recommendation="review")
+        self._classify(recommendation="ingest", reason="now looks worth keeping")
+        self._classify(recommendation="ingest", reason="now looks worth keeping")
+        runs = self.ledger.classification_runs("file-1")
+        self.assertEqual([row["recommendation"] for row in runs], ["review", "ingest"])
+
+    def test_the_subject_lookup_is_indexed(self):
+        """Without an index this is a full scan, once per file per run."""
+        plan = self.ledger._conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM classification_runs
+            WHERE COALESCE(local_file_id, asset_id, '') = ?
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
+            """,
+            ("file-1",),
+        ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+        self.assertNotIn("SCAN classification_runs", detail, f"unindexed subject lookup: {detail}")

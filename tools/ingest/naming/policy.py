@@ -78,14 +78,22 @@ def slugify(text: str, *, max_length: int = 80) -> str:
     return slug.strip("-")
 
 
+# Compound suffixes where the second-to-last component carries meaning.
+# `archive.tar.gz` renamed to `.gz` tells Finder it is a plain gzip stream, and
+# unarchiving it then yields an extension-less tar -- so both parts are kept.
+_COMPOUND_INNER_SUFFIXES = frozenset({".tar", ".pkg"})
+
+
 def normalized_extension(original_filename: str) -> str:
     """The extension the renamed file must keep, lowercased.
 
     Taken from the file on disk, never from a proposal: the extension is what
     tells macOS and every other tool what this file *is*.
     """
-    suffix = Path(original_filename).suffix
-    return suffix.lower() if suffix else ""
+    suffixes = [suffix.lower() for suffix in Path(original_filename).suffixes[-2:]]
+    if len(suffixes) == 2 and suffixes[0] in _COMPOUND_INNER_SUFFIXES:
+        return "".join(suffixes)
+    return suffixes[-1] if suffixes else ""
 
 
 def sanitize_stem(stem: str, *, max_length: int) -> str:

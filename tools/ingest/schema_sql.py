@@ -85,6 +85,11 @@ CREATE TABLE IF NOT EXISTS classification_runs (
 );
 CREATE INDEX IF NOT EXISTS classification_runs_by_file
   ON classification_runs(local_file_id, created_at);
+-- The sequence/latest lookups key on COALESCE(local_file_id, asset_id, ''),
+-- which no plain column index can serve; without this SQLite scans the whole
+-- table once per file per run.
+CREATE INDEX IF NOT EXISTS classification_runs_by_subject
+  ON classification_runs(COALESCE(local_file_id, asset_id, ''), created_at);
 CREATE INDEX IF NOT EXISTS classification_runs_by_asset
   ON classification_runs(asset_id, created_at);
 """

@@ -180,8 +180,33 @@ class LedgerTables:
 
     # -- classification / retention ----------------------------------------
 
+    def latest_classification(self, key: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM classification_runs
+            WHERE COALESCE(local_file_id, asset_id, '') = ?
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
+            """,
+            (key,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def append_classification(self, record: dict[str, Any]) -> str:
+        """Append a classification run, unless it would restate the last one.
+
+        History is the point of this table, but an hourly agent re-deciding the
+        same file the same way is not history -- it is a row per file per run,
+        for as long as the file sits in Downloads. Appending only when the
+        verdict actually changes keeps the ledger a record of decisions rather
+        than of scans, and keeps the sequence scan below bounded.
+        """
         key = record.get("local_file_id") or record.get("asset_id") or ""
+        previous = self.latest_classification(key)
+        if previous is not None and all(
+            previous.get(field) == record.get(field)
+            for field in ("recommendation", "reason", "sha256", "policy_outcome", "human_corrected")
+        ):
+            return previous["run_id"]
         sequence = self._conn.execute(
             "SELECT COUNT(*) FROM classification_runs WHERE COALESCE(local_file_id, asset_id, '') = ?",
             (key,),

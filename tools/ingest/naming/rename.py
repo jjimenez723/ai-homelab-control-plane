@@ -119,17 +119,19 @@ def evaluate_and_apply(
 
     # 1. A person has named this file. Nothing automatic touches it again.
     if ledger.has_human_naming(local_file_id):
-        return record(
-            NamingOutcome(
-                decision=DECISION_HUMAN_LOCKED,
-                path=path,
-                original_filename=original,
-                name_quality="human",
-                reason="an owner-authored name outranks any later model output",
-            ),
-            approved_by="human",
-            human_corrected=1,
+        outcome = NamingOutcome(
+            decision=DECISION_HUMAN_LOCKED,
+            path=path,
+            original_filename=original,
+            name_quality="human",
+            reason="an owner-authored name outranks any later model output",
         )
+        # Recorded once, not once per scan. The lock is already durable in the
+        # ledger; re-asserting it every hour would grow the naming history by a
+        # row per locked file per run and say nothing new.
+        if original in ledger.known_names(local_file_id):
+            return outcome
+        return record(outcome, approved_by="human", human_corrected=1)
 
     # 2. A name this system already chose, or already chose to keep. Return
     #    without writing: re-recording an unchanged decision every scan would
