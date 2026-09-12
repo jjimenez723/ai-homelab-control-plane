@@ -140,10 +140,10 @@ def _fsync_dir(directory: Path) -> None:
 def source_is_the_recorded_file(source_path: Path, expected_sha256: str | None) -> bool:
     """Whether the file at the source path is the one this row describes.
 
-    Asset identity is (source volume, relative path), so one row covers that
-    path *over time* -- and `invoice.pdf` downloaded twice is two unrelated
-    files sharing it. Verifying the destination proves the recorded bytes
-    arrived; it says nothing about what is sitting at the source now.
+    Asset identity includes the verified content hash, but the pathname may
+    still be replaced after that hash was sampled. Verifying the destination
+    proves the recorded bytes arrived; it says nothing about what is sitting
+    at the source path now.
 
     Without this, a single failed unlink (a locked file, a read-only card) was
     enough: the next run saw a `committed` row, confirmed the destination still
