@@ -85,6 +85,48 @@ class CatalogMigrationTests(unittest.TestCase):
         self.assertIsNone(asset.row["local_file_id"])
         self.assertIsNone(asset.row["retention_recommendation"])
 
+    def test_path_uniqueness_is_removed_without_losing_rows(self):
+        make_v1_catalog(self.path)
+        with Catalog(self.path) as catalog:
+            original = catalog.get_asset("asset-1")
+            self.assertEqual(original.row["original_path"], "holiday.jpg")
+
+            # A later generation may legitimately occupy the same source path.
+            catalog.ensure_pending_asset(
+                "asset-2",
+                source_volume_id="vol-1",
+                source_class="desktop",
+                original_path="holiday.jpg",
+                original_filename="holiday.jpg",
+                size=8192,
+            )
+            rows = catalog._conn.execute(
+                """
+                SELECT asset_id FROM assets
+                WHERE source_volume_id = 'vol-1' AND original_path = 'holiday.jpg'
+                ORDER BY asset_id
+                """
+            ).fetchall()
+            self.assertEqual([row["asset_id"] for row in rows], ["asset-1", "asset-2"])
+
+            unique_source_path = False
+            for index in catalog._conn.execute("PRAGMA index_list(assets)").fetchall():
+                if not index["unique"]:
+                    continue
+                name = str(index["name"]).replace('"', '""')
+                columns = [
+                    row["name"]
+                    for row in catalog._conn.execute(
+                        f'PRAGMA index_info("{name}")'
+                    ).fetchall()
+                ]
+                if columns == ["source_volume_id", "original_path"]:
+                    unique_source_path = True
+            self.assertFalse(unique_source_path)
+            self.assertEqual(
+                catalog._conn.execute("PRAGMA foreign_keys").fetchone()[0], 1
+            )
+
     def test_migration_is_idempotent(self):
         make_v1_catalog(self.path)
         for _ in range(4):
