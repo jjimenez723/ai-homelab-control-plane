@@ -4,9 +4,13 @@
 # adjust paths/UUIDs for this machine. `organize` looks for `config/ingest.yaml`
 # by default, or a path given with `--config`.
 #
-# Nothing in this file makes ingestion run automatically. Desktop, Documents,
-# and Downloads are only ever scanned/moved when the CLI is invoked by hand
-# (see PLAN.md Phase 1A and DECISIONS.md D-016).
+# Nothing in this file as shipped makes anything run automatically. Desktop and
+# Documents are only ever scanned or moved when the CLI is invoked by hand, and
+# that does not change: the scheduled agent's only sources are Downloads and
+# Screenshots. Unattended running requires `automation.enabled: true` below AND
+# installing the LaunchAgent; transferring anything automatically additionally
+# requires `triage.auto_ingest: true`. Both are false here.
+# (See PLAN.md Phase 1A/1B and DECISIONS.md D-016, D-020, D-024.)
 
 t7:
   # Preferred: pin the T7 by its stable volume UUID (see `diskutil info /Volumes/<name>`).
@@ -35,13 +39,139 @@ sources:
   # eligible for `organize sd`; any other mounted removable disk is ignored.
   sd_volume_uuids: []
 
+  # Screenshots are a first-class source for NAMING. They are not a vacuum:
+  # a screenshot being named says nothing about whether it belongs in Angel.
+  #
+  # There is no default path, and none is ever inferred. macOS keeps the real
+  # location in `com.apple.screencapture location`, which on a default install
+  # is ~/Desktop -- so a silent fallback would put the entire Desktop under
+  # automatic evaluation. `organize doctor` prints what macOS currently says so
+  # you can paste it here deliberately.
+  #
+  # If this path is also your Desktop/Documents/Downloads, only files whose
+  # names identify them as screen captures are evaluated.
+  screenshots:
+    path: null
+    enabled: false
+
 # How long (seconds) a file's mtime must be unchanged before it is considered
 # settled/safe to move. Applies to manual Desktop/Documents/Downloads/SD runs.
 settle_seconds: 30
 
-# The future opt-in Downloads watcher (not enabled by Phase 1A) must use at
-# least this settle window before it is allowed to touch a file.
+# The scheduled (`--automated`) run must wait at least this long after a file
+# last changed before it may touch it. An automated run always uses the LONGER
+# of this and `settle_seconds`, so lowering the manual window above can never
+# shorten what the unattended job waits.
 downloads_watcher_min_settle_seconds: 1200
+
+
+# -- File naming -------------------------------------------------------------
+#
+# Naming and retention are separate decisions. A file may deserve a useful
+# filename without deserving permanent storage in Angel, and renaming a file
+# never moves it.
+naming:
+  enabled: true
+
+  # Which source classes are evaluated for naming. `desktop` and `documents`
+  # are deliberately absent: this phase never evaluates them automatically.
+  source_classes:
+    - screenshots
+    - downloads
+    - sd
+
+  # Below this confidence a proposal is recorded and ignored rather than
+  # applied. Raise it to be more conservative.
+  min_confidence: 0.55
+
+  # Maximum length of a generated filename, including its extension.
+  max_filename_length: 120
+
+  # Never renamed however poor the name looks: something else on the system
+  # finds these by name.
+  protected_extensions:
+    - .app
+    - .dmg
+    - .pkg
+    - .mpkg
+    - .framework
+    - .kext
+
+  # Words your own clients and projects use. A filename containing one is
+  # treated as already meaningful, which is how short client codes survive.
+  # Matched on whole words, never as a substring.
+  vocabulary: []
+
+
+# -- Retention triage --------------------------------------------------------
+#
+# Three outcomes: ignore (not for Angel), review (a person decides), ingest (a
+# candidate). None of them deletes anything from the Mac. The only file removal
+# in this system is the source unlink inside the verified transfer, after the
+# bytes are provably on Angel.
+triage:
+  enabled: true
+
+  # OFF by default. While this is false, nothing is ever transferred
+  # automatically -- candidates are reported and left where they are.
+  auto_ingest: false
+
+  # Even with auto_ingest on, only decisions at or above this confidence are
+  # acted on. Everything else waits for review.
+  min_ingest_confidence: 0.85
+
+  # Re-downloadable, and not a record of anything. Ignored on sight.
+  installer_extensions:
+    - .dmg
+    - .pkg
+    - .mpkg
+    - .iso
+    - .exe
+    - .msi
+    - .deb
+    - .rpm
+    - .appimage
+
+  # Transient artifacts.
+  ignore_extensions:
+    - .torrent
+    - .crdownload
+    - .part
+    - .download
+    - .tmp
+
+  document_extensions:
+    - .pdf
+    - .docx
+    - .doc
+    - .pages
+    - .key
+    - .pptx
+    - .xlsx
+    - .numbers
+    - .csv
+    - .rtf
+
+  # Below this size an image or video is assumed to be an icon or a fragment.
+  min_interesting_bytes: 4096
+
+
+# -- Automation --------------------------------------------------------------
+#
+# The scheduled LaunchAgent refuses to run while this is false, and
+# `scripts/install-file-intelligence-launchd` refuses to install it. Turning it
+# on is the single deliberate act that lets this pipeline run unattended.
+automation:
+  enabled: false
+
+  # Run lock, last-run status, and logs. Relative to the checkout.
+  state_relative_path: ".state/file-intelligence"
+
+  # An absolute state directory, if run state must live outside the
+  # checkout (an acceptance drill, a test). Normally left unset;
+  # `state_relative_path` is deliberately relative-only so a stray value
+  # can never point run state at a filesystem root.
+  state_dir: null
 
 exclusions:
   # Directory names skipped anywhere in a source tree (not reported individually).

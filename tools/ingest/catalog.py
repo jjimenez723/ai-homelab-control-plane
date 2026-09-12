@@ -17,7 +17,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+from tools.ingest.automation import write_json_atomically
+from tools.ingest.ledger import LedgerTables
+from tools.ingest.migrations import add_column_if_missing, apply_migrations, connect
+from tools.ingest.schema_sql import (
+    CLASSIFICATION_RUNS_SQL,
+    DUPLICATE_OBSERVATIONS_SQL,
+    MEDIA_METADATA_SQL,
+    NAMING_HISTORY_SQL,
+)
+
+# Bumped to 2 when naming lineage, classification runs, media facts, and
+# duplicate observations were added. Sidecars carry this so an old sidecar is
+# still identifiable as having been written by the pre-naming pipeline.
+SCHEMA_VERSION = 2
 
 # Transfer state machine. Ordered roughly by progress; retries resume from
 # wherever the previous attempt stopped instead of restarting blindly.
@@ -124,6 +137,52 @@ CREATE TABLE IF NOT EXISTS jobs (
 """
 
 
+def _migration_1_phase_1a(conn: sqlite3.Connection) -> None:
+    """The original Phase 1A schema.
+
+    Every statement is `IF NOT EXISTS`, so a catalog created before migrations
+    existed (which reports `user_version = 0`) is brought to version 1 without
+    a single row or column being touched.
+    """
+    conn.executescript(SCHEMA)
+
+
+def _migration_2_file_intelligence(conn: sqlite3.Connection) -> None:
+    """Naming lineage, classification history, media facts, duplicates.
+
+    Purely additive. The `assets` columns below record where an ingested asset
+    came from *before* it was renamed locally -- `original_filename` keeps its
+    existing meaning (the name at the moment of transfer), and
+    `first_seen_filename` is the name the file had when this system first saw
+    it. Both are needed: the first is what the asset_id was derived from, the
+    second is what the owner would recognise.
+    """
+    conn.executescript(NAMING_HISTORY_SQL)
+    conn.executescript(CLASSIFICATION_RUNS_SQL)
+    conn.executescript(MEDIA_METADATA_SQL)
+    conn.executescript(DUPLICATE_OBSERVATIONS_SQL)
+    add_column_if_missing(conn, "assets", "first_seen_filename", "TEXT")
+    add_column_if_missing(conn, "assets", "local_file_id", "TEXT")
+    add_column_if_missing(conn, "assets", "retention_recommendation", "TEXT")
+    add_column_if_missing(conn, "assets", "retention_run_id", "TEXT")
+
+
+def _migration_3_generation(conn: sqlite3.Connection) -> None:
+    """Carry the Mac-side generation of a lineage row onto the T7 copy.
+
+    The catalog never scopes its own queries by generation -- its rows are
+    reached by asset -- but the column has to exist here because
+    `attach_local_provenance` copies ledger rows across verbatim, and dropping
+    the field on the way in would lose the only marker saying which physical
+    file a row is about.
+    """
+    add_column_if_missing(conn, "naming_history", "generation", "INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(conn, "classification_runs", "generation", "INTEGER NOT NULL DEFAULT 0")
+
+
+MIGRATIONS = (_migration_1_phase_1a, _migration_2_file_intelligence, _migration_3_generation)
+
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
@@ -139,17 +198,20 @@ class Asset:
             raise AttributeError(item) from exc
 
 
-class Catalog:
-    """One connection per `organize` invocation. Single writer, WAL mode."""
+class Catalog(LedgerTables):
+    """One connection per `organize` invocation. Single writer, WAL mode.
+
+    Durable truth about assets that are actually on Angel. Files that have not
+    been ingested are tracked in the Mac-side `LocalLedger` instead -- see
+    `ledger.py` for why the two are separate databases.
+    """
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = connect(db_path)
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(SCHEMA)
+        self.schema_version = apply_migrations(self._conn, MIGRATIONS)
 
     def close(self) -> None:
         self._conn.close()
@@ -398,7 +460,21 @@ class Catalog:
             },
             "human_reviewed": bool(asset.row["human_reviewed"]),
             "derivatives": [dict(row) for row in derivative],
+            # Provenance that survives a pre-ingestion rename. `original_filename`
+            # is the name at the moment of transfer; `first_seen_filename` and the
+            # lineage below are how the owner finds the file they remember.
+            "first_seen_filename": asset.row["first_seen_filename"] or asset.row["original_filename"],
+            "local_file_id": asset.row["local_file_id"],
+            "naming_history": self.naming_history_for_asset(asset_id),
+            "retention": {
+                "recommendation": asset.row["retention_recommendation"],
+                "run_id": asset.row["retention_run_id"],
+            },
+            "media_metadata": self.get_media_metadata(asset_id, "asset"),
         }
-        sidecar_path = sidecars_dir / f"{asset_id}.json"
-        sidecar_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return sidecar_path
+        # Atomic, like the status file: a sidecar is the durable copy of a
+        # catalog row, and a process killed mid-write must not be able to
+        # leave a truncated one where a complete one used to be. The primitive
+        # lives in `automation` so that filesystem authority stays in the
+        # modules that already hold it (see tests/ingest/test_mutation_authority).
+        return write_json_atomically(sidecars_dir / f"{asset_id}.json", payload)

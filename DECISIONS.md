@@ -91,7 +91,7 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review �
 - Revisit trigger: the owner obtains another storage device or explicitly chooses a downtime/migration window where all T7 data is independently verified elsewhere and the benefits of APFS outweigh the migration cost.
 
 ## D-018 — Immediate V0 off-site backup: encrypted restic via rclone to Google Drive
-- Status: proposed 2026-09-11 (implementation PR pending owner OAuth and restore drill).
+- Status: accepted; operational since 2026-09-12. OAuth is configured, a snapshot, `backup-t7-check`, and a real `restore-t7-drill` all completed successfully on 2026-09-12, and both the nightly `com.ai-homelab.t7-backup` and weekly `com.ai-homelab.t7-check` LaunchAgents are loaded.
 - Supersedes: the **immediate-target** portion of D-004 only. D-004's later independent `dell-xeon` append-only repository and Backblaze B2 copy remain desirable separate failure domains.
 - Decision: while the Dell/B2 path is not yet provisioned, `angel` (the Samsung T7) is backed up to the dedicated repository `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`. Restic encrypts, snapshots, and deduplicates data before rclone stores repository objects in Drive. Google Drive Desktop mirroring/sync is not a backup mechanism.
 - Consequence: Drive is off-site but is neither immutable nor append-only. The Mac's dedicated OAuth scope and Keychain-held restic password are still sensitive; a compromised Mac/Drive account could delete repository objects. This does not replace the future append-only Dell copy.
@@ -106,3 +106,65 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review �
 - Consequence: the reformat issued a new Volume UUID. Every snapshot taken before 2026-09-11 is tagged with the retired UUID `3EE676ED-…` in `.state/backup-logs/`; that record is the provenance link back to the pre-erase data and must not be edited away.
 - Open risk: a reformat does not repair failing hardware. This drive produced tens of thousands of read errors days ago. Do not treat it as trustworthy primary storage until it passes a full-capacity write-then-verify pass, and do not let it become the only copy of anything.
 - Revisit trigger: the T7 must routinely mount on a Linux box (buy a second ext4 drive instead; do not reformat this one), or the owner replaces the device.
+
+## D-020 — Naming is universal where useful; Angel retention is selective
+- Status: accepted 2026-09-12 (implemented in `tools/ingest/naming/` and `tools/ingest/triage/`).
+- Decision: naming and retention are separate decisions reached by separate code from separate evidence. Every eligible settled file is asked what it should be called; only some files are then asked whether they belong in the durable Angel library. A screenshot may be renamed and never archived.
+- Decision: `IGNORE` means "not in the durable library". It never means "delete from the Mac", and no code in the naming or triage layer can delete anything. The only file removal in this system remains the source unlink inside `transaction.transfer_file`, after the bytes are verified on Angel.
+- Decision: age in Downloads is a settle signal, not a value signal. A file being old enough to be safe to touch says nothing about whether it is worth keeping; the two are never conflated.
+- Consequence: triage is biased toward `REVIEW`. A false `REVIEW` costs the owner a glance at a report; a false `INGEST` puts junk in a permanent library that restic then backs up forever.
+- Consequence: the two answers are stored in different tables (`naming_history` and `classification_runs`), so a later change to one cannot silently rewrite the other.
+- Revisit trigger: the review queue grows faster than the owner clears it for 30 consecutive days, which would mean the REVIEW bias has stopped being conservatism and started being an unread inbox.
+
+## D-021 — The naming ledger lives on the Mac, not on Angel
+- Status: accepted 2026-09-12 (implemented as `LocalLedger` in `tools/ingest/ledger.py`).
+- Decision: a second SQLite database at `.state/file-intelligence/local-ledger.sqlite` holds naming and triage bookkeeping for files that have **not** been ingested: `local_files`, `naming_history`, `classification_runs`, `media_metadata`, `duplicate_observations`, and `runs`.
+- Rationale: naming must keep working with Angel unplugged. Putting the naming ledger on the T7 would have quietly made every naming decision depend on the drive being connected, which contradicts D-020.
+- Decision: durable truth about ingested assets stays in the T7 catalog (`90-system/catalog.sqlite`), which is what restic backs up. The two databases share table shapes via `schema_sql.py` so a file's record has the same form before and after ingestion.
+- Consequence: the local ledger is rebuildable state, not truth. Losing it costs bookkeeping and at worst one redundant re-evaluation of a file's name; it never costs a file. It is therefore deliberately not backed up.
+- Consequence: local file identity is `(device, inode)`, not path — a path-derived identity would make every rename look like a new file and lose both the audit lineage and the human-correction lock.
+- Revisit trigger: a second machine needs to participate in naming, at which point one Mac-local ledger stops being sufficient and the identity scheme needs a host component.
+
+## D-022 — A model proposes; trusted code disposes
+- Status: accepted 2026-09-12 (enforced structurally by `tools/ingest/naming/`).
+- Decision: the proposer boundary is enforced by the shape of the data, not by convention. A `NameProposer` receives `NamingEvidence`, which contains no `Path`, no file handle, and no callable — so it has nothing to mutate the filesystem with. It returns a string and a confidence.
+- Decision: `naming.policy.safe_rename` is the only rename primitive. It cannot overwrite: it uses `os.link` + `unlink` (atomic, fails if the target exists) with an `O_CREAT|O_EXCL` reservation fallback where hardlinks are unavailable. `os.rename` is not used anywhere, because it silently clobbers on POSIX. It takes a *name*, not a path, so it cannot relocate a file either.
+- Decision: the extension comes from the file, never from the proposal. `transaction.transfer_file` remains the only code in the system that unlinks a source.
+- Decision: human corrections outrank all later model output, permanently. `organize correct-name` records an owner-authored name; from then on the automatic path refuses to reconsider that file regardless of what any future proposer suggests.
+- Consequence: swapping the deterministic proposer for a model-backed one changes nothing downstream. The seam is a protocol; no safety property depends on which implementation is behind it.
+- Revisit trigger: a proposer needs input the evidence record cannot carry as plain data — if that ever means handing a proposer a live handle, this decision must be reopened rather than quietly widened.
+
+## D-023 — `00-inbox/organized` keeps its name; its semantics are documented instead
+- Status: accepted 2026-09-12.
+- Context: the directory name overstates what it holds, and a rename to `00-inbox/ingested/` was evaluated.
+- Decision: keep the name for this phase. The path is referenced by `t7.inbox_relative_path` in the live `config/ingest.yaml`, by the code default in `tools/ingest/config.py`, by `config/ingest.example.yaml`, and by `tests/ingest/helpers.py`; the volume's live `00-inbox/` tree already carries the configured `restore_drill_relative_path`, which points at a real file that the restore drill verifies. Renaming would be silent path churn across config, code, tests, and an operational drill for an aesthetic gain.
+- Decision: document the semantics instead. What the directory actually holds is **verified, catalog-committed canonical assets awaiting or carrying enrichment** — not fully organized output. The organized view itself is Phase 3 scope and does not exist.
+- Consequence: nothing may infer from the name that a file inside it has been classified, placed, or reviewed.
+- Revisit trigger: an explicit, tested migration command exists that moves the directory and updates config, code, and tests together, **and** the owner asks for it.
+
+## D-024 — Production automation is opt-in, hourly, and one-shot
+- Status: accepted 2026-09-12 (`launchd/com.ai-homelab.file-intelligence.plist.template`, `scripts/file-intelligence-scheduled`).
+- Decision: scheduling is launchd `StartCalendarInterval` at minute :20, not a resident FSEvents daemon. A one-shot invocation is inspectable, cannot leak memory or file descriptors, and a missed firing is recovered by the next one rather than needing supervision.
+- Decision: disabled by default. `scripts/install-file-intelligence-launchd` parses `config/ingest.yaml` as YAML with the repository's own interpreter and refuses to install unless `automation.enabled` is literally `true` — a commented-out or unrelated nested `enabled: true` is not consent to schedule a process that reads and moves the owner's files.
+- Decision: runs take a non-blocking `flock` in the state directory. A second run skips and exits cleanly rather than queuing; the next hourly firing picks the work up, and a backlog of blocked scans is worse than a missed one. The kernel releases the lock if the process dies, so a crash cannot wedge the pipeline.
+- Decision: automated runs use `max(settle_seconds, downloads_watcher_min_settle_seconds)`. Taking the maximum rather than switching means lowering one value in config can never quietly shorten the window an unattended job waits.
+- Consequence: enabling the agent does not enable transfers. `triage.auto_ingest` is a separate, independently defaulted-off gate, so the first thing the agent does once scheduled is name and report, not move.
+- Consequence: the agent's only sources are Downloads and Screenshots. Desktop and Documents remain manual-trigger only (D-016), and scheduling this agent does not change that.
+- Revisit trigger: the hourly cadence demonstrably misses files that matter (a same-hour download acted on before the next firing), or the run regularly exceeds an hour and the skip path becomes the normal path rather than the exception.
+
+## D-025 — Screenshots are a configured source with no inferred default path
+- Status: accepted 2026-09-12 (`sources.screenshots` in `config/ingest.example.yaml`; reported by `organize doctor`).
+- Context: screenshots are the strongest case for automatic naming — macOS generates them with a timestamp name and nobody ever renames them by hand. macOS also writes them to `~/Desktop` by default, and `com.apple.screencapture location` can point at any directory.
+- Decision: `sources.screenshots.path` has no default. It ships as `null` with `enabled: false`, and screenshots are a naming source only when the owner sets that path deliberately. The macOS setting is never read and adopted as the path.
+- Rationale: inferring the path would, on a default Mac, silently enrol the entire Desktop in an hourly renaming pipeline. A convenience that widens the blast radius to a directory the owner never nominated is not a convenience. Screenshots are a *naming* source specifically — this decision says nothing about whether any screenshot is kept (D-020).
+- Decision: `organize doctor` reports what `com.apple.screencapture location` currently says so the owner can copy it into config; it reports, it does not adopt. Where a configured screenshots path overlaps Desktop, Documents, or Downloads, only files whose names identify them as screen captures are evaluated.
+- Consequence: on a machine that never configures it, screenshot naming simply does not happen. That is the intended failure mode, not a gap.
+- Revisit trigger: macOS gains a capture location that cannot collide with a document folder, or the owner wants a dedicated screenshots folder picked up without configuration.
+
+## D-026 — `t7.storage_root_override` requires an explicit CLI flag
+- Status: accepted 2026-09-12 (`--allow-dev-storage-root`, enforced in `tools/ingest/t7.py`).
+- Context: `t7.storage_root_override` exists so tests and local dry runs can point the pipeline at a scratch directory. As originally written it was honoured from config alone, and honouring it skipped the volume-UUID check for the **entire** destructive path — including the source unlink. A stale override left in `config/ingest.yaml` would have let `--apply` verify a copy into an ordinary folder and then delete the owner's original.
+- Decision: the override is honoured only when `--allow-dev-storage-root` is passed on the command line for that invocation. A config file alone can never disable the UUID boundary. The scheduled LaunchAgent never passes the flag.
+- Relationship to D-019: the D-019 boundary is unchanged and absolute. The T7 is identified by its Volume UUID, recorded once in the gitignored `config/ingest.yaml`, and no code path may fall back to the volume name `Angel` or the path `/Volumes/Angel`. This entry carves no exception into that rule; it closes a path that had quietly bypassed it.
+- Consequence: `organize doctor` reports a configured override as a finding and states that it is honoured only with the flag, so a development setting cannot sit unnoticed on a production machine.
+- Revisit trigger: the test suite builds its configuration in-process and no longer needs the override at all, at which point it should be deleted rather than gated.

@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Render the per-checkout file-intelligence LaunchAgent without loading it.
+#
+# Rendering is deliberately inert. The agent is opt-in: this script only writes
+# the plist, and `scripts/install-file-intelligence-launchd` is the single place
+# that checks the operator's opt-in and loads it.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+REPLACE=0
+if [[ "${1:-}" == "--replace" ]]; then
+  REPLACE=1
+  shift
+fi
+if [[ "$#" -gt 1 ]]; then
+  echo "Usage: $0 [--replace] [target-directory]" >&2
+  exit 2
+fi
+TARGET_DIR="${1:-$HOME/Library/LaunchAgents}"
+
+# Validate a rendered plist before it is allowed anywhere near LaunchAgents.
+# `plutil` is the native validator and stays authoritative wherever it exists
+# (i.e. on every real macOS install). It does not exist on Linux CI, which is
+# the only reason for a fallback: Python's `plistlib` parses the same XML and
+# rejects the same malformed documents. Validation is never skipped -- if
+# neither validator is present the render fails rather than writing an
+# unverified LaunchAgent.
+validate_plist() {
+  local path="$1"
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$path" >/dev/null
+    return
+  fi
+  local python_bin=""
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      python_bin="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$python_bin" ]]; then
+    echo "Refusing to render: no plist validator available (need plutil or python3)." >&2
+    exit 1
+  fi
+  "$python_bin" - "$path" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        plistlib.load(handle)
+except Exception as exc:  # noqa: BLE001 - any parse failure is a hard render failure
+    sys.stderr.write(f"{path}: not a valid plist: {exc}\n")
+    raise SystemExit(1)
+PY
+}
+
+AGENT_TARGET="$TARGET_DIR/com.ai-homelab.file-intelligence.plist"
+if [[ "$REPLACE" -eq 0 && -e "$AGENT_TARGET" ]]; then
+  echo "Refusing to overwrite an existing LaunchAgent in: $TARGET_DIR" >&2
+  exit 1
+fi
+mkdir -p "$TARGET_DIR" "$ROOT_DIR/.state/file-intelligence/logs"
+chmod 700 "$ROOT_DIR/.state" "$ROOT_DIR/.state/file-intelligence" "$ROOT_DIR/.state/file-intelligence/logs"
+
+# The repository root is XML text and a sed replacement. Escape it for both
+# layers so checkouts containing spaces, ampersands, or other legal path
+# characters still produce valid plists.
+XML_ROOT="$(printf '%s' "$ROOT_DIR" | sed \
+  -e 's/&/\&amp;/g' \
+  -e 's/</\&lt;/g' \
+  -e 's/>/\&gt;/g' \
+  -e 's/"/\&quot;/g' \
+  -e "s/'/\&apos;/g")"
+SED_ROOT="$(printf '%s' "$XML_ROOT" | sed 's/[\\&|]/\\&/g')"
+
+STAGING_DIR="$(mktemp -d "$TARGET_DIR/.file-intelligence-launchd.XXXXXX")"
+trap 'rm -rf "$STAGING_DIR"' EXIT
+staged="$STAGING_DIR/com.ai-homelab.file-intelligence.plist"
+sed "s|__REPOSITORY_ROOT__|$SED_ROOT|g" "$ROOT_DIR/launchd/com.ai-homelab.file-intelligence.plist.template" > "$staged"
+chmod 600 "$staged"
+validate_plist "$staged"
+mv -f "$staged" "$AGENT_TARGET"
+echo "Rendered but did not load: $AGENT_TARGET"

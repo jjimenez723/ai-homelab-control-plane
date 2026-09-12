@@ -1,4 +1,4 @@
-# This planning repo should remain documentation-only.
+# This repo holds control-plane design docs and the tooling that implements them; data, media, secrets, and machine-specific config stay out.
 .DS_Store
 .env
 .env.*

@@ -27,6 +27,7 @@ from tools.ingest.catalog import (
     STATE_COPYING,
     STATE_FAILED_ERROR,
     STATE_FAILED_HASH_MISMATCH,
+    STATE_NEEDS_REVIEW,
     STATE_PENDING,
     STATE_SOURCE_UNLINKED,
     STATE_VERIFIED,
@@ -117,6 +118,67 @@ def _staging_path(resolved_t7: ResolvedT7, asset_id: str) -> Path:
     return resolved_t7.staging_dir / f"{asset_id}.partial"
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Flush a directory entry so a completed rename survives power loss.
+
+    Without this the catalog can reach `committed` while the rename itself is
+    still only in the page cache -- and a `committed` row is what authorises
+    deleting the source on the next run.
+    """
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def source_is_the_recorded_file(source_path: Path, expected_sha256: str | None) -> bool:
+    """Whether the file at the source path is the one this row describes.
+
+    Asset identity is (source volume, relative path), so one row covers that
+    path *over time* -- and `invoice.pdf` downloaded twice is two unrelated
+    files sharing it. Verifying the destination proves the recorded bytes
+    arrived; it says nothing about what is sitting at the source now.
+
+    Without this, a single failed unlink (a locked file, a read-only card) was
+    enough: the next run saw a `committed` row, confirmed the destination still
+    held the *first* file, and deleted the *second* one, which had never been
+    copied anywhere.
+    """
+    if not expected_sha256:
+        return False
+    try:
+        if not source_path.is_file():
+            return False
+        return sha256_file(source_path) == expected_sha256
+    except OSError:
+        return False
+
+
+def destination_holds(final_path: Path, expected_sha256: str | None) -> bool:
+    """Whether `final_path` provably contains the bytes we recorded.
+
+    Existence is not evidence. A resumed transfer reaches the source-unlink
+    step on the strength of this answer, so it hashes the file rather than
+    trusting either the catalog row or the presence of *a* file at the path --
+    the destination may have been deleted, truncated, or replaced by something
+    unrelated since the row was written.
+    """
+    if not expected_sha256:
+        return False
+    try:
+        if not final_path.is_file():
+            return False
+        return sha256_file(final_path) == expected_sha256
+    except OSError:
+        return False
+
+
 def transfer_file(
     catalog: Catalog,
     planned: PlannedTransfer,
@@ -131,10 +193,53 @@ def transfer_file(
     existing = catalog.get_asset(asset_id)
 
     if existing is not None and existing.row["transfer_state"] == STATE_SOURCE_UNLINKED:
-        return TransferOutcome(asset_id=asset_id, state=STATE_SOURCE_UNLINKED, success=True, skipped_reason="already_completed")
+        if not planned.source_path.exists():
+            return TransferOutcome(asset_id=asset_id, state=STATE_SOURCE_UNLINKED, success=True, skipped_reason="already_completed")
+        # Something is at a path this row says was emptied. Either the same file
+        # came back, or -- far more likely -- an unrelated file now has that
+        # name. Claiming success would leave a file that was never copied
+        # neither archived nor reported.
+        if source_is_the_recorded_file(planned.source_path, existing.row["sha256"]):
+            return _finish_unlink(
+                catalog, asset_id, existing.row["final_path"], planned.source_path, resolved_t7, hooks,
+                expected_sha256=existing.row["sha256"],
+            )
+        return _refuse_identity_collision(catalog, asset_id, existing, planned)
 
     if existing is not None and existing.row["transfer_state"] == STATE_COMMITTED:
-        return _finish_unlink(catalog, asset_id, existing.row["final_path"], planned.source_path, resolved_t7, hooks)
+        # A prior run copied and committed but could not unlink (read-only card,
+        # locked file). Two separate things have to be true before finishing
+        # that unlink: the destination still holds the exact bytes, *and* the
+        # file at the source path is the one they came from.
+        final_path = Path(existing.row["final_path"]) if existing.row["final_path"] else None
+        if final_path is not None and destination_holds(final_path, existing.row["sha256"]):
+            if source_is_the_recorded_file(planned.source_path, existing.row["sha256"]):
+                return _finish_unlink(
+                    catalog, asset_id, str(final_path), planned.source_path, resolved_t7, hooks,
+                    expected_sha256=existing.row["sha256"],
+                )
+            if planned.source_path.exists():
+                return _refuse_identity_collision(catalog, asset_id, existing, planned)
+            # Source already gone and the destination verified: the previous
+            # run's unlink did land, only its bookkeeping did not.
+            return _finish_unlink(
+                    catalog, asset_id, str(final_path), planned.source_path, resolved_t7, hooks,
+                    expected_sha256=existing.row["sha256"],
+                )
+        if not planned.source_path.exists():
+            # Destination gone *and* source gone: nothing left to recover here,
+            # and nothing this function may delete. Surface it loudly.
+            catalog.update_asset(
+                asset_id,
+                transfer_state=STATE_NEEDS_REVIEW,
+                error_state="destination_lost",
+                error_message=f"committed asset no longer verifiable at {existing.row['final_path']}",
+            )
+            return TransferOutcome(
+                asset_id=asset_id, state=STATE_NEEDS_REVIEW, success=False,
+                error_message="committed destination is missing or altered and the source is gone",
+            )
+        # Source survives: redo the transfer from scratch rather than delete it.
 
     if existing is not None and existing.row["transfer_state"] == STATE_VERIFIED:
         final_path = Path(existing.row["final_path"])
@@ -144,13 +249,21 @@ def transfer_file(
                     # corrupted partial from an interrupted prior attempt; redo the copy.
                     pass
                 else:
-                    return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks)
+                    return _finalize_and_commit(
+                        catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks,
+                        expected_sha256=existing.row["sha256"],
+                    )
             except OSError:
                 pass
-        elif final_path.exists():
-            # rename already happened before a crash; only the DB commit is outstanding.
-            return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks, rename_needed=False)
-        # neither a valid partial nor a finalized file exists: source is still safe, redo from scratch.
+        elif destination_holds(final_path, existing.row["sha256"]):
+            # The rename did land before the crash; only the DB commit is
+            # outstanding. Existence alone would not be enough: an unrelated
+            # file at this path would otherwise authorise deleting the source.
+            return _finalize_and_commit(
+                catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks,
+                rename_needed=False, expected_sha256=existing.row["sha256"],
+            )
+        # neither a valid partial nor a verified destination exists: source is still safe, redo from scratch.
 
     if not planned.source_path.exists():
         return TransferOutcome(asset_id=asset_id, state=STATE_FAILED_ERROR, success=False, skipped_reason="source_vanished")
@@ -236,7 +349,39 @@ def transfer_file(
     except Exception as exc:  # noqa: BLE001 - deliberately broad: any DB failure here must not touch source
         return TransferOutcome(asset_id=asset_id, state=STATE_COPYING, success=False, error_message=f"catalog write failed before commit: {exc}")
 
-    return _finalize_and_commit(catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks)
+    return _finalize_and_commit(
+        catalog, asset_id, staging_path, final_path, planned.source_path, resolved_t7, hooks,
+        expected_sha256=source_sha256,
+        # Sampled when the bytes were read, re-checked at the moment of deletion.
+        expected_stat=(stat.st_size, stat.st_mtime_ns),
+    )
+
+
+def _refuse_identity_collision(catalog: Catalog, asset_id: str, existing, planned: PlannedTransfer) -> TransferOutcome:
+    """Two different files share one catalog row. Refuse, loudly, and touch nothing.
+
+    Identity is (source volume, relative path), so the schema cannot currently
+    hold two files that have occupied the same path. Both available actions are
+    destructive -- deleting the new source, or overwriting the archived asset --
+    so this does neither and puts the file in front of a person instead.
+
+    Conservative on purpose: the cost is a file that waits for a decision, and
+    the alternative cost is a file that no longer exists. Content-addressed
+    asset identity is the real fix and needs its own migration.
+    """
+    message = (
+        f"{planned.rel_path} is a different file from the one already recorded at this path "
+        f"(recorded sha256 {existing.row['sha256']}). Refusing to touch either. "
+        "Rename or move one of them, or resolve the catalog row by hand."
+    )
+    catalog.update_asset(asset_id, error_state="source_identity_collision", error_message=message)
+    return TransferOutcome(
+        asset_id=asset_id,
+        state=STATE_NEEDS_REVIEW,
+        success=False,
+        error_message=message,
+        skipped_reason="source_identity_collision",
+    )
 
 
 def _finalize_and_commit(
@@ -249,6 +394,8 @@ def _finalize_and_commit(
     hooks: TransferFaultHooks,
     *,
     rename_needed: bool = True,
+    expected_sha256: str | None = None,
+    expected_stat: tuple[int, int] | None = None,
 ) -> TransferOutcome:
     if rename_needed:
         try:
@@ -256,6 +403,7 @@ def _finalize_and_commit(
                 hooks.before_finalize_rename()
             final_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staging_path, final_path)
+            _fsync_dir(final_path.parent)
         except OSError as exc:
             catalog.update_asset(asset_id, transfer_state=STATE_VERIFIED, error_state="finalize_failed", error_message=str(exc))
             return TransferOutcome(asset_id=asset_id, state=STATE_VERIFIED, success=False, error_message=str(exc))
@@ -268,7 +416,37 @@ def _finalize_and_commit(
         return TransferOutcome(asset_id=asset_id, state=STATE_VERIFIED, success=False, final_path=final_path, error_message=f"catalog commit failed: {exc}")
 
     catalog.write_sidecar(asset_id, resolved_t7.sidecars_dir)
-    return _finish_unlink(catalog, asset_id, str(final_path), source_path, resolved_t7, hooks)
+    return _finish_unlink(
+        catalog, asset_id, str(final_path), source_path, resolved_t7, hooks,
+        expected_sha256=expected_sha256, expected_stat=expected_stat,
+    )
+
+
+def _refuse_source_mismatch(
+    catalog: Catalog,
+    asset_id: str,
+    final_path: Path,
+    source_path: Path,
+    reason: str,
+) -> TransferOutcome:
+    """Stop rather than choose between two destructive options.
+
+    Deleting the source would destroy a file that was never copied; overwriting
+    the destination would destroy one that was. Neither is ours to pick, so the
+    asset is parked for a human with both paths named. A file waiting on a
+    decision costs a glance; a file that no longer exists costs everything.
+    """
+    message = f"{reason}: source={source_path} destination={final_path}"
+    catalog.update_asset(
+        asset_id,
+        transfer_state=STATE_NEEDS_REVIEW,
+        error_state="source_identity_mismatch",
+        error_message=message,
+    )
+    return TransferOutcome(
+        asset_id=asset_id, state=STATE_NEEDS_REVIEW, success=False,
+        final_path=final_path, error_message=message,
+    )
 
 
 def _finish_unlink(
@@ -278,8 +456,48 @@ def _finish_unlink(
     source_path: Path,
     resolved_t7: ResolvedT7,
     hooks: TransferFaultHooks,
+    *,
+    expected_sha256: str | None = None,
+    expected_stat: tuple[int, int] | None = None,
 ) -> TransferOutcome:
+    """Delete the source, having proved it is the file we actually copied.
+
+    This is the only function in the system that removes a user's file, so it
+    re-proves the precondition itself rather than trusting whichever branch
+    called it. Two callers previously reached here having verified only the
+    *destination* -- which says nothing about what is sitting at the source
+    path now. A single failed unlink is enough to set that up: the row stays
+    `committed`, the owner moves on, and a different file later takes the same
+    name.
+
+    `expected_stat` is `(size, mtime_ns)` sampled when the bytes were read. A
+    writer that preserves mtime (`curl -R`, `rsync -a`, a sync client) can make
+    a half-written file look settled, and the source hash then matches the
+    truncated prefix we copied. Re-checking size and mtime at the moment of
+    deletion catches the writer that resumed in between.
+    """
     final_path = Path(final_path_str)
+
+    if source_path.exists():
+        # Cheap check first, and it also gives the more useful diagnosis: size
+        # or mtime moving means something wrote to this file after we read it,
+        # which is a different problem from an unrelated file taking the name.
+        if expected_stat is not None:
+            try:
+                stat = source_path.stat()
+                if (stat.st_size, stat.st_mtime_ns) != expected_stat:
+                    return _refuse_source_mismatch(
+                        catalog, asset_id, final_path, source_path,
+                        "the source file changed after it was read; a writer may still hold it open",
+                    )
+            except OSError:
+                pass
+        if expected_sha256 is not None and not source_is_the_recorded_file(source_path, expected_sha256):
+            return _refuse_source_mismatch(
+                catalog, asset_id, final_path, source_path,
+                "the file at the source path is not the one that was copied",
+            )
+
     try:
         if hooks.before_unlink is not None:
             hooks.before_unlink()

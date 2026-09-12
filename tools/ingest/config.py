@@ -32,9 +32,53 @@ DEFAULTS: dict[str, Any] = {
         "documents": "~/Documents",
         "downloads": "~/Downloads",
         "sd_volume_uuids": [],
+        # Screenshots are a first-class source for *naming*, not for vacuuming.
+        # There is no default path on purpose: macOS puts screenshots wherever
+        # `com.apple.screencapture location` says, which is often ~/Desktop.
+        # Guessing would mean silently walking the Desktop, so an unconfigured
+        # screenshots source fails loudly instead. `organize doctor` reports the
+        # configured location without ever applying it.
+        "screenshots": {
+            "path": None,
+            "enabled": False,
+        },
     },
     "settle_seconds": 30,
     "downloads_watcher_min_settle_seconds": 1200,
+    "naming": {
+        "enabled": True,
+        # Naming applies to these source classes. Desktop and Documents are
+        # absent by design: this phase does not touch them automatically at all.
+        "source_classes": ["screenshots", "downloads", "sd"],
+        # Below this, a proposal is recorded and ignored rather than applied.
+        "min_confidence": 0.55,
+        "max_filename_length": 120,
+        # Extensions never renamed regardless of how poor the name looks:
+        # renaming these breaks something that depends on the name.
+        "protected_extensions": [".app", ".dmg", ".pkg", ".mpkg", ".framework", ".kext"],
+        # Words the owner's own projects/clients use. Present in a filename,
+        # they are strong evidence the name is already meaningful.
+        "vocabulary": [],
+    },
+    "triage": {
+        "enabled": True,
+        # Nothing is ingested automatically until this is switched on, and even
+        # then only above min_ingest_confidence. Everything else is reported.
+        "auto_ingest": False,
+        "min_ingest_confidence": 0.85,
+        # Treated as disposable-for-Angel on sight. They stay on the Mac.
+        "installer_extensions": [".dmg", ".pkg", ".mpkg", ".iso", ".exe", ".msi", ".deb", ".rpm", ".appimage"],
+        "ignore_extensions": [".torrent", ".crdownload", ".part", ".download", ".tmp"],
+        "document_extensions": [".pdf", ".docx", ".doc", ".pages", ".key", ".pptx", ".xlsx", ".numbers", ".csv", ".rtf"],
+        # Below this many bytes a file is assumed to be a fragment or an icon.
+        "min_interesting_bytes": 4096,
+    },
+    "automation": {
+        "enabled": False,
+        "state_relative_path": ".state/file-intelligence",
+        # Absolute override, for a drill or a test. Normally unset.
+        "state_dir": None,
+    },
     "exclusions": {
         "dir_names": [
             "node_modules",
@@ -149,11 +193,54 @@ class T7Config:
 
 
 @dataclass(frozen=True)
+class ScreenshotsConfig:
+    """Where screenshots live, if the owner has said so.
+
+    `enabled` without `path` is a configuration error, not a cue to search.
+    """
+
+    path: Path | None = None
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class SourcesConfig:
     desktop: Path
     documents: Path
     downloads: Path
     sd_volume_uuids: frozenset[str]
+    screenshots: ScreenshotsConfig = field(default_factory=ScreenshotsConfig)
+
+
+@dataclass(frozen=True)
+class NamingConfig:
+    enabled: bool = True
+    source_classes: frozenset[str] = frozenset({"screenshots", "downloads", "sd"})
+    min_confidence: float = 0.55
+    max_filename_length: int = 120
+    protected_extensions: frozenset[str] = frozenset({".app", ".dmg", ".pkg", ".mpkg", ".framework", ".kext"})
+    vocabulary: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TriageConfig:
+    enabled: bool = True
+    auto_ingest: bool = False
+    min_ingest_confidence: float = 0.85
+    installer_extensions: frozenset[str] = frozenset()
+    ignore_extensions: frozenset[str] = frozenset()
+    document_extensions: frozenset[str] = frozenset()
+    min_interesting_bytes: int = 4096
+
+
+@dataclass(frozen=True)
+class AutomationConfig:
+    enabled: bool = False
+    state_relative_path: str = ".state/file-intelligence"
+    # An absolute state directory, for a drill or a test that must not write
+    # into the developer's checkout. `state_relative_path` stays relative-only
+    # so a stray config value can never point run state at `/`.
+    state_dir_override: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -190,12 +277,38 @@ class IngestConfig:
     downloads_watcher_min_settle_seconds: int
     exclusions: ExclusionsConfig
     media: MediaConfig
+    naming: NamingConfig = field(default_factory=NamingConfig)
+    triage: TriageConfig = field(default_factory=TriageConfig)
+    automation: AutomationConfig = field(default_factory=AutomationConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     config_path: Path | None = None
 
     @property
     def repo_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
+
+    @property
+    def state_dir(self) -> Path:
+        if self.automation.state_dir_override is not None:
+            return self.automation.state_dir_override
+        return self.repo_root / self.automation.state_relative_path
+
+    @property
+    def local_ledger_path(self) -> Path:
+        """The Mac-side ledger. Deliberately not on the T7 -- naming has to keep
+        working with Angel unplugged (D-021)."""
+        return self.state_dir / "local-ledger.sqlite"
+
+    def effective_settle_seconds(self, *, automated: bool) -> int:
+        """The settle window a run must honor.
+
+        An automated run always uses at least the watcher threshold. Taking the
+        max rather than simply switching means lowering one value in config can
+        never quietly shorten the window an unattended job waits.
+        """
+        if not automated:
+            return self.settle_seconds
+        return max(self.settle_seconds, self.downloads_watcher_min_settle_seconds)
 
 
 def _expand(raw: str) -> Path:
@@ -229,12 +342,72 @@ def load_config(path: Path | None = None) -> IngestConfig:
     )
 
     sources_raw = merged["sources"]
+    screenshots_raw = sources_raw.get("screenshots") or {}
+    if not isinstance(screenshots_raw, dict):
+        raise ValueError("sources.screenshots must be a mapping with `path` and `enabled`")
+    screenshots = ScreenshotsConfig(
+        path=_expand(screenshots_raw["path"]) if screenshots_raw.get("path") else None,
+        enabled=bool(screenshots_raw.get("enabled", False)),
+    )
+    if screenshots.enabled and screenshots.path is None:
+        # Fail here rather than fall back to ~/Desktop: an unconfigured
+        # screenshots source that quietly resolves to the Desktop would put the
+        # whole Desktop under automatic evaluation.
+        raise ValueError(
+            "sources.screenshots.enabled is true but sources.screenshots.path is not set; "
+            "set the screenshot folder explicitly (`organize doctor` reports where macOS is "
+            "currently saving them)"
+        )
     sources = SourcesConfig(
         desktop=_expand(sources_raw["desktop"]),
         documents=_expand(sources_raw["documents"]),
         downloads=_expand(sources_raw["downloads"]),
         sd_volume_uuids=frozenset(sources_raw.get("sd_volume_uuids") or []),
+        screenshots=screenshots,
     )
+
+    naming_raw = merged["naming"]
+    naming = NamingConfig(
+        enabled=bool(naming_raw["enabled"]),
+        source_classes=frozenset(naming_raw["source_classes"]),
+        min_confidence=float(naming_raw["min_confidence"]),
+        max_filename_length=int(naming_raw["max_filename_length"]),
+        protected_extensions=frozenset(ext.lower() for ext in naming_raw["protected_extensions"]),
+        vocabulary=tuple(str(word) for word in naming_raw.get("vocabulary") or ()),
+    )
+    if not 0.0 <= naming.min_confidence <= 1.0:
+        raise ValueError("naming.min_confidence must be between 0 and 1")
+    if not 8 <= naming.max_filename_length <= 200:
+        raise ValueError("naming.max_filename_length must be between 8 and 200")
+
+    triage_raw = merged["triage"]
+    triage = TriageConfig(
+        enabled=bool(triage_raw["enabled"]),
+        auto_ingest=bool(triage_raw["auto_ingest"]),
+        min_ingest_confidence=float(triage_raw["min_ingest_confidence"]),
+        installer_extensions=frozenset(ext.lower() for ext in triage_raw["installer_extensions"]),
+        ignore_extensions=frozenset(ext.lower() for ext in triage_raw["ignore_extensions"]),
+        document_extensions=frozenset(ext.lower() for ext in triage_raw["document_extensions"]),
+        min_interesting_bytes=int(triage_raw["min_interesting_bytes"]),
+    )
+    if not 0.0 <= triage.min_ingest_confidence <= 1.0:
+        raise ValueError("triage.min_ingest_confidence must be between 0 and 1")
+
+    automation_raw = merged["automation"]
+    override_raw = automation_raw.get("state_dir")
+    state_dir_override = _expand(str(override_raw)) if override_raw else None
+    if state_dir_override is not None:
+        if not state_dir_override.is_absolute():
+            raise ValueError("automation.state_dir must be an absolute path")
+        if state_dir_override == Path(state_dir_override.root):
+            raise ValueError("automation.state_dir may not be a filesystem root")
+    automation = AutomationConfig(
+        enabled=bool(automation_raw["enabled"]),
+        state_relative_path=str(automation_raw["state_relative_path"]),
+        state_dir_override=state_dir_override,
+    )
+    if Path(automation.state_relative_path).is_absolute() or ".." in Path(automation.state_relative_path).parts:
+        raise ValueError("automation.state_relative_path must be a relative path inside the checkout")
 
     excl_raw = merged["exclusions"]
     exclusions = ExclusionsConfig(
@@ -296,6 +469,9 @@ def load_config(path: Path | None = None) -> IngestConfig:
         downloads_watcher_min_settle_seconds=int(merged["downloads_watcher_min_settle_seconds"]),
         exclusions=exclusions,
         media=media,
+        naming=naming,
+        triage=triage,
+        automation=automation,
         backup=backup,
         config_path=resolved_path,
     )

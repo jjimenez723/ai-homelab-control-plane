@@ -91,7 +91,7 @@ class T7PreflightTests(unittest.TestCase):
             try:
                 config = build_config(desktop=desktop, t7_root=t7_mount)
                 with self.assertRaises(VolumeError):
-                    resolve_t7(config, prober=lambda: [], for_apply=False)
+                    resolve_t7(config, prober=lambda: [], for_apply=False, allow_storage_root_override=True)
             finally:
                 os.chmod(t7_mount, 0o700)
 

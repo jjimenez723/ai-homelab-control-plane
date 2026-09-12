@@ -1,8 +1,8 @@
 # AI Homelab Control Plane
 
-Planning repository for a private, scalable AI automation environment built around existing personal computers, a Samsung T7 SSD, local/open-weight models, and selectively used frontier models.
+Control plane for a private, scalable AI automation environment built around existing personal computers, a Samsung T7 SSD, local/open-weight models, and selectively used frontier models.
 
-This repository is **documentation and control-plane design only**. It should not contain client media, model weights, production secrets, trading credentials, private datasets, or copies of unrelated source repositories.
+This repository holds both the control-plane design documents **and the working software that implements them** — the `organize` ingestion and file-intelligence CLI, the restic backup tooling, the LaunchAgent templates, and their test suite. What it must never contain: client media, model weights, production secrets, trading credentials, private datasets, copies of unrelated source repositories, or machine-specific configuration. The one machine-specific file, `config/ingest.yaml`, is gitignored and holds the T7 volume UUID; `config/ingest.example.yaml` is the committed template with a placeholder.
 
 ## North-star objective
 
@@ -84,7 +84,9 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 11-open-decisions.md
 │   ├── 12-video-learning-pipeline.md
 │   ├── 13-dump-first-ingestion.md
-│   └── 14-design-system-and-ui-library-policy.md
+│   ├── 14-design-system-and-ui-library-policy.md
+│   ├── 15-file-intelligence-acceptance-drill.md   # the hand-run drill; do this before trusting the pipeline
+│   └── 16-file-intelligence.md               # naming, triage, automation (read this before changing tools/ingest/)
 ├── data/
 │   ├── video-learning-queue.yaml
 │   └── ui-library-registry.yaml
@@ -102,29 +104,64 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── media-sidecar.example.json
 │   └── node-manifest.yaml
 ├── tools/
-│   └── ingest/          # manual-first daily ingestion (the `organize` CLI)
+│   ├── backup.py          # restic/rclone backup engine (locking, preflight, status)
+│   ├── backup_cli.py      # the backup/check/restore/retention entry points
+│   ├── social_video_learn.py
+│   ├── social_video_queue.py
+│   └── ingest/            # the `organize` CLI: ingestion + file intelligence
+│       ├── cli.py         # subcommands; every one defaults to a dry run
+│       ├── config.py      # defaults live in code; ingest.yaml only overrides
+│       ├── transaction.py # THE transfer primitive; the only code that unlinks a source
+│       ├── catalog.py     # T7 catalog (SQLite, schema v2) — durable truth
+│       ├── ledger.py      # Mac-side local ledger — rebuildable bookkeeping (D-021)
+│       ├── migrations.py  # additive, idempotent; shared by both databases
+│       ├── schema_sql.py  # table shapes shared by both databases
+│       ├── pipeline.py    # discover → name → triage → (maybe) ingest
+│       ├── automation.py  # run lock + atomically published status.json
+│       ├── status.py      # `organize status` / `organize doctor` (read-only)
+│       ├── scanner.py exclusions.py hashing.py identity.py sources.py
+│       ├── t7.py volumes.py derivatives.py git_repos.py
+│       ├── naming/        # quality → evidence → proposer → policy → rename
+│       ├── triage/        # IGNORE / REVIEW / INGEST retention policy
+│       └── media/         # heic.py (derivatives), probe.py (deterministic facts)
+├── tests/
+│   ├── ingest/            # fault-injection + mutation-safety suite
+│   ├── test_backup.py test_backup_recovery_safety.py
+│   └── test_launchd_portability.py test_file_intelligence_launchd.py
+├── launchd/
+│   ├── com.ai-homelab.t7-backup.plist.template          # nightly 02:15, loaded
+│   ├── com.ai-homelab.t7-check.plist.template           # Sunday 03:15, loaded
+│   └── com.ai-homelab.file-intelligence.plist.template  # hourly :20, OPT-IN, off by default
 ├── config/
-│   └── ingest.example.yaml
-├── "Organize Files.command"   # double-clickable launcher
+│   └── ingest.example.yaml   # committed template; config/ingest.yaml is gitignored
+├── "Organize Files.command"  # double-clickable launcher; calls the same CLI
 └── scripts/
     ├── bootstrap-t7.sh
-    └── organize
+    ├── organize                              # the ingestion / file-intelligence CLI
+    ├── learn-video
+    ├── backup-t7  backup-t7-init  backup-t7-check  backup-t7-snapshots
+    ├── backup-t7-retention  backup-t7-status  backup-t7-scheduled
+    ├── restore-t7  restore-t7-drill
+    ├── render-/install-/uninstall-backup-t7-launchd
+    ├── render-/install-/uninstall-file-intelligence-launchd
+    ├── file-intelligence-scheduled           # one-shot; what launchd runs
+    └── git-hooks/  install-git-hooks.sh
 ```
 
 ## First implementation milestone
 
 The first milestone is intentionally boring:
 
-1. inventory every machine;
-2. prepare the empty T7;
-3. create a protected `00-inbox/legacy-dump/` landing zone;
-4. dump existing repos/media/client work with minimal manual sorting;
-5. let the ingestion service inventory, hash, classify, tag, and propose organization without deleting originals;
-6. generate checksums for irreplaceable media;
-7. establish a second backup before any source deletion;
-8. only then begin automating ingestion and worker nodes.
+1. inventory every machine — **not started**;
+2. prepare the empty T7 — **done** (erased and recreated as APFS Encrypted 2026-09-11, D-019; `scripts/bootstrap-t7.sh` scaffold created);
+3. create a protected `00-inbox/legacy-dump/` landing zone — **done** (the directory tree exists; the protection is enforced in the application layer, not by `chflags`);
+4. dump existing repos/media/client work with minimal manual sorting — **not started**;
+5. let the ingestion service inventory, hash, classify, tag, and propose organization without deleting originals — **done for the day-to-day path only**: walking, hashing, deterministic media probing, filename proposals, and IGNORE/REVIEW/INGEST retention triage all work and never delete an original. **Classification and AI naming are not built** — there is no OCR, no image understanding, no model router, and no client/project inference. The proposer is deterministic and names from facts the file states about itself. Bulk inventory of a legacy dump is also still to do;
+6. generate checksums for irreplaceable media — **partly**: SHA-256 is computed and recorded for every file the pipeline touches, but no standalone immutable manifest has been written;
+7. establish a second backup before any source deletion — **done** (D-018: encrypted restic to Google Drive via rclone; snapshot, check, and restore drill green 2026-09-12, both LaunchAgents loaded). The independent D-004 Dell/B2 failure domains are still outstanding;
+8. only then begin automating ingestion and worker nodes — **partly**: an opt-in, hourly, one-shot LaunchAgent exists for naming/triage and is disabled by default (D-024). No worker nodes exist.
 
-See `docs/10-migration-plan.md`.
+See `docs/10-migration-plan.md`, and `PLAN.md` for the authoritative per-item status.
 
 ## Manual-first daily ingestion
 
@@ -137,13 +174,36 @@ Day-to-day Desktop/Documents/Downloads/SD cleanup (PLAN.md Phase 1A, `DECISIONS.
 
 Copy `config/ingest.example.yaml` to `config/ingest.yaml` (ignored by git) and set `t7.volume_uuid` and any registered SD card UUIDs for this machine first. Every destructive move goes through one transactional primitive -- copy to a T7 `.partial` staging file, flush/close, SHA-256 destination verification, atomic finalize + catalog commit, and only then unlink the source -- so a crash, unplug, or hash mismatch always leaves the source intact and the transfer safely retryable. Desktop, Documents, and Downloads only ever run when invoked by hand; SD cards are detected automatically by volume UUID but only a UUID explicitly registered in `config/ingest.yaml` is eligible, and originals still require an explicit `--apply`. `--dry-run` (the default with no flag) never writes anything, including to the catalog. See `docs/13-dump-first-ingestion.md` for the full design and `tests/ingest/` for the fault-injection test suite that proves it.
 
+## File intelligence: naming, triage, and review
+
+The same `organize` CLI also answers two questions that ingestion does not: *what should this file be called?* and *does it belong in the durable library at all?* These are separate questions with separate evidence, and the commands keep them separate.
+
+```bash
+./scripts/organize triage downloads --dry-run   # propose names, classify retention, write nothing
+./scripts/organize triage all --apply           # apply renames; still moves nothing unless auto_ingest is on
+./scripts/organize status                       # what the pipeline knows and is waiting on
+./scripts/organize doctor                       # is this machine configured to run safely at all
+./scripts/organize review                       # files waiting on a human decision
+./scripts/organize duplicates                   # observed duplicate relationships, never acted on
+./scripts/organize correct-name PATH            # record a name you chose; nothing ever overrides it
+```
+
+Four invariants govern all of it, and none of them is a matter of configuration:
+
+1. **Naming does not imply retention.** A screenshot can be given a useful filename and never be archived. The two decisions are recorded in different tables and reached by different code.
+2. **Ignore-for-Angel does not mean delete-from-the-Mac.** `IGNORE` means "not in the durable library". Nothing in the naming or triage layer can delete a file; the only file removal in this system is the source unlink inside the verified transfer, after the bytes are provably on Angel.
+3. **A model proposes and never deletes.** A proposer receives `NamingEvidence` — plain data with no `Path`, no file handle, and no callable — so it has nothing to mutate the filesystem with. `naming.policy.safe_rename` is the only rename primitive and cannot overwrite; `transaction.transfer_file` remains the only code that unlinks a source. A name you set by hand outranks every later proposal, permanently.
+4. **Automation is opt-in and safe when Angel is absent.** The hourly LaunchAgent is disabled by default and the installer refuses to load it unless `automation.enabled: true`. It is a one-shot invocation, not a daemon or a watcher. With Angel unplugged, naming still works — its ledger lives on the Mac — and nothing is moved or removed.
+
+The full design, including every filesystem-mutating code path and why each is safe, is in `docs/16-file-intelligence.md`; `docs/15-file-intelligence-acceptance-drill.md` is the hand-run drill that demonstrates each of the four invariants above on throwaway files before you point any of this at real ones.
+
 ## Immediate encrypted off-site backup
 
-`angel` is backed up through restic to `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`, an encrypted restic repository in Google Drive—not a Google Drive Desktop mirror. The source is pinned to the same configured T7 volume UUID used by ingestion. Backup commands, restore safety, retention reporting, Keychain use, and the unenabled nightly LaunchAgent template are documented in `docs/09-backup-recovery.md`.
+`angel` is backed up through restic to `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic`, an encrypted restic repository in Google Drive—not a Google Drive Desktop mirror. The source is pinned to the same configured T7 volume UUID used by ingestion. The nightly `com.ai-homelab.t7-backup` (02:15) and weekly `com.ai-homelab.t7-check` (Sunday 03:15) LaunchAgents are **installed and loaded**; a snapshot, a `backup-t7-check`, and a `restore-t7-drill` were all green on 2026-09-12. Retention remains disabled, so no snapshot is ever forgotten or pruned automatically. Backup commands, restore safety, retention reporting, Keychain use, and fresh-Mac recovery are documented in `docs/09-backup-recovery.md`.
 
 ## Review
 
-The architecture review prompt is `reviews/GPT6-ASTRA-ARCHITECTURE-REVIEW.md`; the resulting review is `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md`. Decisions taken from it are recorded in `DECISIONS.md`; the execution order is `PLAN.md`. Start there before touching hardware.
+The architecture review prompt is `reviews/GPT6-ASTRA-ARCHITECTURE-REVIEW.md`; the resulting review is `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md`. Decisions taken from it are recorded in `DECISIONS.md`; the execution order and the authoritative per-item status are in `PLAN.md`. Read both before changing anything under `tools/` — several of the safety properties in this repository are decisions with reasons, not implementation details, and the decision log says which.
 
 ## Social-video learning
 
