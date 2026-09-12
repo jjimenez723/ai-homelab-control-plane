@@ -542,20 +542,29 @@ class LocalLedger(LedgerTables):
         distinguish reliably after the fact, so a changed content hash always
         starts a new generation.
 
-        This is intentionally conservative. The filename already on disk is
-        left untouched, so a human-authored useful name survives physically,
-        but model decisions, retention state, and human authority recorded for
-        the previous bytes are not silently inherited by different bytes.
+        This is intentionally conservative. Content-specific decisions never
+        cross a hash boundary. The one exception is explicit human naming
+        authority when the same inode is still at the same path: the filename
+        is still physically present and invariant 12 says a person's name wins
+        over later automation. That naming lock is re-asserted for the new
+        generation, while retention/classification decisions are reset.
         """
         local_file_id = local_file_id_for(source_volume_id, device, inode)
         existing = self.get_local_file(local_file_id)
         is_new_generation = False
+        carry_human_name = False
         generation = 0
 
         if existing is not None:
             generation = int(existing["generation"])
             content_changed = bool(existing["sha256"]) and existing["sha256"] != sha256
             if content_changed:
+                # A same-path rewrite cannot be distinguished reliably from an
+                # in-place replacement. Reset all content-specific authority,
+                # but preserve only an explicit human naming lock when the name
+                # is still physically attached to this same local identity.
+                same_path = existing["current_path"] == str(path)
+                carry_human_name = same_path and self.has_human_naming(local_file_id)
                 is_new_generation = True
                 generation += 1
 
@@ -582,7 +591,8 @@ class LocalLedger(LedgerTables):
                 (
                     local_file_id, source_volume_id, source_class, sha256, size, mime, media_kind,
                     str(path), path.name, str(path), path.name,
-                    NAMING_STATE_UNEVALUATED, generation, now, now, now,
+                    NAMING_STATE_HUMAN if carry_human_name else NAMING_STATE_UNEVALUATED,
+                    generation, now, now, now,
                 ),
             )
         else:
@@ -594,6 +604,29 @@ class LocalLedger(LedgerTables):
                 WHERE local_file_id = ?
                 """,
                 (source_class, sha256, size, mime, media_kind, str(path), path.name, now, now, local_file_id),
+            )
+
+        if is_new_generation and carry_human_name:
+            self.append_naming(
+                {
+                    "local_file_id": local_file_id,
+                    "asset_id": None,
+                    "source_volume_id": source_volume_id,
+                    "source_class": source_class,
+                    "directory": str(path.parent),
+                    "sha256": sha256,
+                    "original_filename": path.name,
+                    "proposed_filename": None,
+                    "applied_filename": path.name,
+                    "name_quality": "human",
+                    "decision": DECISION_HUMAN_LOCKED,
+                    "reason": "owner-authored filename carried forward across a content generation",
+                    "approved_by": "human",
+                    "human_corrected": 1,
+                    "policy_outcome": "human_naming_authority_carried_forward",
+                    "created_at": now,
+                    "generation": generation,
+                }
             )
 
         return ObservedFile(
