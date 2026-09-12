@@ -85,6 +85,7 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 12-video-learning-pipeline.md
 │   ├── 13-dump-first-ingestion.md
 │   ├── 14-design-system-and-ui-library-policy.md
+│   ├── 15-file-intelligence-acceptance-drill.md   # the hand-run drill; do this before trusting the pipeline
 │   └── 16-file-intelligence.md               # naming, triage, automation (read this before changing tools/ingest/)
 ├── data/
 │   ├── video-learning-queue.yaml
@@ -194,7 +195,7 @@ Four invariants govern all of it, and none of them is a matter of configuration:
 3. **A model proposes and never deletes.** A proposer receives `NamingEvidence` — plain data with no `Path`, no file handle, and no callable — so it has nothing to mutate the filesystem with. `naming.policy.safe_rename` is the only rename primitive and cannot overwrite; `transaction.transfer_file` remains the only code that unlinks a source. A name you set by hand outranks every later proposal, permanently.
 4. **Automation is opt-in and safe when Angel is absent.** The hourly LaunchAgent is disabled by default and the installer refuses to load it unless `automation.enabled: true`. It is a one-shot invocation, not a daemon or a watcher. With Angel unplugged, naming still works — its ledger lives on the Mac — and nothing is moved or removed.
 
-The full design, including every filesystem-mutating code path and why each is safe, is in `docs/16-file-intelligence.md`.
+The full design, including every filesystem-mutating code path and why each is safe, is in `docs/16-file-intelligence.md`; `docs/15-file-intelligence-acceptance-drill.md` is the hand-run drill that demonstrates each of the four invariants above on throwaway files before you point any of this at real ones.
 
 ## Immediate encrypted off-site backup
 
@@ -202,7 +203,7 @@ The full design, including every filesystem-mutating code path and why each is s
 
 ## Review
 
-The architecture review prompt is `reviews/GPT6-ASTRA-ARCHITECTURE-REVIEW.md`; the resulting review is `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md`. Decisions taken from it are recorded in `DECISIONS.md`; the execution order is `PLAN.md`. Start there before touching hardware.
+The architecture review prompt is `reviews/GPT6-ASTRA-ARCHITECTURE-REVIEW.md`; the resulting review is `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md`. Decisions taken from it are recorded in `DECISIONS.md`; the execution order and the authoritative per-item status are in `PLAN.md`. Read both before changing anything under `tools/` — several of the safety properties in this repository are decisions with reasons, not implementation details, and the decision log says which.
 
 ## Social-video learning
 

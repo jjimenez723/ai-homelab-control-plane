@@ -89,7 +89,7 @@ launchctl print "gui/$UID/com.ai-homelab.t7-check"
 ./scripts/backup-t7-status
 ```
 
-The backup job never runs retention. Retention is separate and is **disabled by default** in `config/ingest.yaml`. Its proposed policy is 7 daily / 4 weekly / 6 monthly (no yearly retention). `./scripts/backup-t7-retention` is a repository-pinned `restic forget --dry-run` preview. Even with `--apply --confirmed-after-restore`, destructive `forget --prune` refuses unless `backup.retention.enabled: true` is set deliberately. Do not enable it yet: this protects snapshot `277aff3a` from accidental removal while its questionable historical provenance is preserved.
+The backup job never runs retention. Retention is separate and is **disabled by default in code** — `backup.retention.enabled` defaults to `false` in `tools/ingest/config.py`, so it is off whether or not a config file mentions it. The live `config/ingest.yaml` on this machine has no `backup.retention` block at all and therefore inherits that default; `config/ingest.example.yaml` shows the block explicitly with `enabled: false` so the knob is discoverable. Its proposed policy is 7 daily / 4 weekly / 6 monthly (no yearly retention). `./scripts/backup-t7-retention` is a repository-pinned `restic forget --dry-run` preview. Even with `--apply --confirmed-after-restore`, destructive `forget --prune` refuses unless `backup.retention.enabled: true` is set deliberately. Do not enable it yet: this protects snapshot `277aff3a` from accidental removal while its questionable historical provenance is preserved.
 
 For a monthly restore drill, configure `backup.restore_drill_relative_path` to a small stable path relative to Angel's UUID-verified root. `restore-t7-drill` restores only that path into a temporary directory below `.state/backup/restore-drills`, compares SHA-256 hashes, and removes that temporary target. It never writes to Angel or a production recovery target.
 
@@ -121,7 +121,7 @@ security add-generic-password -U -a "$USER" -s ai-homelab-rclone-config -w
 
 After the remote and Keychain report are green, run `./scripts/backup-t7-init` to verify the existing pinned repository, then `./scripts/backup-t7 --preflight`. This workflow deliberately cannot create or reinitialize a missing repository; changing the repository requires an explicit reviewed code change. Review the preflight output and obtain explicit approval before running the first `./scripts/backup-t7` upload.
 
-## Status (verified 2026-09-11 on `mac-m4pro`)
+## Status (verified 2026-09-12 on `mac-m4pro`)
 
 | Item | State |
 |---|---|
@@ -129,12 +129,12 @@ After the remote and Keychain report are green, run `./scripts/backup-t7-init` t
 | Source identity | pinned by Volume UUID in `config/ingest.yaml` (`t7.volume_uuid`); updated after the 2026-09-11 erase (D-019) |
 | Repository | `rclone:gdrive-backup:AI-Homelab-Backups/T7-restic` — **already existed; reused, not re-initialized** (`backup-t7-init` reported "Repository already exists") |
 | Keychain | `ai-homelab-t7-restic` and `ai-homelab-rclone-config` both resolve; no secret appears in argv, config, or logs |
-| Integrity | `backup-t7-check` (metadata + 5% packfile read) — "no errors were found" across all 4 snapshots |
-| Restore drill | snapshot `2b5de56e` restored to an isolated temp directory with `--include`; all three test files SHA-256 identical to the source; the temporary restored copy and the disposable test directory were then removed |
-| Backup run | `9f674b9f` (tag `post-fix-verify`) completed with **exit 0 / `"outcome": "success"`** and zero error lines after the `.Spotlight-V100` exclusion landed |
-| Stored in Drive | 378 objects, 5.883 GiB, laid out as a real restic repository (`config`, `data/`, `index/`, `keys/`, `locks/`, `snapshots/`); sampled objects are ciphertext, not browsable files |
+| Integrity | `backup-t7-check` (metadata + 5% packfile read) 2026-09-12 — "no errors were found" across all 8 snapshots, 18/18 packs read |
+| Restore drill | `restore-t7-drill` 2026-09-12 — `"restore_drill_status": "success"`, exit 0. `backup.restore_drill_relative_path` is configured to a small live marker file under `00-inbox/`; the drill restores only that path into a temp directory below `.state/backup/restore-drills`, compares SHA-256, and removes the temporary target. (Earlier manual drill, 2026-09-11: snapshot `2b5de56e` restored with `--include`; all three test files hash-identical.) |
+| Backup run | `c8b90556` (tags `t7`, `angel`, `automatic`) 2026-09-12 — **exit 0 / `"outcome": "success"`**, 5 files / 28,818 bytes processed, 0 bytes added. Angel currently holds only the bootstrap scaffold and the drill marker; no ingested asset has landed on it yet. |
+| Stored in Drive | as of 2026-09-11: 378 objects, 5.883 GiB, laid out as a real restic repository (`config`, `data/`, `index/`, `keys/`, `locks/`, `snapshots/`); sampled objects are ciphertext, not browsable files |
 | Deep check | `backup-t7-check --deep` not yet run |
-| Scheduling | nightly LaunchAgent still **not** rendered or loaded |
+| Scheduling | `com.ai-homelab.t7-backup` (nightly 02:15) and `com.ai-homelab.t7-check` (Sunday 03:15) are **rendered, loaded, and bootstrapped** into `gui/$UID`; `com.ai-homelab.file-intelligence` is deliberately **not** loaded (opt-in, D-024) |
 
 Snapshot `277aff3a` (2026-09-11 08:08, 7.906 GiB, 361,572 files) predates the erase and carries the retired volume UUID. **It is a partial snapshot of a failing disk, not a complete copy of the old T7** — see the coverage section below. Do not run `backup-t7-retention --apply`, `restic forget`, or `restic prune` against this repository.
 

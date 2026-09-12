@@ -151,3 +151,20 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review �
 - Consequence: enabling the agent does not enable transfers. `triage.auto_ingest` is a separate, independently defaulted-off gate, so the first thing the agent does once scheduled is name and report, not move.
 - Consequence: the agent's only sources are Downloads and Screenshots. Desktop and Documents remain manual-trigger only (D-016), and scheduling this agent does not change that.
 - Revisit trigger: the hourly cadence demonstrably misses files that matter (a same-hour download acted on before the next firing), or the run regularly exceeds an hour and the skip path becomes the normal path rather than the exception.
+
+## D-025 — Screenshots are a configured source with no inferred default path
+- Status: accepted 2026-09-12 (`sources.screenshots` in `config/ingest.example.yaml`; reported by `organize doctor`).
+- Context: screenshots are the strongest case for automatic naming — macOS generates them with a timestamp name and nobody ever renames them by hand. macOS also writes them to `~/Desktop` by default, and `com.apple.screencapture location` can point at any directory.
+- Decision: `sources.screenshots.path` has no default. It ships as `null` with `enabled: false`, and screenshots are a naming source only when the owner sets that path deliberately. The macOS setting is never read and adopted as the path.
+- Rationale: inferring the path would, on a default Mac, silently enrol the entire Desktop in an hourly renaming pipeline. A convenience that widens the blast radius to a directory the owner never nominated is not a convenience. Screenshots are a *naming* source specifically — this decision says nothing about whether any screenshot is kept (D-020).
+- Decision: `organize doctor` reports what `com.apple.screencapture location` currently says so the owner can copy it into config; it reports, it does not adopt. Where a configured screenshots path overlaps Desktop, Documents, or Downloads, only files whose names identify them as screen captures are evaluated.
+- Consequence: on a machine that never configures it, screenshot naming simply does not happen. That is the intended failure mode, not a gap.
+- Revisit trigger: macOS gains a capture location that cannot collide with a document folder, or the owner wants a dedicated screenshots folder picked up without configuration.
+
+## D-026 — `t7.storage_root_override` requires an explicit CLI flag
+- Status: accepted 2026-09-12 (`--allow-dev-storage-root`, enforced in `tools/ingest/t7.py`).
+- Context: `t7.storage_root_override` exists so tests and local dry runs can point the pipeline at a scratch directory. As originally written it was honoured from config alone, and honouring it skipped the volume-UUID check for the **entire** destructive path — including the source unlink. A stale override left in `config/ingest.yaml` would have let `--apply` verify a copy into an ordinary folder and then delete the owner's original.
+- Decision: the override is honoured only when `--allow-dev-storage-root` is passed on the command line for that invocation. A config file alone can never disable the UUID boundary. The scheduled LaunchAgent never passes the flag.
+- Relationship to D-019: the D-019 boundary is unchanged and absolute. The T7 is identified by its Volume UUID, recorded once in the gitignored `config/ingest.yaml`, and no code path may fall back to the volume name `Angel` or the path `/Volumes/Angel`. This entry carves no exception into that rule; it closes a path that had quietly bypassed it.
+- Consequence: `organize doctor` reports a configured override as a finding and states that it is honoured only with the flag, so a development setting cannot sit unnoticed on a production machine.
+- Revisit trigger: the test suite builds its configuration in-process and no longer needs the override at all, at which point it should be deleted rather than gated.

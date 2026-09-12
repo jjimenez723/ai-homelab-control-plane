@@ -52,7 +52,7 @@ from tools.ingest.sources import (
 )
 from tools.ingest.t7 import ResolvedT7
 from tools.ingest.transaction import PlannedTransfer, TransferOutcome, transfer_file
-from tools.ingest.triage.policy import may_auto_ingest, triage
+from tools.ingest.triage.policy import RetentionDecision, human_decision, may_auto_ingest, triage
 
 @dataclass
 class FileOutcome:
@@ -389,14 +389,20 @@ def _process_file(
             name_quality_reason=quality_reason,
         )
 
-    decision = triage(
-        triage_evidence,
-        config=config.triage,
-        duplicate_of_asset=duplicate_asset,
-        duplicate_of_local=duplicate_local,
-        # The name the file arrived with, before this run touched it.
-        owner_named=evidence.name_quality == QUALITY_GOOD,
-    )
+    # A retention decision the owner made stands, permanently. Re-deriving one
+    # every run would mean a model quietly overruling a person (invariant 12).
+    standing = _standing_human_decision(ledger, observed.local_file_id)
+    if standing is not None:
+        decision = standing
+    else:
+        decision = triage(
+            triage_evidence,
+            config=config.triage,
+            duplicate_of_asset=duplicate_asset,
+            duplicate_of_local=duplicate_local,
+            # The name the file arrived with, before this run touched it.
+            owner_named=evidence.name_quality == QUALITY_GOOD,
+        )
     run_id = ledger.append_classification(
         {
             "local_file_id": observed.local_file_id,
@@ -624,3 +630,16 @@ def run_pipeline(
             )
         )
     return report
+
+
+def _standing_human_decision(ledger: LocalLedger, local_file_id: str) -> RetentionDecision | None:
+    """The owner's own retention decision for this file, if they made one.
+
+    Read from the append-only classification ledger rather than a mutable flag,
+    so the decision keeps its reason and its timestamp alongside every model
+    opinion that came before or after it.
+    """
+    for row in reversed(ledger.classification_runs(local_file_id)):
+        if row["human_corrected"]:
+            return human_decision(row["recommendation"], reason=row["reason"] or "decided by the owner")
+    return None

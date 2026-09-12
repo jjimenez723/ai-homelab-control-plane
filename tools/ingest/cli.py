@@ -505,6 +505,80 @@ def cmd_duplicates(args: argparse.Namespace, prober: VolumeProber | None = None,
     return 0
 
 
+def cmd_decide(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """Record a retention decision the owner made themselves.
+
+    `organize keep PATH` / `organize ignore PATH`. This is what makes the
+    review queue a queue rather than a list: a file the system could not judge
+    gets judged by the person who can, once, and the decision stands.
+
+    It does not move or delete anything. `keep` marks a file as an ingest
+    candidate; the transfer still happens through the same verified path on the
+    next `organize triage ... --apply`, and `ignore` simply means the file stays
+    on the Mac and stops being asked about.
+    """
+    config = config if config is not None else load_config(args.config)
+    path = args.path.expanduser()
+    if not path.is_file():
+        print(f"Not a file: {path}")
+        return 1
+    if not config.local_ledger_path.exists():
+        print("No local ledger yet. Run `organize triage all` first so the file is known.")
+        return 1
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        print(f"Cannot read {path}: {exc}")
+        return 1
+
+    recommendation = RETENTION_INGEST if args.command == "keep" else RETENTION_IGNORE
+    with LocalLedger(config.local_ledger_path) as ledger:
+        local_file_id = local_file_id_for(LOCAL_VOLUME_ID, stat.st_dev, stat.st_ino)
+        row = ledger.get_local_file(local_file_id)
+        if row is None:
+            print(f"{path.name} is not tracked yet. Run `organize triage all` first.")
+            return 1
+        reason = args.reason or f"decided by the owner via `organize {args.command}`"
+        run_id = ledger.append_classification(
+            {
+                "local_file_id": local_file_id,
+                "asset_id": row["ingested_asset_id"],
+                "source_volume_id": row["source_volume_id"],
+                "source_class": row["source_class"],
+                "sha256": row["sha256"],
+                "recommendation": recommendation,
+                "confidence": 1.0,
+                "reason": reason,
+                "model": "human",
+                "model_version": "-",
+                "policy_outcome": recommendation,
+                "human_state": "decided",
+                "human_corrected": 1,
+                "created_at": now_iso(),
+            }
+        )
+        ledger.update_local_file(
+            local_file_id,
+            now=now_iso(),
+            retention_recommendation=recommendation,
+            retention_confidence=1.0,
+            retention_reason=reason,
+            retention_run_id=run_id,
+        )
+
+    if recommendation == RETENTION_INGEST:
+        print(
+            f"Marked '{path.name}' to keep. It moves to Angel on the next "
+            "`organize triage ... --apply`, through the verified transfer path."
+        )
+    else:
+        print(
+            f"Marked '{path.name}' as not for Angel. It stays exactly where it is "
+            "on the Mac; this is not a delete."
+        )
+    return 0
+
+
 def cmd_correct_name(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
     """Record that the owner chose this file's name.
 
@@ -614,6 +688,15 @@ def build_parser() -> argparse.ArgumentParser:
     duplicates.add_argument("--limit", type=int, default=40)
     _add_common_arguments(duplicates)
 
+    for verb, blurb in (
+        ("keep", "Mark a reviewed file as one to keep in Angel. Your decision, not the model's."),
+        ("ignore", "Mark a reviewed file as not for Angel. It stays on the Mac -- this is not a delete."),
+    ):
+        decide = subparsers.add_parser(verb, help=blurb)
+        decide.add_argument("path", type=Path, help="The file, as it is currently named on disk.")
+        decide.add_argument("--reason", default="", help="Why, for the audit trail.")
+        _add_common_arguments(decide)
+
     correct = subparsers.add_parser(
         "correct-name",
         help="Record a name you chose yourself. Nothing automatic overrides it afterwards.",
@@ -636,6 +719,8 @@ def main(argv: list[str] | None = None, prober: VolumeProber | None = None) -> i
         "review": cmd_review,
         "duplicates": cmd_duplicates,
         "correct-name": cmd_correct_name,
+        "keep": cmd_decide,
+        "ignore": cmd_decide,
     }[args.command]
     return handler(args, prober=prober)
 

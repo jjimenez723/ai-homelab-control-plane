@@ -22,6 +22,8 @@ T7/
 
 Copy messy source folders into the matching source-device folder with minimal manual effort. Do not require manual naming first. Inventory, hash, and verify the dump before any source disk is wiped or reformatted.
 
+Mode A is unchanged by the Phase 1B naming and triage work described under Mode B. The legacy dump stays copy-only and non-destructive, nothing in it is renamed, and no retention decision is made about it. The bulk inventory pass over a legacy dump is still to be built.
+
 ## Mode B — day-to-day cleanup
 
 Normal Desktop/Documents/Downloads/SD cleanup is an explicit, transactional **move** workflow. It is not a background LLM with filesystem delete permission.
@@ -43,17 +45,56 @@ organize all --apply
 
 A double-clickable macOS `Organize Files.command` launcher calls the same CLI.
 
-During development, all sources are manual-trigger. After the acceptance gate is green, Downloads alone may be enabled as an opt-in launchd/FSEvents watcher.
+During development, all sources are manual-trigger. Downloads and Screenshots may additionally be enabled as an opt-in, hourly launchd **one-shot** — not a resident FSEvents watcher (D-024). It is disabled by default, and enabling it enables naming and reporting, not transfers.
 
 ### Source policy
 
 - **Desktop:** manual only.
 - **Documents:** manual only.
 - **Downloads:** manual during development; later opt-in automation for settled files only (default unchanged for at least 20 minutes).
+- **Screenshots:** a naming source only when `sources.screenshots.path` is set; there is no default and the path is never inferred (D-025).
 - **SD cards/removable media:** detect mount automatically by volume UUID, but only registered source volumes are eligible and originals require explicit `--apply`.
 - **T7 absent/locked/read-only:** no apply operation runs.
 
 Mounting the T7 by itself never empties Desktop or Documents.
+
+### Naming and retention triage (Phase 1B)
+
+Before anything is transferred, Mode B asks two separate questions about each settled file. The stage runs entirely on the Mac and moves nothing.
+
+1. **Discovery** — the source walk and the exclusion set below produce a candidate.
+2. **Deterministic metadata** — size, mtime, MIME, and container-level media facts (`tools/ingest/media/probe.py`) are measured from the file, never guessed from its name.
+3. **Name quality** — `tools/ingest/naming/quality.py` decides whether the existing filename already carries information. A name the owner clearly chose is left alone; `IMG_4821.HEIC`, `Screenshot 2026-09-12 at 11.03.47.png`, and `download (3).pdf` are not.
+4. **Name proposal** — only for a file that failed the quality check. The proposer receives `NamingEvidence`: plain data with no `Path`, no file handle, and no callable, so it has nothing to mutate the filesystem with. The V0 proposer is deterministic and names from facts the file states about itself; a model can be substituted behind the same protocol without changing anything below it (D-022). There is no OCR, no image understanding, and no client/project inference.
+5. **Rename** — `naming/policy.py` holds the only rename primitive. It takes a *name*, not a path, so it cannot relocate a file, and it cannot overwrite an existing one. The extension comes from the file, never from the proposal. A name recorded with `organize correct-name` outranks every later proposal, permanently.
+6. **Retention triage** — `tools/ingest/triage/policy.py` classifies the file `ignore`, `review`, or `ingest`, biased toward `review`, reading only measured facts.
+7. **Verified transfer** — only an `ingest` file reaches the transactional primitive below, and only when the owner applies it or `triage.auto_ingest` is deliberately turned on (it is `false` by default).
+
+Steps 1-6 read and write only the Mac-side ledger at `.state/file-intelligence/local-ledger.sqlite` (D-021), so naming keeps working with the T7 unplugged. Step 7 is the only step that needs Angel, and it is unchanged from Phase 1A.
+
+Two boundaries hold regardless of configuration:
+
+- **Naming does not imply retention.** A file can be given a useful name and never be archived. The two answers come from different code reading different evidence and are stored in different tables (D-020).
+- **`ignore` is not `delete`.** `ignore` means "not in the durable library on Angel". Nothing in the naming or triage layer can remove a file; the only file removal in this system remains the source unlink in step 7 of the transactional primitive, after the bytes are verified on the T7.
+
+The commands:
+
+```text
+organize triage downloads
+organize triage screenshots
+organize triage all --dry-run
+organize triage all --apply
+
+organize status          # what the pipeline knows and is waiting on
+organize doctor          # whether this machine is configured to run safely
+organize review          # files waiting on a human decision
+organize duplicates      # observed duplicate relationships, never acted on
+organize correct-name PATH
+```
+
+Screenshots are a first-class naming source with **no inferred default path** (D-025). macOS writes screen captures to `~/Desktop` by default, so guessing would put the whole Desktop under evaluation; `sources.screenshots.path` must be set deliberately, and `organize doctor` reports the macOS setting without adopting it.
+
+`docs/15-file-intelligence-acceptance-drill.md` is the hand-run drill that demonstrates each of these properties on throwaway files before the pipeline is pointed at anything real.
 
 ### Transactional move primitive
 

@@ -36,7 +36,7 @@ echo "$DRILL"
 Write a drill config. It points every source at the scratch directories and
 uses `storage_root_override` for a fake T7 — which is exactly why it also has
 to pass `--allow-dev-storage-root` on every command below. That flag exists so
-a config file alone can never disable the volume-UUID check (D-024).
+a config file alone can never disable the volume-UUID check (D-026).
 
 ```bash
 cat > "$DRILL/ingest.yaml" <<YAML

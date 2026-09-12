@@ -53,6 +53,9 @@ class RetentionDecision:
     model: str = TRIAGE_MODEL
     model_version: str = TRIAGE_MODEL_VERSION
     tags: tuple[str, ...] = field(default_factory=tuple)
+    # True only for a decision a person made. Kept distinct from confidence so
+    # a model can never reach this state by scoring itself 1.0.
+    human_decided: bool = False
 
     @property
     def is_ingest(self) -> bool:
@@ -195,9 +198,31 @@ def may_auto_ingest(decision: RetentionDecision, config: TriageConfig) -> bool:
     Two independent gates, because either one alone is too easy to trip: the
     owner must have switched auto-ingest on, *and* the decision must clear the
     confidence threshold. Off by default.
+
+    A decision the owner made themselves (`human_decided`) passes both. That is
+    not a loophole -- it is the point. `auto_ingest` governs how much the
+    *system* may do unattended; it was never meant to stop a person acting on
+    their own review queue, and a REVIEW the owner cannot act on is a dead end.
     """
+    if decision.human_decided:
+        return decision.recommendation == RETENTION_INGEST
     return (
         config.auto_ingest
         and decision.recommendation == RETENTION_INGEST
         and decision.confidence >= config.min_ingest_confidence
+    )
+
+
+def human_decision(recommendation: str, *, reason: str) -> RetentionDecision:
+    """A retention decision the owner made. Outranks any model output."""
+    if recommendation not in (RETENTION_IGNORE, RETENTION_REVIEW, RETENTION_INGEST):
+        raise ValueError(f"unknown retention decision: {recommendation!r}")
+    return RetentionDecision(
+        recommendation=recommendation,
+        confidence=1.0,
+        reason=reason,
+        model="human",
+        model_version="-",
+        tags=("human",),
+        human_decided=True,
     )

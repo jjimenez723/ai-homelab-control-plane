@@ -20,7 +20,7 @@ from pathlib import Path
 
 from tools.ingest.automation import RunLockBusy, RunPaths, run_lock
 from tools.ingest.catalog import Catalog
-from tools.ingest.cli import cmd_organize
+from tools.ingest.cli import cmd_decide, cmd_organize
 from tools.ingest.ledger import (
     DECISION_KEPT,
     DECISION_RENAMED,
@@ -51,6 +51,17 @@ class _OrganizeArgs:
         self.target = target
         self.apply = apply
         self.dry_run = not apply
+        self.config = None
+        self.allow_dev_storage_root = True
+
+
+class _DecideArgs:
+    """The argparse namespace `cmd_decide` consumes."""
+
+    def __init__(self, command: str, path: Path, reason: str = ""):
+        self.command = command
+        self.path = path
+        self.reason = reason
         self.config = None
         self.allow_dev_storage_root = True
 
@@ -449,3 +460,93 @@ class ConcurrencyTests(FileIntelligenceTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnerDecisionTests(FileIntelligenceTestCase):
+    """`review` has to be actionable, or it is just a list nobody can clear.
+
+    The owner's decision is the semantic layer this phase deliberately does not
+    build: a person can tell a receipt from a meme, and `keep` is how they say
+    so. It outranks the model's recommendation permanently, and it works with
+    `auto_ingest` off -- that switch governs what the *system* does unattended.
+    """
+
+    def _ledger_id(self, path: Path) -> str:
+        from tools.ingest.identity import local_file_id_for
+
+        stat = path.stat()
+        return local_file_id_for("mac-local", stat.st_dev, stat.st_ino)
+
+    def test_keeping_a_screenshot_ingests_it_without_enabling_auto_ingest(self):
+        shot = make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(2560, 1440))
+        first = self.run_pipeline(targets=("screenshots",), apply=True, with_t7=True)
+        outcome = first.sources[0].outcomes[0]
+        self.assertEqual(outcome.retention, RETENTION_REVIEW)
+        self.assertFalse(outcome.ingested)
+
+        renamed = outcome.path
+        expected = renamed.read_bytes()
+        args = _DecideArgs("keep", renamed)
+        self.assertEqual(cmd_decide(args, config=self.config), 0)
+
+        self.assertFalse(self.config.triage.auto_ingest)
+        second = self.run_pipeline(targets=("screenshots",), apply=True, with_t7=True)
+        kept = second.sources[0].outcomes[0]
+        self.assertEqual(kept.retention, RETENTION_INGEST)
+        self.assertTrue(kept.ingested)
+        self.assertFalse(renamed.exists(), "the source is removed only after verified transfer")
+
+        landed = list((self.resolved_t7().inbox_dir / "screenshots").iterdir())
+        self.assertEqual(len(landed), 1)
+        self.assertEqual(landed[0].read_bytes(), expected)
+        self.assertEqual(landed[0].name, renamed.name)
+        self.assertFalse(shot.exists())
+
+    def test_ignoring_a_file_never_deletes_it(self):
+        """Invariant 9, stated by the owner rather than inferred."""
+        document = make_blob(self.downloads / "FineLine_signed_contract.pdf", b"%PDF-1.4 " + b"z" * 60_000)
+        config = dataclasses.replace(
+            self.config, triage=dataclasses.replace(self.config.triage, auto_ingest=True, min_ingest_confidence=0.5)
+        )
+        self.run_pipeline(targets=("downloads",), apply=False, config=config)
+
+        self.assertEqual(cmd_decide(_DecideArgs("ignore", document), config=config), 0)
+        report = self.run_pipeline(targets=("downloads",), apply=True, with_t7=True, config=config)
+        outcome = report.sources[0].outcomes[0]
+
+        self.assertEqual(outcome.retention, RETENTION_IGNORE)
+        self.assertFalse(outcome.ingested)
+        self.assertTrue(document.exists(), "an ignored file stays on the Mac")
+
+    def test_an_owner_decision_outranks_every_later_model_run(self):
+        document = make_blob(self.downloads / "FineLine_signed_contract.pdf", b"%PDF-1.4 " + b"z" * 60_000)
+        config = dataclasses.replace(
+            self.config, triage=dataclasses.replace(self.config.triage, auto_ingest=True, min_ingest_confidence=0.5)
+        )
+        self.run_pipeline(targets=("downloads",), apply=False, config=config)
+        cmd_decide(_DecideArgs("ignore", document), config=config)
+
+        for _ in range(3):
+            report = self.run_pipeline(targets=("downloads",), apply=True, with_t7=True, config=config)
+            self.assertEqual(report.sources[0].outcomes[0].retention, RETENTION_IGNORE)
+            self.assertTrue(document.exists())
+
+    def test_deciding_on_an_untracked_file_is_refused_rather_than_guessed(self):
+        stray = make_blob(self.downloads / "never-scanned.pdf", b"%PDF")
+        self.run_pipeline(targets=("screenshots",), apply=False)  # creates the ledger, not this row
+        self.assertEqual(cmd_decide(_DecideArgs("keep", stray), config=self.config), 1)
+        self.assertTrue(stray.exists())
+
+    def test_the_decision_is_appended_with_its_reason_not_silently_overwritten(self):
+        make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(2560, 1440))
+        report = self.run_pipeline(targets=("screenshots",), apply=True)
+        renamed = report.sources[0].outcomes[0].path
+        cmd_decide(_DecideArgs("keep", renamed, reason="client feedback on the kitchen layout"), config=self.config)
+
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            runs = ledger.classification_runs(self._ledger_id(renamed))
+        self.assertGreaterEqual(len(runs), 2, "the model's earlier opinion must survive alongside the owner's")
+        self.assertEqual(runs[-1]["recommendation"], RETENTION_INGEST)
+        self.assertEqual(runs[-1]["human_corrected"], 1)
+        self.assertIn("kitchen layout", runs[-1]["reason"])
+        self.assertEqual(runs[0]["human_corrected"], 0)
