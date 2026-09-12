@@ -562,19 +562,28 @@ class LocalGenerationLineageTests(FileIntelligenceTestCase):
             self.assertTrue(again.is_new_generation)
             self.assertEqual(again.local_file_id, first.local_file_id)
             self.assertEqual(ledger.get_local_file(again.local_file_id)["generation"], 1)
-            self.assertFalse(ledger.has_human_naming(again.local_file_id))
-            self.assertEqual(ledger.naming_history(again.local_file_id), [])
-            self.assertEqual(ledger.classification_runs(again.local_file_id), [])
+            self.assertTrue(
+                ledger.has_human_naming(again.local_file_id),
+                "explicit owner naming authority should survive an in-place content generation",
+            )
+            current_history = ledger.naming_history(again.local_file_id)
+            self.assertEqual(len(current_history), 1)
+            self.assertEqual(current_history[0]["approved_by"], "human")
+            self.assertEqual(current_history[0]["applied_filename"], "notes.md")
+            self.assertEqual(
+                ledger.classification_runs(again.local_file_id), [],
+                "retention authority is content-specific and must not carry forward",
+            )
             self.assertEqual(owned.name, "notes.md", "generation reset must never rename by itself")
 
-            # The earlier decisions remain audit history; they are merely out
-            # of scope for the new bytes.
+            # The earlier naming decision remains audit history, alongside the
+            # explicit carried-forward lock for the new generation.
             self.assertEqual(
                 ledger._conn.execute(
                     "SELECT COUNT(*) FROM naming_history WHERE local_file_id = ?",
                     (first.local_file_id,),
                 ).fetchone()[0],
-                1,
+                2,
             )
 
     def test_unchanged_bytes_do_not_start_a_new_generation(self):
