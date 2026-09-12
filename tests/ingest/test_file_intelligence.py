@@ -12,6 +12,7 @@ The requirements these encode, in one sentence each:
 from __future__ import annotations
 
 import dataclasses
+import os
 import json
 import tempfile
 import threading
@@ -433,13 +434,12 @@ class ProvenanceAcrossCommandsTests(FileIntelligenceTestCase):
         self.assertEqual(row["original_filename"], "unseen-report.pdf")
 
 
-class InodeReuseLineageTests(FileIntelligenceTestCase):
-    """A reused inode must not inherit the previous file's lineage.
+class LocalGenerationLineageTests(FileIntelligenceTestCase):
+    """Different bytes must not inherit the previous content's lineage.
 
-    `local_file_id` is (volume, device, inode) and inode numbers are reused:
-    delete a file and an unrelated one can land on the identity of one this
-    system already named. `observe_file` detects that and starts a new
-    generation -- but the lineage accessors have to agree with it, because
+    `local_file_id` is (volume, device, inode), which survives renames but not
+    necessarily byte identity. `observe_file` starts a new generation on a
+    verified hash change, and the lineage accessors have to agree because
     `provenance.attach_local_provenance` copies whatever `naming_history`
     returns onto the asset's durable record in Angel. A record that asserts a
     filename the file never had is worse than no record at all.
@@ -521,23 +521,87 @@ class InodeReuseLineageTests(FileIntelligenceTestCase):
         self.assertEqual(provenance.classification_runs, [])
         self.assertEqual(provenance.first_seen_filename, "IMG_0001.JPG")
 
-    def test_an_edit_in_place_keeps_its_lineage(self):
-        """The counterpart: same inode, same path, new bytes is the owner
-        editing their own file, and it keeps its name and its lock."""
+    def test_changed_bytes_at_the_same_inode_and_path_start_a_new_generation(self):
+        """An in-place save and an unrelated overwrite are indistinguishable.
+
+        The safe choice is to keep the filename on disk but not let different
+        bytes inherit model or human decisions made about the prior content.
+        """
         owned = make_blob(self.downloads / "notes.md", b"first draft" * 100)
         identity = owned.stat()
         with LocalLedger(self.config.local_ledger_path) as ledger:
-            first = self._observe(ledger, owned, identity=identity, sha256="a" * 64, now="2026-09-01T00:00:00+00:00")
+            first = self._observe(
+                ledger, owned, identity=identity, sha256="a" * 64,
+                now="2026-09-01T00:00:00+00:00",
+            )
             ledger.record_human_name(
                 first.local_file_id,
                 filename=owned.name,
                 directory=str(self.downloads),
                 now="2026-09-01T00:00:00+00:00",
             )
-            again = self._observe(ledger, owned, identity=identity, sha256="c" * 64, now="2026-09-03T00:00:00+00:00")
+            ledger.append_classification(
+                {
+                    "local_file_id": first.local_file_id,
+                    "source_volume_id": LOCAL_VOLUME_ID,
+                    "source_class": "downloads",
+                    "recommendation": RETENTION_INGEST,
+                    "reason": "decision about the first draft",
+                    "policy_outcome": "human_authority",
+                    "human_corrected": 1,
+                    "created_at": "2026-09-01T00:00:00+00:00",
+                }
+            )
+
+            owned.write_bytes(b"completely different bytes" * 100)
+            again = self._observe(
+                ledger, owned, identity=identity, sha256="c" * 64,
+                now="2026-09-03T00:00:00+00:00",
+            )
+
+            self.assertTrue(again.is_new_generation)
+            self.assertEqual(again.local_file_id, first.local_file_id)
+            self.assertEqual(ledger.get_local_file(again.local_file_id)["generation"], 1)
+            self.assertTrue(
+                ledger.has_human_naming(again.local_file_id),
+                "explicit owner naming authority should survive an in-place content generation",
+            )
+            current_history = ledger.naming_history(again.local_file_id)
+            self.assertEqual(len(current_history), 1)
+            self.assertEqual(current_history[0]["approved_by"], "human")
+            self.assertEqual(current_history[0]["applied_filename"], "notes.md")
+            self.assertEqual(
+                ledger.classification_runs(again.local_file_id), [],
+                "retention authority is content-specific and must not carry forward",
+            )
+            self.assertEqual(owned.name, "notes.md", "generation reset must never rename by itself")
+
+            # The earlier naming decision remains audit history, alongside the
+            # explicit carried-forward lock for the new generation.
+            self.assertEqual(
+                ledger._conn.execute(
+                    "SELECT COUNT(*) FROM naming_history WHERE local_file_id = ?",
+                    (first.local_file_id,),
+                ).fetchone()[0],
+                2,
+            )
+
+    def test_unchanged_bytes_do_not_start_a_new_generation(self):
+        owned = make_blob(self.downloads / "stable.md", b"same bytes" * 100)
+        identity = owned.stat()
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            first = self._observe(
+                ledger, owned, identity=identity, sha256="a" * 64,
+                now="2026-09-01T00:00:00+00:00",
+            )
+            again = self._observe(
+                ledger, owned, identity=identity, sha256="a" * 64,
+                now="2026-09-03T00:00:00+00:00",
+            )
             self.assertFalse(again.is_new_generation)
-            self.assertTrue(ledger.has_human_naming(again.local_file_id))
-            self.assertEqual(len(ledger.naming_history(again.local_file_id)), 1)
+            self.assertEqual(
+                ledger.get_local_file(first.local_file_id)["generation"], 0
+            )
 
 
 class ConcurrencyTests(FileIntelligenceTestCase):
@@ -641,6 +705,40 @@ class OwnerDecisionTests(FileIntelligenceTestCase):
             self.assertEqual(report.sources[0].outcomes[0].retention, RETENTION_IGNORE)
             self.assertTrue(document.exists())
 
+    def test_owner_decision_order_does_not_depend_on_wall_clock(self):
+        """Append order is authority order even if timestamps move backwards."""
+        shot = make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(2560, 1440))
+        report = self.run_pipeline(targets=("screenshots",), apply=False)
+        local_file_id = report.sources[0].outcomes[0].local_file_id
+
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            row = ledger.get_local_file(local_file_id)
+            ledger.append_classification(
+                {
+                    "local_file_id": local_file_id,
+                    "asset_id": None,
+                    "source_volume_id": row["source_volume_id"],
+                    "source_class": row["source_class"],
+                    "sha256": row["sha256"],
+                    "recommendation": RETENTION_INGEST,
+                    "confidence": 1.0,
+                    "reason": "owner decision with a skewed clock",
+                    "model": "human",
+                    "model_version": "-",
+                    "policy_outcome": RETENTION_INGEST,
+                    "human_state": "decided",
+                    "human_corrected": 1,
+                    "created_at": "2000-01-01T00:00:00+00:00",
+                }
+            )
+            runs = ledger.classification_runs(local_file_id)
+            latest = ledger.latest_classification(local_file_id)
+
+        self.assertEqual(runs[-1]["recommendation"], RETENTION_INGEST)
+        self.assertEqual(runs[-1]["human_corrected"], 1)
+        self.assertEqual(latest["recommendation"], RETENTION_INGEST)
+        self.assertEqual(latest["human_corrected"], 1)
+
     def test_deciding_on_an_untracked_file_is_refused_rather_than_guessed(self):
         stray = make_blob(self.downloads / "never-scanned.pdf", b"%PDF")
         self.run_pipeline(targets=("screenshots",), apply=False)  # creates the ledger, not this row
@@ -707,6 +805,32 @@ class RescanCostTests(FileIntelligenceTestCase):
 
         _, reads = self._run_counting_reads(targets=("screenshots",), apply=True)
         self.assertEqual(reads, [renamed.name], "a changed file must be read again")
+
+    def test_same_size_rewrite_with_restored_mtime_is_read_again(self):
+        """ctime must invalidate the hash cache when mtime is forged/restored."""
+        path = make_blob(
+            self.downloads / "client-meeting-notes.pdf",
+            b"A" * 60_000,
+        )
+        original_stat = path.stat()
+        _, first_reads = self._run_counting_reads(targets=("downloads",), apply=True)
+        self.assertEqual(first_reads, [path.name])
+
+        # Rewrite in place with the exact same size, then restore the old mtime
+        # as rsync/curl-style workflows can. The bytes changed; only ctime tells
+        # the cache that the old SHA-256 is stale.
+        path.write_bytes(b"B" * 60_000)
+        os.utime(
+            path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+
+        _, second_reads = self._run_counting_reads(targets=("downloads",), apply=True)
+        self.assertEqual(
+            second_reads,
+            [path.name],
+            "a same-size rewrite must not inherit the previous cached hash",
+        )
 
     def test_a_file_moved_to_a_new_path_is_read_again(self):
         path = make_png(self.screenshots / "Screenshot 2026-09-12 at 10.14.32 AM.png", size=(1600, 900))

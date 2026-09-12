@@ -86,6 +86,9 @@ def scan_source(
             if exclude_paths and under_any(sub, exclude_paths):
                 counts[ExclusionReason.EXTRA_PATH] += 1
                 continue
+            if is_incomplete_download(sub, config.exclusions):
+                counts[ExclusionReason.INCOMPLETE_DOWNLOAD] += 1
+                continue
             if is_git_repo_dir(sub):
                 git_repos.append(GitRepoInfo(path=sub, rel_path=str(sub.relative_to(root))))
                 counts[ExclusionReason.GIT_REPO] += 1

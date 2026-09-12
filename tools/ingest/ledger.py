@@ -102,14 +102,12 @@ class LedgerTables:
     def _current_generation(self, subject_id: str) -> int | None:
         """Which generation of this local identity a lineage query is about.
 
-        `local_file_id` is (volume, device, inode), and inode numbers are
-        reused: after a delete, an unrelated file can land on the identity of
-        one this system already named. `LocalLedger.observe_file` detects that
-        and starts a new generation. The earlier file's rows stay -- they are
-        real history of a real file -- but they are not *this* file's history,
-        and returning them is how a stranger's file inherits a human naming
-        lock, and how `attach_local_provenance` would write a filename the
-        ingested file never had into Angel's durable record.
+        `local_file_id` is (volume, device, inode), which is stable across a
+        rename but not across content generations: an inode can be reused or
+        rewritten in place. `LocalLedger.observe_file` starts a new generation
+        whenever the verified hash changes. Earlier rows stay as real audit
+        history, but returning them for the new bytes would leak old naming or
+        retention authority into a different content generation.
 
         None means "not generation-scoped", which is the right answer for the
         T7 catalog: it mixes these accessors in, reaches its rows by asset, and
@@ -253,12 +251,19 @@ class LedgerTables:
     # -- classification / retention ----------------------------------------
 
     def latest_classification(self, key: str) -> dict[str, Any] | None:
+        """Return the most recently appended classification for this subject.
+
+        Append order, not wall-clock text, is the authority order. Writes are
+        serialized by SQLite and rowid therefore gives a definitive sequence,
+        while created_at remains audit metadata that may have clock skew or
+        mixed timestamp precision across schema/tool versions.
+        """
         clause, scope = self._generation_clause(key)
         row = self._conn.execute(
             f"""
             SELECT * FROM classification_runs
             WHERE COALESCE(local_file_id, asset_id, '') = ?{clause}
-            ORDER BY created_at DESC, rowid DESC LIMIT 1
+            ORDER BY rowid DESC LIMIT 1
             """,
             [key, *scope],
         ).fetchone()
@@ -310,7 +315,7 @@ class LedgerTables:
     def classification_runs(self, local_file_id: str) -> list[dict[str, Any]]:
         clause, scope = self._generation_clause(local_file_id)
         rows = self._conn.execute(
-            f"SELECT * FROM classification_runs WHERE local_file_id = ?{clause} ORDER BY created_at, rowid",
+            f"SELECT * FROM classification_runs WHERE local_file_id = ?{clause} ORDER BY rowid",
             [local_file_id, *scope],
         ).fetchall()
         return [dict(row) for row in rows]
@@ -538,25 +543,35 @@ class LocalLedger(LedgerTables):
     ) -> ObservedFile:
         """Record that a file exists, returning its stable local identity.
 
-        Inode reuse is the one way (device, inode) can lie: the file we knew is
-        deleted and an unrelated file lands on the same inode. The signature of
-        that is unmistakable -- different content *and* the path we last saw is
-        gone -- and it must reset the lineage, because inheriting the old
-        record would let a stranger's file inherit a human naming lock.
+        (device, inode) survives renames but it does not prove byte identity.
+        An inode can be reused after delete/create, and many applications save
+        by rewriting an existing inode in place. Those cases are impossible to
+        distinguish reliably after the fact, so a changed content hash always
+        starts a new generation.
 
-        Different content at a path that still exists is the opposite case: the
-        owner edited the file in place. That keeps its lineage and its lock.
+        This is intentionally conservative. Content-specific decisions never
+        cross a hash boundary. The one exception is explicit human naming
+        authority when the same inode is still at the same path: the filename
+        is still physically present and invariant 12 says a person's name wins
+        over later automation. That naming lock is re-asserted for the new
+        generation, while retention/classification decisions are reset.
         """
         local_file_id = local_file_id_for(source_volume_id, device, inode)
         existing = self.get_local_file(local_file_id)
         is_new_generation = False
+        carry_human_name = False
         generation = 0
 
         if existing is not None:
             generation = int(existing["generation"])
             content_changed = bool(existing["sha256"]) and existing["sha256"] != sha256
-            previous_path = Path(existing["current_path"])
-            if content_changed and not previous_path.exists() and previous_path != path:
+            if content_changed:
+                # A same-path rewrite cannot be distinguished reliably from an
+                # in-place replacement. Reset all content-specific authority,
+                # but preserve only an explicit human naming lock when the name
+                # is still physically attached to this same local identity.
+                same_path = existing["current_path"] == str(path)
+                carry_human_name = same_path and self.has_human_naming(local_file_id)
                 is_new_generation = True
                 generation += 1
 
@@ -583,7 +598,8 @@ class LocalLedger(LedgerTables):
                 (
                     local_file_id, source_volume_id, source_class, sha256, size, mime, media_kind,
                     str(path), path.name, str(path), path.name,
-                    NAMING_STATE_UNEVALUATED, generation, now, now, now,
+                    NAMING_STATE_HUMAN if carry_human_name else NAMING_STATE_UNEVALUATED,
+                    generation, now, now, now,
                 ),
             )
         else:
@@ -595,6 +611,29 @@ class LocalLedger(LedgerTables):
                 WHERE local_file_id = ?
                 """,
                 (source_class, sha256, size, mime, media_kind, str(path), path.name, now, now, local_file_id),
+            )
+
+        if is_new_generation and carry_human_name:
+            self.append_naming(
+                {
+                    "local_file_id": local_file_id,
+                    "asset_id": None,
+                    "source_volume_id": source_volume_id,
+                    "source_class": source_class,
+                    "directory": str(path.parent),
+                    "sha256": sha256,
+                    "original_filename": path.name,
+                    "proposed_filename": None,
+                    "applied_filename": path.name,
+                    "name_quality": "human",
+                    "decision": DECISION_HUMAN_LOCKED,
+                    "reason": "owner-authored filename carried forward across a content generation",
+                    "approved_by": "human",
+                    "human_corrected": 1,
+                    "policy_outcome": "human_naming_authority_carried_forward",
+                    "created_at": now,
+                    "generation": generation,
+                }
             )
 
         return ObservedFile(

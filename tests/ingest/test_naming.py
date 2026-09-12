@@ -131,6 +131,19 @@ class FilenamePolicyTests(unittest.TestCase):
         cleaned = self.validate('hawk: on a fence <2026> | "yes" * ?')
         self.assertFalse(set(cleaned) & set('/\\:*?"<>|'))
 
+    def test_slash_lookalikes_are_normalized_out_of_names(self):
+        cleaned = self.validate("2026-09-12_client／project⁄kitchen render")
+        for lookalike in ("／", "⁄", "∕", "⧸", "∖", "＼", "⧵"):
+            self.assertNotIn(lookalike, cleaned)
+        self.assertIn("client-project-kitchen-render", cleaned)
+
+    def test_windows_reserved_device_stems_are_prefixed(self):
+        for stem in ("CON", "prn", "AUX", "nul", "COM1", "lpt9"):
+            with self.subTest(stem=stem):
+                cleaned = self.validate(stem)
+                self.assertTrue(cleaned.lower().startswith("file-"))
+                self.assertNotEqual(Path(cleaned).stem.lower(), stem.lower())
+
     def test_a_name_is_never_hidden_by_accident(self):
         self.assertFalse(self.validate("...a hidden looking hawk photograph").startswith("."))
 

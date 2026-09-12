@@ -180,3 +180,14 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review Â
 - Migration: catalog migration 4 atomically rebuilds `assets` to remove the legacy `UNIQUE(source_volume_id, original_path)` constraint while preserving all existing asset IDs and rows. Existing IDs are not rewritten; new IDs use the content-aware scheme.
 - Consequence: a path can be reused safely, exact duplicates remain auditable as separate occurrences, and an in-place rewrite or pathname swap during ingestion cannot inherit the prior file's deletion authority.
 - Revisit trigger: the catalog later needs a first-class source-occurrence table separate from `assets` for multi-location lifecycle tracking; if so, migrate provenance there without changing `blobs.sha256` as content identity.
+
+## D-028 â€” Different bytes never inherit content-specific authority
+- Status: accepted 2026-09-12.
+- Context: the Mac-side local identity is based on `(volume, device, inode)` so it survives a rename. An inode can also be reused, and applications can rewrite an existing inode in place. Those two cases cannot be distinguished reliably after the bytes have changed.
+- Decision: once a previously observed local identity has a different SHA-256, it starts a new ledger generation even when the inode and pathname are unchanged. Earlier naming/classification rows remain as audit history but are out of scope for the new bytes.
+- Decision: retention, classification, model naming judgments, and ingestion linkage are content-specific and never cross a generation boundary automatically.
+- Decision: explicit human naming authority is different. When changed bytes remain at the same path on the same local identity, the owner's filename lock is re-asserted into the new generation because invariant 12 says a person's name outranks later automation. If the inode is reused at a different path, no naming authority carries forward.
+- Decision: a generation reset has no filesystem authority. It never renames or deletes the path by itself.
+- Decision: the hourly hash cache requires unchanged path, size, mtime, and ctime. Angel refreshes the observation timestamp after its own rename so rename-generated ctime does not force a redundant re-hash; a later content rewrite still advances ctime and invalidates the cache even if mtime is restored.
+- Consequence: rewritten bytes cannot inherit stale retention/deletion authority, inode reuse cannot inherit a stranger's lineage, and ordinary edits do not revoke an owner-authored filename.
+- Revisit trigger: a stronger platform file-generation identifier becomes available and is proven stable across renames but changes on replacement, allowing edits and replacements to be distinguished without trusting path or timestamps.

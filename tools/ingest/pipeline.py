@@ -281,13 +281,14 @@ def _unchanged_since_last_scan(ledger: LocalLedger, path: Path, stat) -> tuple[s
     * the ledger already knows this (device, inode);
     * it is at the same path under the same name;
     * the size is identical;
-    * the file's mtime is older than the moment we last looked at it;
+    * both mtime and ctime are older than the moment we last looked at it;
     * and we have a stored hash and a probe from *this* probe version.
 
-    Any of those failing means a full read. mtime is trivially forgeable by a
-    writer, which is exactly why this returns cached data rather than skipping
-    work that protects a file -- `transfer_file` still hashes independently
-    before it removes anything.
+    Any of those failing means a full read. A writer can restore mtime, but an
+    in-place content rewrite still advances ctime on the supported local
+    filesystems; checking both prevents a same-size rewrite from inheriting a
+    stale cached hash. This cache is only a cost optimization -- `transfer_file`
+    still hashes independently before it removes anything.
     """
     row = ledger.get_local_file(local_file_id_for(LOCAL_VOLUME_ID, stat.st_dev, stat.st_ino))
     if row is None or not row["sha256"]:
@@ -302,7 +303,7 @@ def _unchanged_since_last_scan(ledger: LocalLedger, path: Path, stat) -> tuple[s
         seen_at = dt.datetime.fromisoformat(last_seen).timestamp()
     except ValueError:
         return None
-    if stat.st_mtime >= seen_at:
+    if stat.st_mtime >= seen_at or stat.st_ctime >= seen_at:
         return None
 
     stored = ledger.get_media_metadata(row["local_file_id"], "local_file")
@@ -411,13 +412,20 @@ def _process_file(
         protected_extensions=config.naming.protected_extensions,
         vocabulary=config.naming.vocabulary,
     )
+    # A successful rename changes filesystem ctime even though it does not
+    # change the file's bytes. Refresh last_seen_at after our own mutation so
+    # the ctime cache guard does not mistake that rename for a later content
+    # rewrite on the next scan. A real rewrite after this point still advances
+    # ctime beyond this timestamp and forces a full re-read.
+    post_naming_now = now_iso() if naming.renamed else now
     ledger.update_local_file(
         observed.local_file_id,
-        now=now,
+        now=post_naming_now,
         name_quality=naming.name_quality,
         naming_state=naming.naming_state,
         current_path=str(naming.path),
         current_filename=naming.path.name,
+        last_seen_at=post_naming_now,
     )
     current_path = naming.path
 
