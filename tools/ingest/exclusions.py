@@ -49,7 +49,25 @@ def has_keep_local_marker(directory: Path, config: ExclusionsConfig) -> bool:
 
 
 def is_incomplete_download(file_path: Path, config: ExclusionsConfig) -> bool:
-    return file_path.suffix.lower() in config.incomplete_download_suffixes
+    """True while a browser still advertises this download as incomplete.
+
+    The obvious case is the temporary file itself (.crdownload, .part,
+    .download). Some downloaders can also leave/create the intended final
+    pathname while a temporary sibling still owns the in-progress bytes. In
+    that state the final-looking name is not evidence that the download is
+    complete, so refuse both names until the sidecar disappears.
+    """
+    suffixes = tuple(suffix.lower() for suffix in config.incomplete_download_suffixes)
+    if file_path.suffix.lower() in suffixes:
+        return True
+
+    # Check siblings without resolving or opening them. This also catches
+    # Safari-style <name>.download directories because exists() is
+    # intentionally enough: while the browser marker exists, ingestion waits.
+    for suffix in suffixes:
+        if file_path.with_name(f"{file_path.name}{suffix}").exists():
+            return True
+    return False
 
 
 def is_settled(file_path: Path, settle_seconds: int, *, now: float | None = None) -> bool:
