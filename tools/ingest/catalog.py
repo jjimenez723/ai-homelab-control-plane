@@ -27,10 +27,10 @@ from tools.ingest.schema_sql import (
     NAMING_HISTORY_SQL,
 )
 
-# Bumped to 2 when naming lineage, classification runs, media facts, and
-# duplicate observations were added. Sidecars carry this so an old sidecar is
-# still identifiable as having been written by the pre-naming pipeline.
-SCHEMA_VERSION = 2
+# Sidecar schema version. V3 records the content-aware asset identity model:
+# blobs are content identity; assets are source occurrences and paths may be
+# reused by multiple generations of bytes.
+SCHEMA_VERSION = 3
 
 # Transfer state machine. Ordered roughly by progress; retries resume from
 # wherever the previous attempt stopped instead of restarting blindly.
@@ -87,8 +87,7 @@ CREATE TABLE IF NOT EXISTS assets (
   classifier_confidence REAL,
   human_reviewed INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE(source_volume_id, original_path)
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS derivatives (
@@ -180,7 +179,103 @@ def _migration_3_generation(conn: sqlite3.Connection) -> None:
     add_column_if_missing(conn, "classification_runs", "generation", "INTEGER NOT NULL DEFAULT 0")
 
 
-MIGRATIONS = (_migration_1_phase_1a, _migration_2_file_intelligence, _migration_3_generation)
+def _assets_has_path_uniqueness(conn: sqlite3.Connection) -> bool:
+    """Whether the legacy one-row-per-(volume,path) constraint still exists."""
+    for index in conn.execute("PRAGMA index_list(assets)").fetchall():
+        if not index["unique"]:
+            continue
+        name = str(index["name"]).replace('"', '""')
+        columns = [row["name"] for row in conn.execute(f'PRAGMA index_info("{name}")').fetchall()]
+        if columns == ["source_volume_id", "original_path"]:
+            return True
+    return False
+
+
+def _migration_4_reusable_source_paths(conn: sqlite3.Connection) -> None:
+    """Remove the legacy UNIQUE(source_volume_id, original_path) constraint.
+
+    A path is a location, not a durable file identity. SQLite cannot drop a
+    table-level UNIQUE constraint in place, so this is the one deliberately
+    reconstructive migration. It is atomic: either the old table survives
+    untouched or the replacement containing every row is committed.
+
+    Foreign keys are disabled only for the duration of the rebuild so tables
+    such as derivatives can continue to reference the replacement `assets`
+    table by the same name.
+    """
+    if not _assets_has_path_uniqueness(conn):
+        return
+
+    columns = (
+        "asset_id", "sha256", "source_volume_id", "source_class", "original_path",
+        "original_filename", "size", "mime", "detected_at", "transfer_started_at",
+        "transferred_at", "verified_at", "completed_at", "transfer_state",
+        "final_path", "final_filename", "error_state", "error_message",
+        "derived_from", "classifier_model", "classifier_model_version",
+        "classifier_confidence", "human_reviewed", "created_at", "updated_at",
+        "first_seen_filename", "local_file_id", "retention_recommendation",
+        "retention_run_id",
+    )
+    column_list = ", ".join(columns)
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            CREATE TABLE assets_v4 (
+              asset_id TEXT PRIMARY KEY,
+              sha256 TEXT REFERENCES blobs(sha256),
+              source_volume_id TEXT NOT NULL,
+              source_class TEXT NOT NULL,
+              original_path TEXT NOT NULL,
+              original_filename TEXT NOT NULL,
+              size INTEGER,
+              mime TEXT,
+              detected_at TEXT,
+              transfer_started_at TEXT,
+              transferred_at TEXT,
+              verified_at TEXT,
+              completed_at TEXT,
+              transfer_state TEXT NOT NULL,
+              final_path TEXT,
+              final_filename TEXT,
+              error_state TEXT,
+              error_message TEXT,
+              derived_from TEXT REFERENCES assets(asset_id),
+              classifier_model TEXT,
+              classifier_model_version TEXT,
+              classifier_confidence REAL,
+              human_reviewed INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              first_seen_filename TEXT,
+              local_file_id TEXT,
+              retention_recommendation TEXT,
+              retention_run_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            f"INSERT INTO assets_v4 ({column_list}) SELECT {column_list} FROM assets"
+        )
+        conn.execute("DROP TABLE assets")
+        conn.execute("ALTER TABLE assets_v4 RENAME TO assets")
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+MIGRATIONS = (
+    _migration_1_phase_1a,
+    _migration_2_file_intelligence,
+    _migration_3_generation,
+    _migration_4_reusable_source_paths,
+)
 
 
 def now_iso() -> str:
@@ -249,6 +344,41 @@ class Catalog(LedgerTables):
 
     def get_asset(self, asset_id: str) -> Asset | None:
         row = self._conn.execute("SELECT * FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()
+        return Asset(dict(row)) if row is not None else None
+
+    def get_asset_for_source_content(
+        self, source_volume_id: str, original_path: str, sha256: str
+    ) -> Asset | None:
+        """Return the occurrence row for these exact bytes at this source path."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM assets
+            WHERE source_volume_id = ? AND original_path = ? AND sha256 = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (source_volume_id, original_path, sha256),
+        ).fetchone()
+        return Asset(dict(row)) if row is not None else None
+
+    def get_latest_asset_for_source(
+        self, source_volume_id: str, original_path: str
+    ) -> Asset | None:
+        """Most recently recorded generation observed at a source path.
+
+        Used only when the source is absent and therefore cannot be hashed.
+        When bytes are present callers must use `get_asset_for_source_content`
+        so a reused path can never impersonate an earlier file.
+        """
+        row = self._conn.execute(
+            """
+            SELECT * FROM assets
+            WHERE source_volume_id = ? AND original_path = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (source_volume_id, original_path),
+        ).fetchone()
         return Asset(dict(row)) if row is not None else None
 
     def get_asset_id_by_final_path(self, final_path: str) -> str | None:
