@@ -101,15 +101,17 @@ Screenshots are a first-class naming source with **no inferred default path** (D
 A cross-volume "move" is implemented safely:
 
 1. validate source is eligible and settled;
-2. capture source metadata/provenance;
+2. stat, SHA-256, and re-stat the source; identity is selected from the verified bytes, not the pathname alone;
 3. copy into a unique T7 staging/`.partial` path;
 4. close/flush the destination;
 5. SHA-256 the destination and compare with the source hash;
 6. atomically rename/register the verified T7 asset and commit catalog state;
-7. only then unlink the source;
-8. record completion.
+7. re-verify the destination hash and the source device/inode/size/mtime + SHA-256;
+8. only then unlink the source and record completion.
 
-If power is lost, the T7 is unplugged, a hash differs, SQLite fails, or the process is killed before step 7, the source remains. Retries are idempotent and reconcile partial destinations instead of duplicating them.
+If power is lost, the T7 is unplugged, a hash differs, SQLite fails, or the process is killed before the unlink, the source remains. Retries are idempotent and reconcile partial destinations instead of duplicating them.
+
+A source path may be reused over time. `blobs.sha256` is the content identity; an `assets` row is a source occurrence whose ID includes source volume, original path, and verified SHA-256 (D-027). Two different files named `invoice.pdf` at the same path therefore become two rows instead of colliding. Byte-identical files at different paths remain distinct provenance rows pointing at the same blob; duplicate recognition is never deletion authority.
 
 The deterministic ingestion code owns source deletion. **AI agents never do.**
 
@@ -149,7 +151,7 @@ High-confidence items may be organized automatically. Medium/low confidence item
 
 At minimum preserve:
 
-- asset ID and SHA-256;
+- asset/source-occurrence ID and SHA-256 content identity;
 - original volume UUID;
 - original path and filename;
 - source class (desktop/documents/downloads/sd/legacy);
