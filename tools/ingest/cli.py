@@ -51,7 +51,7 @@ from tools.ingest.derivatives import maybe_generate_heic_derivative
 from tools.ingest.enrichment import enrich_asset
 from tools.ingest.exclusions import ExclusionReason
 from tools.ingest.git_repos import inspect_git_repo
-from tools.ingest.identity import asset_id_for
+from tools.ingest.identity import source_ref_id_for
 from tools.ingest.scanner import ScanResult, scan_source
 from tools.ingest.sources import (
     ALL_SOURCE_CLASSES,
@@ -292,7 +292,7 @@ def _organize(args: argparse.Namespace, prober: VolumeProber, config: IngestConf
                 except Exception as exc:  # noqa: BLE001 - one bad file must not abort the whole batch
                     print(f"  ERROR: {f.path}: {exc}")
                     outcome = TransferOutcome(
-                        asset_id=asset_id_for(target.volume_uuid, f.rel_path),
+                        asset_id=source_ref_id_for(target.volume_uuid, f.rel_path),
                         state=STATE_FAILED_ERROR,
                         success=False,
                         error_message=str(exc),
