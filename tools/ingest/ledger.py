@@ -251,12 +251,19 @@ class LedgerTables:
     # -- classification / retention ----------------------------------------
 
     def latest_classification(self, key: str) -> dict[str, Any] | None:
+        """Return the most recently appended classification for this subject.
+
+        Append order, not wall-clock text, is the authority order. Writes are
+        serialized by SQLite and rowid therefore gives a definitive sequence,
+        while created_at remains audit metadata that may have clock skew or
+        mixed timestamp precision across schema/tool versions.
+        """
         clause, scope = self._generation_clause(key)
         row = self._conn.execute(
             f"""
             SELECT * FROM classification_runs
             WHERE COALESCE(local_file_id, asset_id, '') = ?{clause}
-            ORDER BY created_at DESC, rowid DESC LIMIT 1
+            ORDER BY rowid DESC LIMIT 1
             """,
             [key, *scope],
         ).fetchone()
@@ -308,7 +315,7 @@ class LedgerTables:
     def classification_runs(self, local_file_id: str) -> list[dict[str, Any]]:
         clause, scope = self._generation_clause(local_file_id)
         rows = self._conn.execute(
-            f"SELECT * FROM classification_runs WHERE local_file_id = ?{clause} ORDER BY created_at, rowid",
+            f"SELECT * FROM classification_runs WHERE local_file_id = ?{clause} ORDER BY rowid",
             [local_file_id, *scope],
         ).fetchall()
         return [dict(row) for row in rows]
