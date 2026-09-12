@@ -207,12 +207,34 @@ class RunLockIdentityTests(unittest.TestCase):
     nobody will open again, while the next run takes an uncontended lock on the
     replacement. The state directory holds `local-ledger.sqlite`, so anything
     that clears it does exactly this.
+
+    Two of these assert a race that is *prevented*; two assert one that is only
+    *detected*, and they are deliberately named for which. A run that has its
+    lock file pulled out from under it cannot stop the next run from starting,
+    so the guarantee there is that it refuses to report a clean pass -- not
+    that the overlap did not happen.
     """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.paths = RunPaths.for_state_dir(Path(self._tmp.name) / "state")
+
+    def _acquire_in_another_thread(self) -> str:
+        """Try to take the run lock the way a second process would."""
+        outcome: list[str] = []
+
+        def attempt() -> None:
+            try:
+                with run_lock(self.paths):
+                    outcome.append("acquired")
+            except RunLockBusy:
+                outcome.append("refused")
+
+        thread = threading.Thread(target=attempt)
+        thread.start()
+        thread.join(10)
+        return outcome[0]
 
     def test_a_lock_file_replaced_before_we_lock_it_is_not_a_lock(self):
         """The window between opening the lock file and locking it.
@@ -242,18 +264,31 @@ class RunLockIdentityTests(unittest.TestCase):
         real_flock(rival[0].fileno(), fcntl.LOCK_UN)
         rival[0].close()
 
-    def test_unlinking_the_lock_file_mid_run_is_reported(self):
-        """Once the file is unlinked nothing can restore exclusivity -- the
-        next run will create its own and get a free lock. What must not happen
-        is this run reporting a clean, exclusive pass anyway."""
+    def test_unlinking_the_lock_file_mid_run_is_detected_not_prevented(self):
+        """The second run really does start. That is the part to be honest about.
+
+        Nothing can stop a process unlinking the file this run holds, and the
+        next run's own lock on the file it creates at that path is genuinely
+        uncontended -- so it acquires. Both halves are asserted, because a test
+        that only checked the raise would let a future change quietly stop
+        detecting the overlap while still "passing". If this is ever made
+        preventable, the expectation below should change to "refused" rather
+        than keep passing on the weaker behaviour.
+        """
+        second: list[str] = []
         with self.assertRaises(RunLockLost):
             with run_lock(self.paths):
                 self.paths.lock_path.unlink()
+                second.append(self._acquire_in_another_thread())
+        self.assertEqual(second, ["acquired"], "the overlap is real; only the report is guaranteed")
 
-    def test_deleting_the_state_dir_mid_run_is_reported(self):
+    def test_deleting_the_state_dir_mid_run_is_detected_not_prevented(self):
+        second: list[str] = []
         with self.assertRaises(RunLockLost):
             with run_lock(self.paths):
                 shutil.rmtree(self.paths.state_dir)
+                second.append(self._acquire_in_another_thread())
+        self.assertEqual(second, ["acquired"], "a wiped state directory leaves nothing to contend on")
 
     def test_an_undisturbed_run_reports_nothing(self):
         """The check must not cry wolf on the ordinary path."""
@@ -263,7 +298,7 @@ class RunLockIdentityTests(unittest.TestCase):
             pass
 
     def test_a_second_run_is_still_refused(self):
-        """The hardening must not have cost the plain guarantee."""
+        """The ordinary case, which *is* prevention: nobody touched the file."""
         started = threading.Event()
         release = threading.Event()
         outcome: list[object] = []

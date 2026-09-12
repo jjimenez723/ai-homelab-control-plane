@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -262,3 +263,87 @@ class LedgerGrowthTests(unittest.TestCase):
         ).fetchall()
         detail = " ".join(str(row[-1]) for row in plan)
         self.assertNotIn("SCAN classification_runs", detail, f"unindexed subject lookup: {detail}")
+
+
+class ConcurrentOpenTests(unittest.TestCase):
+    """Two commands opening the same catalog at the same moment.
+
+    That is not a contrived case: the hourly agent and a hand-run `organize`
+    overlap by design, and the first time either one meets a catalog written by
+    an older checkout, both run the same migration. `add_column_if_missing` is
+    check-then-ALTER with no transaction around it -- SQLite cannot give
+    migrations one, because `executescript` commits -- so the loser used to get
+    `duplicate column name` thrown straight out of `Catalog.__init__`, killing
+    the whole invocation.
+    """
+
+    OPENERS = 6
+    TRIALS = 15  # the original bug landed on roughly half of these
+
+    def _open_concurrently(self, path: Path) -> list[BaseException]:
+        ready = threading.Barrier(self.OPENERS, timeout=30)
+        failures: list[BaseException] = []
+
+        def open_once() -> None:
+            try:
+                ready.wait()
+                with Catalog(path) as catalog:
+                    self.assertEqual(catalog.schema_version, len(MIGRATIONS))
+            except BaseException as exc:  # noqa: BLE001 - collected, then reported
+                failures.append(exc)
+
+        threads = [threading.Thread(target=open_once) for _ in range(self.OPENERS)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        return failures
+
+    def _assert_schema_is_complete(self, path: Path) -> None:
+        with Catalog(path) as catalog:
+            columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(assets)")}
+            version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
+        for column in ("first_seen_filename", "local_file_id", "retention_recommendation", "retention_run_id"):
+            self.assertIn(column, columns)
+        self.assertEqual(version, len(MIGRATIONS))
+
+    def test_a_v1_catalog_survives_concurrent_first_opens(self):
+        for trial in range(self.TRIALS):
+            with self.subTest(trial=trial), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "catalog.sqlite"
+                make_v1_catalog(path)
+                failures = self._open_concurrently(path)
+                self.assertEqual(failures, [], f"opening an upgraded catalog raced: {failures}")
+                self._assert_schema_is_complete(path)
+
+    def test_a_fresh_catalog_survives_concurrent_creation(self):
+        for trial in range(self.TRIALS):
+            with self.subTest(trial=trial), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "catalog.sqlite"
+                failures = self._open_concurrently(path)
+                self.assertEqual(failures, [], f"creating a catalog raced: {failures}")
+                self._assert_schema_is_complete(path)
+
+    def test_the_local_ledger_survives_the_same_race(self):
+        """Same machinery, and the ledger is opened by every command there is."""
+        for trial in range(self.TRIALS):
+            with self.subTest(trial=trial), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "local-ledger.sqlite"
+                ready = threading.Barrier(self.OPENERS, timeout=30)
+                failures: list[BaseException] = []
+
+                def open_once() -> None:
+                    try:
+                        ready.wait()
+                        with LocalLedger(path) as ledger:
+                            self.assertEqual(ledger.schema_version, len(LOCAL_MIGRATIONS))
+                    except BaseException as exc:  # noqa: BLE001 - collected, then reported
+                        failures.append(exc)
+
+                threads = [threading.Thread(target=open_once) for _ in range(self.OPENERS)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(60)
+                self.assertEqual(failures, [], f"opening the ledger raced: {failures}")
+
