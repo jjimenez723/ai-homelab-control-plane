@@ -388,3 +388,89 @@ class RenameGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdversarialProposalTests(unittest.TestCase):
+    """A hostile proposer must not be able to reach past the policy layer.
+
+    These are the inputs a model-backed proposer could produce, deliberately or
+    because it was fed attacker-controlled evidence (a zip entry name, an EXIF
+    description, a PDF title all come from whoever made the file).
+    """
+
+    def _validate(self, proposed: str, original: str = "IMG_1.png"):
+        return policy.validate_proposal(
+            proposed, original_filename=original, max_filename_length=120
+        )
+
+    def test_compound_extensions_are_preserved(self):
+        """`.tar.gz` truncated to `.gz` mislabels the file for every tool."""
+        self.assertEqual(policy.normalized_extension("download (4).tar.gz"), ".tar.gz")
+        self.assertEqual(self._validate("project-backup", "download (4).tar.gz").filename, "project-backup.tar.gz")
+        self.assertEqual(self._validate("site-snapshot", "archive.tar.bz2").filename, "site-snapshot.tar.bz2")
+
+    def test_a_dotted_name_does_not_lose_its_last_word(self):
+        self.assertEqual(policy.normalized_extension("Fine.Line.Group.pdf"), ".pdf")
+
+    def test_hostile_proposals_are_rejected_or_neutralised(self):
+        hostile = [
+            "../../../../etc/passwd",
+            "/etc/passwd",
+            "sub/dir/name",
+            "back\\slash",
+            "with\x00null",
+            ".",
+            "..",
+            "",
+            "   ",
+            "‮gnp.exe",          # RTL override
+            "zero​width",
+            "x" * 10_000,
+        ]
+        for proposal in hostile:
+            with self.subTest(proposal=proposal[:24]):
+                try:
+                    result = self._validate(proposal)
+                except policy.NamePolicyError:
+                    continue  # rejected outright is a fine answer
+                self.assertNotIn("/", result.filename)
+                self.assertNotIn("\\", result.filename)
+                self.assertNotIn("\x00", result.filename)
+                self.assertFalse(result.filename.startswith("."))
+                self.assertTrue(result.filename.endswith(".png"))
+                self.assertLessEqual(len(result.filename.encode()), policy.MAX_COMPONENT_BYTES)
+                self.assertTrue(all(ord(c) >= 0x20 for c in result.filename))
+
+
+class SymlinkRenameTests(unittest.TestCase):
+    """A symlink must never be renamed, however it got there.
+
+    The scanner screens symlinks at discovery, but discovery, settling, hashing
+    and probing all happen before the rename -- and anything can swap a file for
+    a symlink in that window. `os.link` follows symlinks by default, so without
+    this the swap would hardlink a file from outside the source root into it and
+    unlink the owner's symlink.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.downloads = self.root / "Downloads"
+        self.private = self.root / "Private"
+        self.downloads.mkdir()
+        self.private.mkdir()
+
+    def test_a_symlink_planted_before_the_rename_is_refused(self):
+        secret = self.private / "wedding-photo.png"
+        secret.write_bytes(b"irreplaceable")
+        link = self.downloads / "IMG_0007.png"
+        link.symlink_to(secret)
+
+        with self.assertRaises(policy.NamePolicyError):
+            policy.safe_rename(link, "2026-09-12_photo-640x480.png", disambiguator="abc123")
+
+        self.assertTrue(link.is_symlink(), "the owner's symlink must survive")
+        self.assertEqual(secret.read_bytes(), b"irreplaceable")
+        self.assertEqual(secret.stat().st_nlink, 1, "nothing outside the source root was hardlinked")
+        self.assertEqual([p.name for p in self.downloads.iterdir()], ["IMG_0007.png"])
