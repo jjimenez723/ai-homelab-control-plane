@@ -4,7 +4,7 @@ Most items below were decided on 2026-09-10; see `DECISIONS.md` for the decision
 
 Decided: T7 filesystem/security (D-017, superseding D-002), T7 host (D-003 as modified by D-017), immediate off-site backup target (D-018, with later append-only D-004 retained), node roster (D-005), queue (D-006), network (D-007), inference runtime (D-008), catalog (D-009), coding-agent worktree/permission model (D-010), sidecar/catalog format (D-009), Kronos placement (D-011), metrics (D-012).
 
-Still **OPEN** pending measurement: embedding model choice, rename confidence threshold, keyframe sampling policy, GPU purchase, whether `dell-i7` becomes the dedicated Kronos box.
+Still **OPEN** pending measurement: a capable-local model after internal storage is freed, embedding model choice, transcription runtime, rename confidence threshold, keyframe sampling policy, GPU purchase, whether `dell-i7` becomes the dedicated Kronos box. Phase 2 measured the present storage constraint and left Gate 2 red; see `docs/18-phase-2-evaluation.md`.
 
 ## Storage
 - **DECIDED (D-019, superseding D-017):** the T7 was erased and recreated as APFS (Encrypted) on 2026-09-11; its Volume UUID in `config/ingest.yaml` is the identity of record.
@@ -23,9 +23,9 @@ Still **OPEN** pending measurement: embedding model choice, rename confidence th
 - Is a central scheduler required immediately?
 
 ## Local inference
-- MLX on Apple Silicon?
-- llama.cpp/Ollama/vLLM or another runtime where compatible?
-- Which actual models fit the M4 Pro at useful speeds?
+- **MEASURED (D-034):** Ollama 0.33.3 ran small text and VLM models locally on the M4 Pro; no capable-local candidate was installed because maintaining the 60 GB internal-free floor leaves insufficient capacity.
+- MLX side-by-side measurement once storage permits a comparable capable model?
+- Which capable model fits the M4 Pro at useful speeds after headroom is restored?
 - What jobs are worth CPU inference on the Dell nodes?
 - Is a dedicated future NVIDIA box economically justified?
 

@@ -102,12 +102,14 @@ The perception track. **Scope, stated honestly:** this phase teaches Angel to an
 
 ## Phase 2 — Local models exist and are measured (days 14–30)
 
-- [ ] Install Ollama; pull the capable tier (Qwen 3.6-35B-A3B class, MXFP8/Q4), the small tier (≤ 4B), a VLM (Qwen3-VL-8B class), embeddings (bge-m3 or nomic-embed), whisper `large-v3-turbo`.
-- [ ] `tools/bench/llm_bench.py`: for each model record prefill tok/s at 2k/8k/32k, generation tok/s, peak RSS, wall-clock for a fixed 20-task eval set (10 classification, 5 rename proposals, 5 bounded code edits with tests). Save to `40-ai/evaluation/`.
-- [ ] Router v0 (`tools/router/`): deterministic → small → capable → frontier, with the job contract from `docs/04-model-routing.md`; every call writes a `jobs` row (D-012).
-- [ ] `tools/report` prints last-7-days: jobs by tier, success rate, escalation rate, tokens, $ estimate, energy estimate.
+- [x] 2026-09-12 Install controllable loopback-only Ollama 0.33.3; measure a small local model and local VLM. `qwen2.5:0.5b` and `moondream:latest` fit while retaining ~60 GiB free; a capable 35B-class model, embeddings, and Whisper do not safely fit and remain explicitly unavailable (D-034).
+- [x] 2026-09-12 `tools/bench/llm_bench.py` and the versioned 20-task public corpus: fixed 2k/8k/32k context measurements, deterministic verifiers, fake-provider CI coverage, and normalized committed results. Raw JSONL/transcripts stay local runtime state or can be deliberately exported through the Angel UUID boundary to `40-ai/evaluation/`; that directory is never Git (D-035).
+- [x] 2026-09-12 Router v0 (`tools/router/`): deterministic → small → capable → frontier, with Mac-local append-only job/attempt/event telemetry in `.state/coordinator/jobs.sqlite`, independent of Angel (D-033).
+- [x] 2026-09-12 `python -m tools.report` prints last-7-days: jobs by tier/task, success and verification rates, escalation, attempts/retries, tokens, provider/model usage, wall time, price and honestly labeled energy estimate.
 
-**Gate 2:** benchmark table committed; router routes the 20-task set with ≥ 90% deterministic-verifiable success on tiers 0–1 and a recorded escalation rate; `report` runs.
+**Phase 2 measurement:** `docs/18-phase-2-evaluation.md` records hardware, runtime/model versions, context measurements, all 20 task routes, and the full Gate result. The local VLM is behind the Phase 1C seam and opt-in; interpretation is a separate non-authoritative plain-data stage (D-036), never an input to naming or retention.
+
+**Gate 2: RED (2026-09-12).** Benchmark table committed and `report` runs, but measured Tier 0–1 deterministic-verifiable success is 4/20 (20%), below 90%; escalation is 16/20 (80%). Do not advance the model-selection gate until storage headroom and a suitable capable model are measured.
 
 ## Phase 3 — Catalog pilot on one client (days 21–45)
 

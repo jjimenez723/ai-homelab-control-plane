@@ -275,7 +275,7 @@ class TriageConfig:
 # time rather than silently falling back to a default the operator didn't ask
 # for -- the same posture as the screenshots-path guard above.
 VALID_OCR_BACKENDS = frozenset({"null", "tesseract"})
-VALID_VISION_BACKENDS = frozenset({"null", "heuristic"})
+VALID_VISION_BACKENDS = frozenset({"null", "heuristic", "ollama"})
 
 
 @dataclass(frozen=True)
@@ -289,8 +289,14 @@ class OCRConfig:
 @dataclass(frozen=True)
 class VisionConfig:
     enabled: bool = True
-    backend: str = "heuristic"  # "null" | "heuristic"
+    backend: str = "heuristic"  # "null" | "heuristic" | "ollama"
     timeout_seconds: int = 30
+    # Ollama is opt-in and loopback-only by default. Bounds apply before any
+    # bytes leave this process, even when an operator changes the endpoint.
+    endpoint: str = "http://127.0.0.1:11434"
+    model: str = "qwen3-vl:8b"
+    max_image_bytes: int = 8_000_000
+    max_prompt_chars: int = 4_000
 
 
 @dataclass(frozen=True)
@@ -500,9 +506,17 @@ def load_config(path: Path | None = None) -> IngestConfig:
         enabled=bool(vision_raw["enabled"]),
         backend=str(vision_raw["backend"]),
         timeout_seconds=int(vision_raw["timeout_seconds"]),
+        endpoint=str(vision_raw.get("endpoint", "http://127.0.0.1:11434")),
+        model=str(vision_raw.get("model", "qwen3-vl:8b")),
+        max_image_bytes=int(vision_raw.get("max_image_bytes", 8_000_000)),
+        max_prompt_chars=int(vision_raw.get("max_prompt_chars", 4_000)),
     )
     if not 1 <= vision.timeout_seconds <= 600:
         raise ValueError("evidence.vision.timeout_seconds must be between 1 and 600")
+    if vision.max_image_bytes <= 0 or vision.max_image_bytes > 50_000_000:
+        raise ValueError("evidence.vision.max_image_bytes must be between 1 and 50000000")
+    if not 100 <= vision.max_prompt_chars <= 100_000:
+        raise ValueError("evidence.vision.max_prompt_chars must be between 100 and 100000")
 
     evidence = EvidenceConfig(
         enabled=bool(evidence_raw["enabled"]),

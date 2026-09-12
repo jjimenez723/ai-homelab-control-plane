@@ -263,6 +263,12 @@ evidence:
     # no vision perception at all.
     backend: "heuristic"
     timeout_seconds: 30
+    # Opt-in real local VLM (Ollama, loopback only):
+    # backend: "ollama"
+    # model: "qwen3-vl:8b"
+    # endpoint: "http://127.0.0.1:11434"
+    # max_image_bytes: 8000000
+    # max_prompt_chars: 4000
 
 media:
   heic_to_jpeg:

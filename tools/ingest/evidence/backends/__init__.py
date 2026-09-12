@@ -158,6 +158,10 @@ def build_vision_backend(config: VisionConfig) -> VisionBackend:
         from tools.ingest.evidence.backends.heuristic import HeuristicVisionBackend
 
         return HeuristicVisionBackend()
+    if config.backend == "ollama":
+        from tools.ingest.evidence.backends.ollama import OllamaVisionBackend
+
+        return OllamaVisionBackend(config)
     raise ValueError(f"unknown vision backend {config.backend!r}")
 
 

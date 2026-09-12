@@ -229,3 +229,21 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review �
 - Decision: retain `NullOCRBackend` as the default. The owner's gitignored machine-local configuration may set `evidence.ocr.backend: tesseract`; Tesseract is not a mandatory global default.
 - Consequence: OCR remains non-authoritative FACTS. It does not feed naming, triage, ingestion, moves, or deletion; the validated result records perception capability, not document understanding or decision authority.
 - Revisit trigger: a repository-wide OCR default is proposed, at which point its installation, portability, corpus coverage, privacy, and failure modes require an explicit decision.
+
+## D-033 — Phase 2 job telemetry is Mac-local coordinator state
+- Status: accepted 2026-09-12 (Phase 2 implementation).
+- Clarifies D-006 and supersedes the location implication in D-012: `.state/coordinator/jobs.sqlite` is the authoritative V0 operational job/attempt/event ledger. It is Mac-local, owner-only, additive-migrated state and does not require Angel to be attached. The T7 catalog remains asset/storage truth. Its historical `jobs` schema is preserved for compatibility and is not dropped or rewritten.
+- Decision: a user-level job has append-only attempts and events; a verifier failure/retry/escalation is retained rather than overwritten. This is the schema intended to become the Phase 4 coordinator database behind D-006's API, not an early network service.
+
+## D-034 — Phase 2 model results are constrained by the internal SSD floor
+- Status: measured 2026-09-12.
+- Context: the M4 Pro has 48 GB unified memory and only 62,922,680 KiB free after installing Ollama 0.33.3 and the measured small/VLM set. D-003's 60 GB free floor leaves no responsible capacity for a 35B-class capable model, embeddings, or Whisper large-v3-turbo.
+- Decision: keep Ollama's default internal cache; never place it on Angel. The measured temporary local set is `qwen2.5:0.5b` (Q4_K_M, 397,821,319 bytes) and `moondream:latest` (Q4_0, 1,738,451,197 bytes). Neither is promoted as a capable-local choice. Capable-local, embeddings, and transcription remain unavailable pending storage headroom and measurement.
+
+## D-035 — Benchmark artifacts are split by size and review value
+- Status: accepted 2026-09-12.
+- Decision: the versioned corpus, normalized evaluation table, registry and methodology are committed. Raw JSONL, generated transcripts, caches, and any large exports remain runtime state; an optional export to Angel's `40-ai/evaluation/` must use the existing UUID resolver and is never a Git path. Angel absence must not block benchmarking.
+
+## D-036 — Interpretation is read-only and non-authoritative
+- Status: accepted 2026-09-12.
+- Decision: `tools/ingest/interpretation/` consumes bounded plain evidence values and emits inspectable hypotheses only. It does not import naming, triage, transaction, pipeline, or filesystem mutation APIs. OCR/native/visual instruction text remains data. No hypothesis may become a filename, retention decision, ingestion, move, or deletion input in Phase 2.

@@ -95,3 +95,26 @@ Record for each job:
 - final disposition.
 
 This creates real evidence for deciding whether more hardware is worth buying.
+
+## Phase 2 V0 implementation
+
+`tools/models/registry.py` is the data-driven registry: provider, runtime,
+configured model identifier, local/frontier status, tier, context limit,
+capabilities, version/quantization, and optional frontier token pricing all
+live there rather than in router conditionals. `tools/router/` first uses a
+deterministic handler, then an enabled small-local backend, capable-local
+backend, and finally a frontier backend only when privacy/policy permits it.
+A missing backend is an explicit unavailable/escalation outcome; model
+confidence never chooses a route.
+
+Operational telemetry is in the Mac-local coordinator ledger at
+`.state/coordinator/jobs.sqlite`, not the Angel asset catalog (D-033). Each
+job has append-only attempts/events, including verifier result, retries,
+escalation path, input/output tokens, timing, price estimate, and a clearly
+labeled energy estimate. `python -m tools.report` is read-only and defaults to
+seven days. Missing frontier pricing is `unknown`; local API cost can be $0
+while energy remains an estimate rather than a sensor reading.
+
+The tracked evaluation corpus and normalized summary are review artifacts.
+Raw runs/transcripts are local runtime state or may be deliberately exported
+to UUID-verified Angel `40-ai/evaluation/`; they are never committed.

@@ -58,7 +58,11 @@ def scan_source(
     config: IngestConfig,
     extra_exclude_paths: tuple[Path, ...] = (),
 ) -> ScanResult:
-    root = root.resolve() if root.exists() else root
+    # Preserve the caller's lexical path in results.  On macOS `/var` is a
+    # symlink to `/private/var`; resolving here made a read-only scan report a
+    # different source pathname than the one the caller supplied.  Escape
+    # checks resolve only the paths they compare.
+    root = root.absolute()
     if not root.exists():
         return ScanResult(root=root, missing=True)
 

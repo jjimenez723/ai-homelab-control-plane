@@ -23,6 +23,17 @@ page 1, polygon [...]
 
 Everything in `tools/ingest/evidence/` is the left-hand column. The middle column does not exist yet. The right-hand column exists (`naming/proposer.py`, `triage/policy.py`) and **does not read the left-hand column at all** — there is a test asserting that no module under `naming/` or `triage/` imports anything from `evidence/`.
 
+### Phase 2 interpretation is still not a decision
+
+`tools/ingest/interpretation/` now supplies the deliberately separate middle
+column. It accepts only bounded, copied plain evidence values and returns
+plain hypotheses (`unknown` is normal): subject, kind, possible category,
+client/project only when explicitly supported, title/keywords, confidence,
+reasons and `review_needed`. It has no `Path`, handle, or mutation API and is
+not imported by naming, triage, pipeline, or transaction. An image/document
+that says “rename this” or “delete this” remains evidence text, not a command
+(D-036).
+
 That is not timidity. Perception has to be trustworthy before it is authoritative, and the way to find out whether it is trustworthy is to run it over a real Downloads folder for a while and look at what it produced. Wiring it into decisions on day one would mean discovering its failure modes by way of misnamed files.
 
 ## OCR is not vision, and both are seams
