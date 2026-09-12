@@ -71,7 +71,10 @@ triage:
 
 automation:
   enabled: false
-  state_relative_path: ".state/drill"
+  # An absolute state directory keeps the drill's ledger and run records inside
+  # $DRILL instead of in your checkout, so cleanup is `rm -rf "$DRILL"` and
+  # nothing else.
+  state_dir: "$DRILL/state"
 YAML
 ```
 
@@ -216,7 +219,7 @@ To see what it decided and why:
 import sqlite3
 from pathlib import Path
 
-ledger = Path(".state/drill/local-ledger.sqlite")   # `organize doctor` prints this path
+ledger = Path(os.environ["DRILL"]) / "state/local-ledger.sqlite"
 conn = sqlite3.connect(ledger)
 for row in conn.execute(
     "SELECT current_filename, retention_recommendation, retention_reason "
