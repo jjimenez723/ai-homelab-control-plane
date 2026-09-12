@@ -346,7 +346,7 @@ def _organize(args: argparse.Namespace, prober: VolumeProber, config: IngestConf
                     stash=details.stash,
                 )
 
-    skipped_reasons = ("still_changing", "source_vanished")
+    skipped_reasons = ("still_changing", "source_vanished", "source_changed_during_hash")
     attempted = [o for o in outcomes if o.skipped_reason not in skipped_reasons]
     skipped = [o for o in outcomes if o.skipped_reason in skipped_reasons]
     transferred = [o for o in attempted if o.state in (STATE_FAILED_HASH_MISMATCH, STATE_COMMITTED, STATE_SOURCE_UNLINKED)]
