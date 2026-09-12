@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Unload the file-intelligence LaunchAgent and delete its rendered plist.
+#
+# The T7 backup uninstaller retains its plists for inspection, because those
+# agents are part of the expected steady state. This one is different: the
+# file-intelligence agent is opt-in, so uninstalling it must leave no armed
+# artifact behind. A plist left in LaunchAgents is one `launchctl bootstrap`
+# -- or one login on a machine where it was ever enabled -- away from running
+# again. Re-render it with scripts/render-file-intelligence-launchd if needed.
+set -euo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+LABEL="com.ai-homelab.file-intelligence"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+echo "Unloaded $LABEL (ignored 'not loaded')."
+
+if [[ -e "$PLIST" ]]; then
+  rm -f "$PLIST"
+  echo "Removed rendered plist: $PLIST"
+else
+  echo "No rendered plist to remove: $PLIST"
+fi

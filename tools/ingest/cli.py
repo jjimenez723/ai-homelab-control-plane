@@ -16,6 +16,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from tools.ingest.automation import RunLockBusy, RunPaths, new_run_id, now_iso, run_lock, write_status
 from tools.ingest.catalog import (
     STATE_COMMITTED,
     STATE_FAILED_ERROR,
@@ -24,6 +25,19 @@ from tools.ingest.catalog import (
     Catalog,
 )
 from tools.ingest.config import IngestConfig, load_config
+from tools.ingest.identity import local_file_id_for
+from tools.ingest.ledger import (
+    DECISION_PROPOSED,
+    DECISION_RENAMED,
+    NAMING_STATE_REVIEW,
+    RETENTION_IGNORE,
+    RETENTION_INGEST,
+    RETENTION_REVIEW,
+    LocalLedger,
+)
+from tools.ingest.pipeline import PipelineReport, run_pipeline
+from tools.ingest.provenance import attach_local_provenance, read_local_provenance
+from tools.ingest.status import collect_status, render_doctor, render_status
 from tools.ingest.derivatives import maybe_generate_heic_derivative
 from tools.ingest.exclusions import ExclusionReason
 from tools.ingest.git_repos import inspect_git_repo
@@ -33,6 +47,7 @@ from tools.ingest.sources import (
     ALL_SOURCE_CLASSES,
     MANUAL_STATIC_SOURCES,
     SOURCE_SD,
+    TRIAGE_SOURCE_CLASSES,
     detect_sd_sources,
     resolve_volume_for_path,
     static_source_root,
@@ -53,11 +68,15 @@ EXCLUSION_LABELS = {
     ExclusionReason.EXTRA_PATH: "excluded paths",
 }
 
+LOCAL_VOLUME_ID = "mac-local"
+
 SOURCE_LABELS = {
     "desktop": "Desktop",
     "documents": "Documents",
     "downloads": "Downloads",
     "sd": "SD",
+    "screenshots": "Screenshots",
+    "all": "every manual source",
 }
 
 
@@ -200,6 +219,11 @@ def cmd_organize(
     catalog_path = resolved_t7.catalog_path
     outcomes: list[TransferOutcome] = []
     total_removed_bytes = 0
+    # A file that `organize triage` renamed earlier is about to lose the only
+    # name the owner recognises, because the transfer unlinks the source. The
+    # ledger is opened read-mostly here purely to carry that lineage across
+    # (invariant 11); its absence is not an error.
+    ledger = LocalLedger(config.local_ledger_path) if config.local_ledger_path.exists() else None
     with Catalog(catalog_path) as catalog:
         for target in targets:
             catalog.upsert_volume(target.volume_uuid, label=target.label, mount_point=str(target.root))
@@ -210,6 +234,9 @@ def cmd_organize(
                     source_volume_id=target.volume_uuid,
                     source_class=target.source_class,
                 )
+                # Read before the transfer: identity is (device, inode) and the
+                # source path stops existing once the transfer succeeds.
+                provenance = read_local_provenance(ledger, f.path) if ledger is not None else None
                 try:
                     outcome = transfer_file(catalog, planned, resolved_t7, settle_seconds=config.settle_seconds)
                 except Exception as exc:  # noqa: BLE001 - one bad file must not abort the whole batch
@@ -221,6 +248,11 @@ def cmd_organize(
                         error_message=str(exc),
                     )
                 outcomes.append(outcome)
+                if provenance is not None and outcome.state in (STATE_COMMITTED, STATE_SOURCE_UNLINKED):
+                    try:
+                        attach_local_provenance(catalog, ledger, provenance, asset_id=outcome.asset_id)
+                    except Exception as exc:  # noqa: BLE001 - bookkeeping must never undo a verified transfer
+                        print(f"  WARNING: could not record local naming history for {f.path.name}: {exc}")
                 if outcome.state == STATE_SOURCE_UNLINKED:
                     total_removed_bytes += f.size
                 if outcome.final_path is not None and outcome.state in (STATE_COMMITTED, STATE_SOURCE_UNLINKED):
@@ -251,6 +283,9 @@ def cmd_organize(
                     stash=details.stash,
                 )
 
+    if ledger is not None:
+        ledger.close()
+
     skipped_reasons = ("still_changing", "source_vanished")
     attempted = [o for o in outcomes if o.skipped_reason not in skipped_reasons]
     skipped = [o for o in outcomes if o.skipped_reason in skipped_reasons]
@@ -272,12 +307,239 @@ def cmd_organize(
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="organize", description="Manual-first daily ingestion into the T7 (PLAN.md Phase 1A).")
-    parser.add_argument("target", choices=list(ALL_SOURCE_CLASSES) + ["all"])
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", help="Report only. Zero writes. Default.")
-    mode.add_argument("--apply", action="store_true", help="Actually transfer eligible files through the verified transaction primitive.")
+def _resolve_t7_or_reason(
+    config: IngestConfig, prober: VolumeProber, *, for_apply: bool, allow_dev_root: bool
+) -> tuple[ResolvedT7 | None, str]:
+    try:
+        return resolve_t7(config, prober, for_apply=for_apply, allow_storage_root_override=allow_dev_root), ""
+    except VolumeError as exc:
+        return None, str(exc)
+
+
+def cmd_triage(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """Name and triage local files.
+
+    Naming runs whether or not Angel is connected: a screenshot deserves a
+    useful filename regardless of whether it will ever be archived (invariants
+    4 and 5). Ingestion is the only part that needs the T7, and its absence
+    degrades this command rather than failing it -- under the hard rule that no
+    source file is removed while Angel is missing.
+    """
+    prober = prober or diskutil_volume_prober
+    config = config if config is not None else load_config(args.config)
+    allow_dev_root = bool(getattr(args, "allow_dev_storage_root", False))
+    automated = bool(getattr(args, "automated", False))
+    apply = bool(args.apply)
+    targets = list(TRIAGE_SOURCE_CLASSES) if args.target == "all" else [args.target]
+
+    if automated and not config.automation.enabled:
+        print("automation.enabled is false in config/ingest.yaml; refusing to run as a scheduled agent.")
+        return 1
+
+    paths = RunPaths.for_state_dir(config.state_dir)
+    run_id = new_run_id()
+    report: PipelineReport | None = None
+
+    try:
+        with run_lock(paths):
+            resolved_t7: ResolvedT7 | None = None
+            t7_reason = "ingestion not requested (dry run)"
+            if apply:
+                resolved_t7, t7_reason = _resolve_t7_or_reason(
+                    config, prober, for_apply=True, allow_dev_root=allow_dev_root
+                )
+
+            catalog = Catalog(resolved_t7.catalog_path) if resolved_t7 is not None else None
+            try:
+                with LocalLedger(config.local_ledger_path) as ledger:
+                    ledger.start_run(
+                        run_id,
+                        kind="triage",
+                        trigger="automated" if automated else "manual",
+                        targets=",".join(targets),
+                        apply=apply,
+                        now=now_iso(),
+                    )
+                    try:
+                        report = run_pipeline(
+                            config,
+                            targets=targets,
+                            apply=apply,
+                            automated=automated,
+                            run_id=run_id,
+                            ledger=ledger,
+                            catalog=catalog,
+                            resolved_t7=resolved_t7,
+                            t7_reason=t7_reason,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - a failed run must still be recorded
+                        ledger.finish_run(run_id, status="error", summary=None, now=now_iso(), error_message=str(exc))
+                        write_status(paths, {"run_id": run_id, "status": "error", "error": str(exc), "finished_at": now_iso()})
+                        raise
+                    summary = report.summary()
+                    ledger.finish_run(run_id, status="ok", summary=summary, now=now_iso())
+            finally:
+                if catalog is not None:
+                    catalog.close()
+            write_status(paths, {**summary, "status": "ok", "finished_at": now_iso()})
+    except RunLockBusy as exc:
+        # Not an error: the next scheduled firing picks the work up. Queuing
+        # scans behind each other would be worse than skipping one.
+        print(f"Skipped: {exc}")
+        return 0
+
+    _print_triage_reports(report, apply=apply)
+    return 0
+
+
+def _print_triage_reports(report: PipelineReport, *, apply: bool) -> None:
+    print(
+        f"Mode: {'apply' if apply else 'dry run'}   "
+        f"settle window: {report.settle_seconds}s ({'automated' if report.automated else 'manual'})"
+    )
+    if report.t7_connected:
+        print("Angel: connected")
+    else:
+        print(f"Angel: not connected -- {report.t7_reason}")
+
+    for source in report.sources:
+        print()
+        print(f"{source.source_class.title()}:")
+        if not source.available:
+            print(f"  unavailable -- {source.unavailable_reason}")
+            continue
+        print(f"  {source.root}")
+        print(f"  {source.discovered} discovered, {source.evaluated} evaluated")
+        print(f"  {source.renamed} {'renamed' if apply else 'would be renamed'}")
+        print(f"  {source.ingest_candidates} Angel candidates")
+        print(f"  {source.needs_review} need review")
+        print(f"  {source.ignored} ignored for Angel (left on the Mac)")
+        if source.ingested:
+            print(f"  {source.ingested} ingested through the verified transfer path")
+        for reason, count in sorted(source.skipped.items(), key=lambda item: -item[1]):
+            print(f"  {count} skipped ({reason})")
+        for outcome in source.outcomes:
+            if outcome.naming_decision in (DECISION_RENAMED, DECISION_PROPOSED):
+                target = outcome.applied_filename or outcome.proposed_filename
+                verb = "->" if apply else "would become"
+                print(f"    {outcome.original_filename} {verb} {target}")
+        for error in source.errors:
+            print(f"  ERROR: {error}")
+
+    if not apply:
+        print("\nDry run. No files were renamed, moved, or removed.")
+
+
+def cmd_status(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    config = config if config is not None else load_config(args.config)
+    data = collect_status(
+        config, prober or diskutil_volume_prober,
+        allow_dev_storage_root=bool(getattr(args, "allow_dev_storage_root", False)),
+    )
+    print(render_status(data))
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    config = config if config is not None else load_config(args.config)
+    data = collect_status(
+        config, prober or diskutil_volume_prober,
+        allow_dev_storage_root=bool(getattr(args, "allow_dev_storage_root", False)),
+    )
+    print(render_doctor(config, data))
+    return 0
+
+
+def cmd_review(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """The queue of files a person needs to look at. Nothing here has moved."""
+    config = config if config is not None else load_config(args.config)
+    if not config.local_ledger_path.exists():
+        print("No local ledger yet. Run `organize triage all` first.")
+        return 0
+    limit = int(getattr(args, "limit", 40))
+    with LocalLedger(config.local_ledger_path) as ledger:
+        rows = [
+            row for row in ledger.local_files()
+            if row["retention_recommendation"] == RETENTION_REVIEW or row["naming_state"] == NAMING_STATE_REVIEW
+        ]
+    if not rows:
+        print("Nothing is waiting for review.")
+        return 0
+    print(f"{len(rows)} file(s) waiting for a decision. None have been moved or renamed without one.\n")
+    for row in rows[:limit]:
+        print(f"  {row['current_path']}")
+        print(f"    naming: {row['naming_state']}   retention: {row['retention_recommendation'] or 'not evaluated'}")
+        if row["retention_reason"]:
+            print(f"    why: {row['retention_reason']}")
+    if len(rows) > limit:
+        print(f"\n  ... and {len(rows) - limit} more (use --limit)")
+    return 0
+
+
+def cmd_duplicates(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """Report duplicate relationships. This command never deletes anything."""
+    config = config if config is not None else load_config(args.config)
+    if not config.local_ledger_path.exists():
+        print("No local ledger yet. Run `organize triage all` first.")
+        return 0
+    limit = int(getattr(args, "limit", 40))
+    with LocalLedger(config.local_ledger_path) as ledger:
+        observations = ledger.duplicate_observations()
+        lookup = {row["local_file_id"]: row for row in ledger.local_files()}
+    if not observations:
+        print("No duplicates observed.")
+        return 0
+    print(f"{len(observations)} duplicate relationship(s) observed. Nothing is removed automatically.\n")
+    for observation in observations[:limit]:
+        left = lookup.get(observation["left_ref"], {})
+        print(f"  [{observation['kind']}] {left.get('current_path', observation['left_ref'])}")
+        print(f"    matches {observation['right_scope']} {observation['right_ref']}")
+        if observation["detail"]:
+            print(f"    {observation['detail']}")
+    if len(observations) > limit:
+        print(f"\n  ... and {len(observations) - limit} more (use --limit)")
+    return 0
+
+
+def cmd_correct_name(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """Record that the owner chose this file's name.
+
+    Use after renaming a file by hand. From then on the pipeline leaves it
+    alone, permanently -- invariant 12. This command does not rename anything
+    itself; it records a name that already exists on disk.
+    """
+    config = config if config is not None else load_config(args.config)
+    path = args.path.expanduser()
+    if not path.is_file():
+        print(f"Not a file: {path}")
+        return 1
+    if not config.local_ledger_path.exists():
+        print("No local ledger yet. Run `organize triage all` first so the file is known.")
+        return 1
+
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        print(f"Cannot read {path}: {exc}")
+        return 1
+
+    with LocalLedger(config.local_ledger_path) as ledger:
+        local_file_id = local_file_id_for("mac-local", stat.st_dev, stat.st_ino)
+        if ledger.get_local_file(local_file_id) is None:
+            print(f"{path.name} is not tracked yet. Run `organize triage all` first.")
+            return 1
+        ledger.record_human_name(
+            local_file_id,
+            filename=path.name,
+            directory=str(path.parent),
+            now=now_iso(),
+            note="recorded via `organize correct-name`",
+        )
+    print(f"Recorded '{path.name}' as an owner-chosen name. Automatic naming will not change it again.")
+    return 0
+
+
+def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, default=None, help="Path to ingest.yaml (default: config/ingest.yaml).")
     parser.add_argument(
         "--allow-dev-storage-root",
@@ -287,13 +549,91 @@ def build_parser() -> argparse.ArgumentParser:
             "verification for every write, including the source unlink."
         ),
     )
+
+
+def _add_mode_arguments(parser: argparse.ArgumentParser) -> None:
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Report only. Zero writes. Default.")
+    mode.add_argument("--apply", action="store_true", help="Actually make the reported changes.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="organize",
+        description=(
+            "Manual-first ingestion into the T7, plus local file naming and retention triage. "
+            "Every subcommand defaults to a dry run."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # The Phase 1A ingestion targets keep their exact existing spelling
+    # (`organize all --apply`), so scripts, the .command launcher, and muscle
+    # memory all keep working.
+    for target in list(ALL_SOURCE_CLASSES) + ["all"]:
+        sub = subparsers.add_parser(target, help=f"Ingest {SOURCE_LABELS.get(target, target)} into the T7.")
+        sub.set_defaults(command="organize", target=target)
+        _add_mode_arguments(sub)
+        _add_common_arguments(sub)
+
+    triage = subparsers.add_parser(
+        "triage",
+        help="Name and triage local files. Naming does not imply ingestion.",
+        description=(
+            "Evaluate filenames and retention for Downloads and Screenshots. Renaming a file "
+            "never moves it; moving a file requires triage.auto_ingest and a connected Angel."
+        ),
+    )
+    triage.add_argument("target", choices=list(TRIAGE_SOURCE_CLASSES) + ["all"])
+    _add_mode_arguments(triage)
+    triage.add_argument(
+        "--automated",
+        action="store_true",
+        help=(
+            "Run as the scheduled agent: use the watcher settle window "
+            "(downloads_watcher_min_settle_seconds) instead of the shorter manual one."
+        ),
+    )
+    _add_common_arguments(triage)
+
+    status = subparsers.add_parser("status", help="What the pipeline currently knows and would do.")
+    _add_common_arguments(status)
+
+    doctor = subparsers.add_parser("doctor", help="Configuration and environment checks.")
+    _add_common_arguments(doctor)
+
+    review = subparsers.add_parser("review", help="Files waiting on a human decision.")
+    review.add_argument("--limit", type=int, default=40)
+    _add_common_arguments(review)
+
+    duplicates = subparsers.add_parser("duplicates", help="Observed duplicate relationships. Never acted on.")
+    duplicates.add_argument("--limit", type=int, default=40)
+    _add_common_arguments(duplicates)
+
+    correct = subparsers.add_parser(
+        "correct-name",
+        help="Record a name you chose yourself. Nothing automatic overrides it afterwards.",
+    )
+    correct.add_argument("path", type=Path, help="The file as it is now named on disk.")
+    _add_common_arguments(correct)
+
     return parser
 
 
 def main(argv: list[str] | None = None, prober: VolumeProber | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return cmd_organize(args, prober=prober)
+    if args.command == "organize":
+        return cmd_organize(args, prober=prober)
+    handler = {
+        "triage": cmd_triage,
+        "status": cmd_status,
+        "doctor": cmd_doctor,
+        "review": cmd_review,
+        "duplicates": cmd_duplicates,
+        "correct-name": cmd_correct_name,
+    }[args.command]
+    return handler(args, prober=prober)
 
 
 if __name__ == "__main__":

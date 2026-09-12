@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Render and load the file-intelligence LaunchAgent for the logged-in user.
+#
+# This agent is OPT-IN. Scheduling a process that reads and moves the owner's
+# files must never happen by accident, so the config gate below runs before
+# anything is rendered or bootstrapped.
+set -euo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENT_DIR="$HOME/Library/LaunchAgents"
+LABEL="com.ai-homelab.file-intelligence"
+PLIST="$AGENT_DIR/$LABEL.plist"
+CONFIG="$ROOT_DIR/config/ingest.yaml"
+
+PYTHON="$ROOT_DIR/.venv/bin/python3"
+[[ -x "$PYTHON" ]] || PYTHON="/usr/bin/python3"
+
+opt_in_instructions() {
+  echo "Refusing to install $LABEL: automation is not opted in." >&2
+  echo "" >&2
+  echo "Add the following to $CONFIG, then run this installer again:" >&2
+  echo "" >&2
+  echo "    automation:" >&2
+  echo "      enabled: true" >&2
+  echo "" >&2
+}
+
+if [[ ! -f "$CONFIG" ]]; then
+  echo "Refusing to install $LABEL: $CONFIG does not exist." >&2
+  echo "Copy config/ingest.example.yaml to config/ingest.yaml first." >&2
+  opt_in_instructions
+  exit 1
+fi
+
+# The opt-in gate. Parsed as YAML with the repository's own interpreter rather
+# than grepped: a commented-out or nested `enabled: true` elsewhere in the file
+# must not be mistaken for consent to schedule this agent.
+if ! "$PYTHON" - "$CONFIG" <<'PY'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.stderr.write("PyYAML is not importable; cannot verify the automation opt-in.\n")
+    raise SystemExit(1)
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        config = yaml.safe_load(handle)
+except Exception as exc:  # noqa: BLE001 - an unparseable config is not consent
+    sys.stderr.write(f"{path}: could not be parsed as YAML: {exc}\n")
+    raise SystemExit(1)
+
+if not isinstance(config, dict):
+    raise SystemExit(1)
+automation = config.get("automation")
+if not isinstance(automation, dict):
+    raise SystemExit(1)
+raise SystemExit(0 if automation.get("enabled") is True else 1)
+PY
+then
+  opt_in_instructions
+  exit 1
+fi
+
+# Always render from this checkout. This prevents an install after a checkout
+# move from silently reloading a plist that still points at the old location.
+"$ROOT_DIR/scripts/render-file-intelligence-launchd" --replace "$AGENT_DIR"
+plutil -lint "$PLIST" >/dev/null
+launchctl bootout "gui/$UID" "$PLIST" 2>/dev/null || true
+launchctl bootstrap "gui/$UID" "$PLIST"
+echo "Installed $LABEL for gui/$UID"
+echo "  plist:    $PLIST"
+echo "  runs:     hourly at :20 (one-shot per run; not a daemon or watcher)"
+echo "  command:  $ROOT_DIR/scripts/file-intelligence-scheduled"
+echo "  logs:     $ROOT_DIR/.state/file-intelligence/logs/"
