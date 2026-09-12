@@ -42,10 +42,15 @@ class OllamaLocalClient:
             self.endpoint + "/api/generate", data=payload,
             headers={"Content-Type": "application/json"}, method="POST",
         )
-        with urllib.request.urlopen(request, timeout=max(1, timeout_seconds)) as response:
-            if not 200 <= response.status < 300:
-                raise ConnectionError(f"Ollama HTTP status {response.status}")
-            outer = json.loads(response.read(2_000_000).decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=max(1, timeout_seconds)) as response:
+                if not 200 <= response.status < 300:
+                    raise ConnectionError(f"Ollama HTTP status {response.status}")
+                outer = json.loads(response.read(2_000_000).decode("utf-8"))
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise TimeoutError("Ollama request timed out") from exc
+            raise ConnectionError(f"Ollama unavailable: {exc.reason}") from exc
         if not isinstance(outer, dict):
             raise ValueError("Ollama response is not an object")
         raw = outer.get("response")
