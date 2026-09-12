@@ -13,6 +13,45 @@ if [[ "$#" -gt 1 ]]; then
   exit 2
 fi
 TARGET_DIR="${1:-$HOME/Library/LaunchAgents}"
+
+# Validate a rendered plist before it is allowed anywhere near LaunchAgents.
+# `plutil` is the native validator and stays authoritative wherever it exists
+# (i.e. on every real macOS install). It does not exist on Linux CI, which is
+# the only reason for a fallback: Python's `plistlib` parses the same XML and
+# rejects the same malformed documents. Validation is never skipped -- if
+# neither validator is present the render fails rather than writing an
+# unverified LaunchAgent.
+validate_plist() {
+  local path="$1"
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$path" >/dev/null
+    return
+  fi
+  local python_bin=""
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      python_bin="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$python_bin" ]]; then
+    echo "Refusing to render: no plist validator available (need plutil or python3)." >&2
+    exit 1
+  fi
+  "$python_bin" - "$path" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as handle:
+        plistlib.load(handle)
+except Exception as exc:  # noqa: BLE001 - any parse failure is a hard render failure
+    sys.stderr.write(f"{path}: not a valid plist: {exc}\n")
+    raise SystemExit(1)
+PY
+}
+
 BACKUP_TARGET="$TARGET_DIR/com.ai-homelab.t7-backup.plist"
 CHECK_TARGET="$TARGET_DIR/com.ai-homelab.t7-check.plist"
 if [[ "$REPLACE" -eq 0 && ( -e "$BACKUP_TARGET" || -e "$CHECK_TARGET" ) ]]; then
@@ -39,7 +78,7 @@ for name in backup check; do
   staged="$STAGING_DIR/com.ai-homelab.t7-$name.plist"
   sed "s|__REPOSITORY_ROOT__|$SED_ROOT|g" "$ROOT_DIR/launchd/com.ai-homelab.t7-$name.plist.template" > "$staged"
   chmod 600 "$staged"
-  plutil -lint "$staged" >/dev/null
+  validate_plist "$staged"
 done
 for name in backup check; do
   mv -f "$STAGING_DIR/com.ai-homelab.t7-$name.plist" "$TARGET_DIR/com.ai-homelab.t7-$name.plist"
