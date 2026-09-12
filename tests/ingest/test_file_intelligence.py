@@ -31,10 +31,12 @@ from tools.ingest.ledger import (
 )
 from tools.ingest.naming.proposer import NameProposal
 from tools.ingest.pipeline import run_pipeline, run_source
+from tools.ingest.provenance import read_local_provenance
 from tools.ingest.sources import ScreenshotsNotConfigured, resolve_screenshots_root
 from tools.ingest.t7 import resolve_t7
 
 from tests.ingest.fi_helpers import (
+    LOCAL_VOLUME_ID,
     aged,
     fi_config,
     fresh,
@@ -429,6 +431,113 @@ class ProvenanceAcrossCommandsTests(FileIntelligenceTestCase):
         with Catalog(self.resolved_t7().catalog_path) as catalog:
             row = catalog._conn.execute("SELECT * FROM assets WHERE final_path IS NOT NULL").fetchone()
         self.assertEqual(row["original_filename"], "unseen-report.pdf")
+
+
+class InodeReuseLineageTests(FileIntelligenceTestCase):
+    """A reused inode must not inherit the previous file's lineage.
+
+    `local_file_id` is (volume, device, inode) and inode numbers are reused:
+    delete a file and an unrelated one can land on the identity of one this
+    system already named. `observe_file` detects that and starts a new
+    generation -- but the lineage accessors have to agree with it, because
+    `provenance.attach_local_provenance` copies whatever `naming_history`
+    returns onto the asset's durable record in Angel. A record that asserts a
+    filename the file never had is worse than no record at all.
+    """
+
+    def _observe(self, ledger, path, *, identity, sha256, now):
+        return ledger.observe_file(
+            path=path,
+            source_class="downloads",
+            source_volume_id=LOCAL_VOLUME_ID,
+            device=identity.st_dev,
+            inode=identity.st_ino,
+            size=path.stat().st_size,
+            sha256=sha256,
+            mime="application/octet-stream",
+            media_kind="document",
+            now=now,
+        )
+
+    def test_a_reused_inode_inherits_nothing_from_the_file_before_it(self):
+        # The identity both files share is the *stranger's* real (device,
+        # inode), so `read_local_provenance` -- which stats the file on disk --
+        # reaches the same row the owner's file was recorded under. That is
+        # what inode reuse looks like from this system's side.
+        stranger = make_blob(self.downloads / "IMG_0001.JPG", b"bytes from somewhere else" * 200)
+        identity = stranger.stat()
+        owned = make_blob(self.downloads / "tax-return-2025-signed.pdf", b"the tax return" * 200)
+
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            first = self._observe(ledger, owned, identity=identity, sha256="a" * 64, now="2026-09-01T00:00:00+00:00")
+            ledger.record_human_name(
+                first.local_file_id,
+                filename=owned.name,
+                directory=str(self.downloads),
+                now="2026-09-01T00:00:00+00:00",
+            )
+            ledger.append_classification(
+                {
+                    "local_file_id": first.local_file_id,
+                    "source_volume_id": LOCAL_VOLUME_ID,
+                    "source_class": "downloads",
+                    "recommendation": RETENTION_INGEST,
+                    "reason": "the owner said keep",
+                    "policy_outcome": "human_authority",
+                    "human_corrected": 1,
+                    "created_at": "2026-09-01T00:00:00+00:00",
+                }
+            )
+            self.assertTrue(ledger.has_human_naming(first.local_file_id))
+
+            # The owner deletes their file; the inode is freed and reused.
+            owned.unlink()
+            second = self._observe(
+                ledger, stranger, identity=identity, sha256="b" * 64, now="2026-09-02T00:00:00+00:00"
+            )
+            self.assertTrue(second.is_new_generation, "this test is meaningless unless the reset fires")
+            self.assertEqual(second.local_file_id, first.local_file_id)
+
+            self.assertFalse(
+                ledger.has_human_naming(second.local_file_id),
+                "a stranger's file must not inherit a human naming lock",
+            )
+            self.assertEqual(ledger.known_names(second.local_file_id), set())
+            self.assertEqual(ledger.naming_history(second.local_file_id), [])
+            self.assertEqual(ledger.classification_runs(second.local_file_id), [])
+
+            # The superseded rows are real history of a real file. The bug was
+            # attributing them to the new file, not keeping them.
+            kept = ledger._conn.execute("SELECT COUNT(*) FROM naming_history").fetchone()[0]
+            self.assertEqual(kept, 1, "the previous file's lineage must still be on record")
+
+            provenance = read_local_provenance(ledger, stranger)
+
+        self.assertIsNotNone(provenance)
+        self.assertEqual(
+            provenance.naming_history, [],
+            "Angel's durable record would have asserted a filename this file never had",
+        )
+        self.assertEqual(provenance.classification_runs, [])
+        self.assertEqual(provenance.first_seen_filename, "IMG_0001.JPG")
+
+    def test_an_edit_in_place_keeps_its_lineage(self):
+        """The counterpart: same inode, same path, new bytes is the owner
+        editing their own file, and it keeps its name and its lock."""
+        owned = make_blob(self.downloads / "notes.md", b"first draft" * 100)
+        identity = owned.stat()
+        with LocalLedger(self.config.local_ledger_path) as ledger:
+            first = self._observe(ledger, owned, identity=identity, sha256="a" * 64, now="2026-09-01T00:00:00+00:00")
+            ledger.record_human_name(
+                first.local_file_id,
+                filename=owned.name,
+                directory=str(self.downloads),
+                now="2026-09-01T00:00:00+00:00",
+            )
+            again = self._observe(ledger, owned, identity=identity, sha256="c" * 64, now="2026-09-03T00:00:00+00:00")
+            self.assertFalse(again.is_new_generation)
+            self.assertTrue(ledger.has_human_naming(again.local_file_id))
+            self.assertEqual(len(ledger.naming_history(again.local_file_id)), 1)
 
 
 class ConcurrencyTests(FileIntelligenceTestCase):

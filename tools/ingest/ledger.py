@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from tools.ingest.migrations import add_column_if_missing, apply_migrations
+from tools.ingest.migrations import add_column_if_missing, apply_migrations, connect
 from tools.ingest.schema_sql import (
     CLASSIFICATION_RUNS_SQL,
     DUPLICATE_OBSERVATIONS_SQL,
@@ -487,9 +487,7 @@ class LocalLedger(LedgerTables):
     def __init__(self, db_path: Path):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._conn = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = connect(db_path)
         self.schema_version = apply_migrations(self._conn, LOCAL_MIGRATIONS)
         try:
             db_path.chmod(0o600)
