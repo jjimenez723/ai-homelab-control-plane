@@ -17,7 +17,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
@@ -245,7 +245,7 @@ class BackupService:
         restore_drill: bool = False,
     ) -> CommandResult:
         """Run a job once, recording nonzero restic codes as failures (including 3)."""
-        started = datetime.now(UTC)
+        started = datetime.now(timezone.utc)
         monotonic_started = time.monotonic()
         self._write_status(
             {
@@ -260,7 +260,7 @@ class BackupService:
             with self._job_lock():
                 result = callback()
         except BackupError as exc:
-            finished = datetime.now(UTC)
+            finished = datetime.now(timezone.utc)
             elapsed = round(time.monotonic() - monotonic_started, 3)
             changes: dict[str, object] = {
                 "last_operation": operation,
@@ -278,7 +278,7 @@ class BackupService:
             self._write_status(changes)
             self._write_log({"event": operation, "started_at": started.isoformat(), "finished_at": finished.isoformat(), "outcome": "failure", "returncode": None, "failure_message": str(exc)})
             raise
-        finished = datetime.now(UTC)
+        finished = datetime.now(timezone.utc)
         elapsed = round(time.monotonic() - monotonic_started, 3)
         success = result.returncode == 0
         changes = {
@@ -449,7 +449,7 @@ class BackupService:
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.log_dir.chmod(0o700)
-            log_file = self.log_dir / f"backup-{datetime.now(UTC).strftime('%Y-%m')}.jsonl"
+            log_file = self.log_dir / f"backup-{datetime.now(timezone.utc).strftime('%Y-%m')}.jsonl"
             with log_file.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
             log_file.chmod(0o600)
