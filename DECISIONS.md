@@ -168,3 +168,15 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review �
 - Relationship to D-019: the D-019 boundary is unchanged and absolute. The T7 is identified by its Volume UUID, recorded once in the gitignored `config/ingest.yaml`, and no code path may fall back to the volume name `Angel` or the path `/Volumes/Angel`. This entry carves no exception into that rule; it closes a path that had quietly bypassed it.
 - Consequence: `organize doctor` reports a configured override as a finding and states that it is honoured only with the flag, so a development setting cannot sit unnoticed on a production machine.
 - Revisit trigger: the test suite builds its configuration in-process and no longer needs the override at all, at which point it should be deleted rather than gated.
+
+
+## D-027 — Content identifies bytes; asset rows identify source occurrences
+- Status: accepted 2026-09-12.
+- Context: Phase 1A derived `asset_id` from `(source_volume_id, original_path)` and enforced `UNIQUE(source_volume_id, original_path)`. That made retries simple, but a normal event — deleting `Downloads/invoice.pdf` and later downloading a different `invoice.pdf` — forced two unrelated files into one identity. The safety patch in PR #9 correctly refused the collision, but could only park the second file in `needs_review`.
+- Decision: a pathname is provenance, not identity. `blobs.sha256` is the content identity. Each `assets` row is one source occurrence and new IDs are derived from `(source volume, original path, verified SHA-256)`. The catalog may therefore contain multiple rows for the same source path when different bytes occupied it over time.
+- Decision: byte-identical files at different paths remain distinct asset/provenance rows that reference the same blob. Recognizing equality never authorizes duplicate deletion or garbage collection.
+- Decision: the transfer hashes and re-stats the source before selecting an asset row. Resume lookup by path is permitted only when the source is absent and there are no bytes available to hash; that path may finish bookkeeping but can never authorize deletion of a newly present file.
+- Decision: immediately before the only source unlink, the pipeline re-verifies both sides: the destination still hashes to the recorded content and the source still has the same device/inode/size/mtime fingerprint and SHA-256 that were copied.
+- Migration: catalog migration 4 atomically rebuilds `assets` to remove the legacy `UNIQUE(source_volume_id, original_path)` constraint while preserving all existing asset IDs and rows. Existing IDs are not rewritten; new IDs use the content-aware scheme.
+- Consequence: a path can be reused safely, exact duplicates remain auditable as separate occurrences, and an in-place rewrite or pathname swap during ingestion cannot inherit the prior file's deletion authority.
+- Revisit trigger: the catalog later needs a first-class source-occurrence table separate from `assets` for multi-location lifecycle tracking; if so, migrate provenance there without changing `blobs.sha256` as content identity.

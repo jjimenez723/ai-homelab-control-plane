@@ -15,6 +15,15 @@ import unittest
 from pathlib import Path
 
 from tools.ingest.catalog import MIGRATIONS, SCHEMA, Catalog
+
+# Reproduce the actual Phase 1A on-disk table shape. The live SCHEMA describes
+# new catalogs, so it intentionally no longer carries the legacy path-unique
+# constraint that this fixture exists to migrate away from.
+PHASE_1A_SCHEMA = SCHEMA.replace(
+    "  updated_at TEXT NOT NULL\n);",
+    "  updated_at TEXT NOT NULL,\n  UNIQUE(source_volume_id, original_path)\n);",
+    1,
+)
 from tools.ingest.ledger import LOCAL_MIGRATIONS, LocalLedger
 from tools.ingest.migrations import add_column_if_missing, apply_migrations
 
@@ -26,7 +35,7 @@ def make_v1_catalog(path: Path) -> str:
     migration 1 have to be a no-op over an already-populated tree.
     """
     connection = sqlite3.connect(str(path))
-    connection.executescript(SCHEMA)
+    connection.executescript(PHASE_1A_SCHEMA)
     connection.execute(
         """
         INSERT INTO assets(
@@ -84,6 +93,51 @@ class CatalogMigrationTests(unittest.TestCase):
         self.assertIsNone(asset.row["first_seen_filename"])
         self.assertIsNone(asset.row["local_file_id"])
         self.assertIsNone(asset.row["retention_recommendation"])
+
+    def test_path_uniqueness_is_removed_without_losing_rows(self):
+        make_v1_catalog(self.path)
+        with Catalog(self.path) as catalog:
+            original = catalog.get_asset("asset-1")
+            self.assertEqual(original.row["original_path"], "holiday.jpg")
+
+            # A later generation may legitimately occupy the same source path.
+            catalog.ensure_pending_asset(
+                "asset-2",
+                source_volume_id="vol-1",
+                source_class="desktop",
+                original_path="holiday.jpg",
+                original_filename="holiday.jpg",
+                size=8192,
+            )
+            rows = catalog._conn.execute(
+                """
+                SELECT asset_id FROM assets
+                WHERE source_volume_id = 'vol-1' AND original_path = 'holiday.jpg'
+                ORDER BY asset_id
+                """
+            ).fetchall()
+            self.assertEqual([row["asset_id"] for row in rows], ["asset-1", "asset-2"])
+
+            unique_source_path = False
+            for index in catalog._conn.execute("PRAGMA index_list(assets)").fetchall():
+                if not index["unique"]:
+                    continue
+                name = str(index["name"]).replace('"', '""')
+                columns = [
+                    row["name"]
+                    for row in catalog._conn.execute(
+                        f'PRAGMA index_info("{name}")'
+                    ).fetchall()
+                ]
+                if columns == ["source_volume_id", "original_path"]:
+                    unique_source_path = True
+            self.assertFalse(unique_source_path)
+            self.assertEqual(
+                catalog._conn.execute("PRAGMA foreign_keys").fetchone()[0], 1
+            )
+            self.assertEqual(
+                catalog._conn.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
 
     def test_migration_is_idempotent(self):
         make_v1_catalog(self.path)

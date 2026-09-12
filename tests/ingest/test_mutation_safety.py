@@ -224,7 +224,7 @@ class ResumeVerificationTests(unittest.TestCase):
         planned = self._planned(source)
         from tools.ingest.identity import asset_id_for
 
-        asset_id = asset_id_for(SOURCE_VOLUME_ID, planned.rel_path)
+        asset_id = asset_id_for(SOURCE_VOLUME_ID, planned.rel_path, expected)
         final_path = self.resolved_t7.inbox_dir / "desktop" / "photos.zip"
 
         from tools.ingest.transaction import TransferFaultHooks
@@ -277,14 +277,12 @@ if __name__ == "__main__":
 
 
 class SourceIdentityTests(unittest.TestCase):
-    """The source must be the file the catalog row is actually about.
+    """A reused pathname must create a new content-aware asset safely.
 
-    Asset identity is derived from (source volume, relative path). Two
-    different files can therefore share one row over time -- `invoice.pdf`
-    downloaded twice, or two same-day screenshots that the namer gives the same
-    generated name. Verifying only the *destination* on resume is not enough:
-    it proves the recorded bytes arrived, not that the file now sitting at the
-    source path is the one they came from.
+    The path is provenance, not identity. If `invoice.pdf` is replaced by
+    different bytes, the new file may be ingested and removed only after its
+    *own* destination is verified; the previously archived asset must remain
+    untouched.
     """
 
     def setUp(self):
@@ -319,53 +317,65 @@ class SourceIdentityTests(unittest.TestCase):
         self.assertTrue(path.exists())
         return outcome
 
-    def test_a_different_file_at_a_committed_path_is_never_unlinked(self):
-        """No crash needed: one failed unlink is the whole precondition."""
+    def test_a_different_file_at_a_committed_path_gets_its_own_verified_asset(self):
+        """A failed unlink on generation one must not block generation two."""
         first = write_file(self.desktop / "invoice.pdf", b"the real invoice" * 200)
-        self._commit_without_unlinking(first)
+        first_hash = sha256_file(first)
+        first_outcome = self._commit_without_unlinking(first)
+        first_final = Path(first_outcome.final_path)
 
         first.unlink()  # the owner dealt with it themselves
         second = write_file(self.desktop / "invoice.pdf", b"an entirely different document" * 200)
-        expected = sha256_file(second)
+        second_hash = sha256_file(second)
 
-        outcome = self._transfer(self._planned(second))
+        second_outcome = self._transfer(self._planned(second))
 
-        self.assertTrue(second.exists(), "a file the catalog has never seen must not be deleted")
-        self.assertFalse(outcome.success)
-        self.assertEqual(outcome.state, STATE_NEEDS_REVIEW)
-        self.assertEqual(sha256_file(second), expected)
+        self.assertTrue(second_outcome.success)
+        self.assertEqual(second_outcome.state, STATE_SOURCE_UNLINKED)
+        self.assertFalse(second.exists())
+        self.assertNotEqual(second_outcome.asset_id, first_outcome.asset_id)
+        self.assertNotEqual(Path(second_outcome.final_path), first_final)
+        self.assertEqual(sha256_file(first_final), first_hash)
+        self.assertEqual(sha256_file(Path(second_outcome.final_path)), second_hash)
 
-    def test_the_archived_file_is_not_overwritten_either(self):
-        """Refusing must not swing the other way and clobber what is on Angel."""
+    def test_the_archived_file_is_not_overwritten_by_the_new_generation(self):
+        """Generation two gets a collision-safe destination; generation one stays immutable."""
         first = write_file(self.desktop / "report.pdf", b"the archived report" * 200)
         archived = sha256_file(first)
-        outcome = self._commit_without_unlinking(first)
-        final_path = Path(outcome.final_path)
+        first_outcome = self._commit_without_unlinking(first)
+        first_final = Path(first_outcome.final_path)
 
         first.unlink()
         second = write_file(self.desktop / "report.pdf", b"a newer unrelated report" * 200)
-        self._transfer(self._planned(second))
+        second_hash = sha256_file(second)
+        second_outcome = self._transfer(self._planned(second))
 
-        self.assertEqual(sha256_file(final_path), archived, "the archived asset must survive untouched")
-        self.assertTrue(second.exists())
+        self.assertTrue(second_outcome.success)
+        self.assertEqual(second_outcome.state, STATE_SOURCE_UNLINKED)
+        self.assertFalse(second.exists())
+        self.assertEqual(sha256_file(first_final), archived, "the archived asset must survive untouched")
+        self.assertNotEqual(Path(second_outcome.final_path), first_final)
+        self.assertEqual(sha256_file(Path(second_outcome.final_path)), second_hash)
 
-    def test_a_new_file_at_a_completed_path_is_not_silently_skipped(self):
-        """Reporting success for a file that was never copied loses it quietly.
-
-        Once `scan.pdf` has been ingested, a later different `scan.pdf` used to
-        return success with no destination -- so it was neither archived nor
-        reported, just invisible.
-        """
+    def test_a_new_file_at_a_completed_path_is_ingested_not_silently_skipped(self):
+        """A completed generation must not make later bytes at that path invisible."""
         first = write_file(self.desktop / "scan.pdf", b"the first scan" * 200)
-        self.assertEqual(self._transfer(self._planned(first)).state, STATE_SOURCE_UNLINKED)
+        first_hash = sha256_file(first)
+        first_outcome = self._transfer(self._planned(first))
+        self.assertEqual(first_outcome.state, STATE_SOURCE_UNLINKED)
         self.assertFalse(first.exists())
 
         second = write_file(self.desktop / "scan.pdf", b"a different scan entirely" * 200)
-        outcome = self._transfer(self._planned(second))
+        second_hash = sha256_file(second)
+        second_outcome = self._transfer(self._planned(second))
 
-        self.assertTrue(second.exists())
-        self.assertFalse(outcome.success, "a file that was never copied must not report success")
-        self.assertEqual(outcome.state, STATE_NEEDS_REVIEW)
+        self.assertTrue(second_outcome.success)
+        self.assertEqual(second_outcome.state, STATE_SOURCE_UNLINKED)
+        self.assertFalse(second.exists())
+        self.assertNotEqual(second_outcome.asset_id, first_outcome.asset_id)
+        self.assertNotEqual(Path(second_outcome.final_path), Path(first_outcome.final_path))
+        self.assertEqual(sha256_file(Path(first_outcome.final_path)), first_hash)
+        self.assertEqual(sha256_file(Path(second_outcome.final_path)), second_hash)
 
     def test_the_same_file_reappearing_unchanged_still_resumes_normally(self):
         """The guard must not break the ordinary retry it sits in front of."""
@@ -405,19 +415,26 @@ class SourceIdentityAtUnlinkTests(ResumeVerificationTests):
             )
         from tools.ingest.identity import asset_id_for
 
-        asset_id = asset_id_for(SOURCE_VOLUME_ID, "invoice.pdf")
-        self.assertEqual(self.catalog.get_asset(asset_id).row["transfer_state"], STATE_VERIFIED)
+        first_hash = sha256_file(first)
+        asset_id = asset_id_for(SOURCE_VOLUME_ID, "invoice.pdf", first_hash)
+        first_asset = self.catalog.get_asset(asset_id)
+        self.assertEqual(first_asset.row["transfer_state"], STATE_VERIFIED)
+        first_claimed_final = Path(first_asset.row["final_path"])
 
         # The owner deals with that file; later an unrelated invoice takes the name.
         first.unlink()
         second = write_file(self.desktop / "invoice.pdf", b"SECOND, entirely different invoice" * 500)
-        expected = sha256_file(second)
+        second_hash = sha256_file(second)
 
-        resumed = self._transfer(self._planned(second))
+        ingested = self._transfer(self._planned(second))
 
-        self.assertTrue(second.exists(), "a file that was never copied must not be deleted")
-        self.assertEqual(sha256_file(second), expected)
-        self.assertNotEqual(resumed.state, STATE_SOURCE_UNLINKED)
+        self.assertTrue(ingested.success)
+        self.assertEqual(ingested.state, STATE_SOURCE_UNLINKED)
+        self.assertFalse(second.exists())
+        self.assertNotEqual(ingested.asset_id, asset_id)
+        self.assertNotEqual(Path(ingested.final_path), first_claimed_final)
+        self.assertEqual(sha256_file(Path(ingested.final_path)), second_hash)
+        self.assertEqual(self.catalog.get_asset(asset_id).row["transfer_state"], STATE_VERIFIED)
 
     def test_a_source_that_grows_after_it_was_read_is_not_deleted(self):
         """A writer that preserves mtime -- `curl -R`, `rsync -a`, a sync client
