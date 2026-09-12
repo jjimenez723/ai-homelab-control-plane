@@ -12,12 +12,16 @@ things:
   Naming is not retention (D-021), so naming has to keep working with Angel
   unplugged -- which means its ledger cannot live on Angel.
 
-Both use the same machinery here. Rules for every migration:
+Both use the same machinery here. Default rules for migrations:
 
-* never drop or rewrite a column, only add;
-* `CREATE TABLE IF NOT EXISTS` / guarded `ALTER TABLE ... ADD COLUMN`, so
-  running an old database forward twice is a no-op;
-* an existing row is never modified by a migration.
+* prefer additive changes: `CREATE TABLE IF NOT EXISTS` / guarded
+  `ALTER TABLE ... ADD COLUMN`;
+* every migration is idempotent;
+* existing data must survive unchanged.
+
+Catalog migration 4 is the deliberate exception to "additive only": SQLite
+cannot drop a table-level UNIQUE constraint in place, so that migration rebuilds
+`assets` inside one explicit transaction and copies every row byte-for-byte.
 
 `user_version` is the applied-version marker. A database created before
 migrations existed reports `user_version = 0`; migration 1 is written so that
@@ -157,14 +161,14 @@ def add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dec
 def apply_migrations(conn: sqlite3.Connection, migrations: Sequence[Migration]) -> int:
     """Bring `conn` up to `len(migrations)`. Returns the resulting version.
 
-    No step is wrapped in an explicit transaction, on purpose. SQLite commits
-    implicitly around `executescript`, so a hand-rolled BEGIN/COMMIT here would
-    be a lie about atomicity rather than a guarantee of it. Instead the rule is
-    the one stated at the top of this module: **every migration is idempotent
-    and additive**, and `user_version` is only advanced once the step has
-    returned. A crash mid-migration therefore leaves the version unchanged and
-    the next run simply re-applies the whole step over the parts that already
-    exist. Nothing is dropped or rewritten, so re-application cannot lose data.
+    The framework does not wrap steps in a transaction. Most migrations use
+    `executescript`, which commits implicitly, so pretending there is one outer
+    transaction would be misleading. A migration that needs atomic replacement
+    may open its own explicit transaction as catalog migration 4 does.
+
+    The invariant is idempotence: `user_version` advances only after a step
+    returns. A crash leaves the version unchanged and the next opener safely
+    re-applies that step.
     """
     current = int(retry_while_locked(lambda: conn.execute("PRAGMA user_version").fetchone()[0]))
     target = len(migrations)
