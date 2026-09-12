@@ -15,6 +15,9 @@ build/
 dist/
 tmp/
 models/
+# The source registry package is tracked; model weights remain ignored above.
+!tools/models/
+!tools/models/**
 datasets/
 media/
 client-data/

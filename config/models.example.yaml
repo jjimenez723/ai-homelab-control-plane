@@ -1,0 +1,43 @@
+# Provider/model registry. Exact tags are machine configuration, not routing logic.
+models:
+  - name: small-local
+    provider: ollama
+    runtime: ollama
+    model_id: qwen2.5:0.5b
+    tier: small_local
+    capabilities: [text_generation, structured_output]
+    context_length: 32768
+    quantization: Q4_K_M
+    version: "0.33.3 / 494.03M"
+    local: true
+    enabled: true
+  - name: capable-local
+    provider: ollama
+    runtime: ollama
+    # Deliberately disabled: the current M4 Pro internal SSD has only the
+    # D-003 free-space floor remaining, so no capable model was pulled.
+    model_id: REPLACE-after-measurement
+    tier: capable_local
+    capabilities: [text_generation, structured_output, vision]
+    context_length: 32768
+    local: true
+    enabled: false
+  - name: local-vlm
+    provider: ollama
+    runtime: ollama
+    model_id: moondream:latest
+    tier: small_local
+    capabilities: [text_generation, structured_output, vision]
+    context_length: 2048
+    quantization: Q4_0
+    local: true
+    enabled: true
+  - name: frontier
+    provider: frontier
+    runtime: api
+    model_id: REPLACE-frontier-model
+    tier: frontier
+    capabilities: [text_generation, structured_output, vision]
+    context_length: 128000
+    local: false
+    enabled: false
