@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from tools.ingest.migrations import apply_migrations
+from tools.ingest.migrations import add_column_if_missing, apply_migrations
 from tools.ingest.schema_sql import (
     CLASSIFICATION_RUNS_SQL,
     DUPLICATE_OBSERVATIONS_SQL,
@@ -67,12 +68,68 @@ class LedgerTables:
 
     _conn: sqlite3.Connection
 
+    # -- write serialization -------------------------------------------------
+
+    @contextmanager
+    def _immediate(self) -> Iterator[None]:
+        """Hold SQLite's write lock across one read-then-write pair.
+
+        Both append paths below derive a row id from a COUNT taken moments
+        before the INSERT, on connections that are autocommit
+        (`isolation_level=None`). Without this, two writers read the same
+        count, derive the same id, and the second destroys the first -- in the
+        one table whose entire promise is that nothing rewrites a prior row.
+        `BEGIN IMMEDIATE` puts the count and the insert in the same
+        transaction, so a second writer waits out the first (up to the
+        connection's busy timeout) and then counts what it actually wrote.
+        """
+        if self._conn.in_transaction:
+            # A caller already opened a transaction -- the transfer primitive
+            # does exactly this -- so that transaction is the serialization
+            # boundary, and SQLite rejects a nested BEGIN outright.
+            yield
+            return
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
+
+    # -- generation scoping --------------------------------------------------
+
+    def _current_generation(self, subject_id: str) -> int | None:
+        """Which generation of this local identity a lineage query is about.
+
+        `local_file_id` is (volume, device, inode), and inode numbers are
+        reused: after a delete, an unrelated file can land on the identity of
+        one this system already named. `LocalLedger.observe_file` detects that
+        and starts a new generation. The earlier file's rows stay -- they are
+        real history of a real file -- but they are not *this* file's history,
+        and returning them is how a stranger's file inherits a human naming
+        lock, and how `attach_local_provenance` would write a filename the
+        ingested file never had into Angel's durable record.
+
+        None means "not generation-scoped", which is the right answer for the
+        T7 catalog: it mixes these accessors in, reaches its rows by asset, and
+        has no `local_files` table to ask.
+        """
+        return None
+
+    def _generation_clause(self, subject_id: str) -> tuple[str, list[Any]]:
+        generation = self._current_generation(subject_id)
+        if generation is None:
+            return "", []
+        return " AND generation = ?", [generation]
+
     # -- naming lineage -----------------------------------------------------
 
     def naming_history(self, local_file_id: str) -> list[dict[str, Any]]:
+        clause, scope = self._generation_clause(local_file_id)
         rows = self._conn.execute(
-            "SELECT * FROM naming_history WHERE local_file_id = ? ORDER BY created_at, rowid",
-            (local_file_id,),
+            f"SELECT * FROM naming_history WHERE local_file_id = ?{clause} ORDER BY created_at, rowid",
+            [local_file_id, *scope],
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -86,28 +143,39 @@ class LedgerTables:
     def append_naming(self, record: dict[str, Any]) -> str:
         """Append one lineage row. Never updates an earlier one.
 
-        The row id is derived from (local_file_id, sequence), so re-running the
-        exact same scan over an unchanged tree reuses ids instead of growing the
-        table forever -- `INSERT OR REPLACE` on an identical id is the only
-        case where a row is rewritten, and then only by a re-run of the same
-        step.
+        The row id is derived from (local_file_id, sequence), and the count
+        that yields `sequence` is taken inside the same immediate transaction
+        as the insert -- two writers that each counted first would derive the
+        same id, and one would destroy the other's row. The count spans every
+        generation of the identity on purpose, so a lineage reset can never
+        hand a new row the id of an old one.
+
+        `INSERT OR REPLACE` no longer has a row to replace -- the transaction
+        rules that out. It stays because REPLACE is also what supplies the
+        column defaults for the NOT NULL fields a caller left out of `record`,
+        which several callers rely on.
         """
-        sequence = self._conn.execute(
-            "SELECT COUNT(*) FROM naming_history WHERE local_file_id = ?", (record["local_file_id"],)
-        ).fetchone()[0]
-        naming_id = naming_id_for(record["local_file_id"], sequence)
+        record = dict(record)
+        local_file_id = record["local_file_id"]
+        if record.get("generation") is None:
+            record["generation"] = self._current_generation(local_file_id) or 0
         columns = (
             "naming_id", "local_file_id", "asset_id", "source_volume_id", "source_class",
             "directory", "sha256", "original_filename", "proposed_filename", "applied_filename",
             "name_quality", "decision", "reason", "model", "model_version", "confidence",
-            "approved_by", "human_corrected", "policy_outcome", "created_at",
+            "approved_by", "human_corrected", "policy_outcome", "created_at", "generation",
         )
-        values = [naming_id] + [record.get(column) for column in columns[1:]]
         placeholders = ", ".join("?" for _ in columns)
-        self._conn.execute(
-            f"INSERT OR REPLACE INTO naming_history({', '.join(columns)}) VALUES ({placeholders})",
-            values,
-        )
+        with self._immediate():
+            sequence = self._conn.execute(
+                "SELECT COUNT(*) FROM naming_history WHERE local_file_id = ?", (local_file_id,)
+            ).fetchone()[0]
+            naming_id = naming_id_for(local_file_id, sequence)
+            values = [naming_id] + [record.get(column) for column in columns[1:]]
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO naming_history({', '.join(columns)}) VALUES ({placeholders})",
+                values,
+            )
         return naming_id
 
     def link_naming_to_asset(self, local_file_id: str, asset_id: str) -> None:
@@ -117,20 +185,22 @@ class LedgerTables:
         identity to history that was recorded before Angel had ever seen the
         file. No naming decision, name, model, or timestamp is altered.
         """
+        clause, scope = self._generation_clause(local_file_id)
         self._conn.execute(
-            "UPDATE naming_history SET asset_id = ? WHERE local_file_id = ? AND asset_id IS NULL",
-            (asset_id, local_file_id),
+            f"UPDATE naming_history SET asset_id = ? WHERE local_file_id = ?{clause} AND asset_id IS NULL",
+            [asset_id, local_file_id, *scope],
         )
 
     def has_human_naming(self, local_file_id: str) -> bool:
         """True once a person has named or corrected this file (invariant 12)."""
+        clause, scope = self._generation_clause(local_file_id)
         row = self._conn.execute(
-            """
+            f"""
             SELECT 1 FROM naming_history
-            WHERE local_file_id = ? AND (human_corrected = 1 OR approved_by = 'human')
+            WHERE local_file_id = ?{clause} AND (human_corrected = 1 OR approved_by = 'human')
             LIMIT 1
             """,
-            (local_file_id,),
+            [local_file_id, *scope],
         ).fetchone()
         return row is not None
 
@@ -140,12 +210,13 @@ class LedgerTables:
         Used for idempotency: if the name on disk is one we previously applied
         (or deliberately kept), there is nothing left to decide.
         """
+        clause, scope = self._generation_clause(local_file_id)
         rows = self._conn.execute(
-            """
+            f"""
             SELECT applied_filename, original_filename, decision FROM naming_history
-            WHERE local_file_id = ?
+            WHERE local_file_id = ?{clause}
             """,
-            (local_file_id,),
+            [local_file_id, *scope],
         ).fetchall()
         names: set[str] = set()
         for row in rows:
@@ -162,32 +233,34 @@ class LedgerTables:
         the next run does not pay for it again -- while a proposer *upgrade*
         (new model_version) deliberately re-opens the question.
         """
+        clause, scope = self._generation_clause(local_file_id)
         row = self._conn.execute(
-            """
+            f"""
             SELECT 1 FROM naming_history
-            WHERE local_file_id = ? AND original_filename = ?
+            WHERE local_file_id = ?{clause} AND original_filename = ?
               AND COALESCE(model_version, '') = ?
               AND decision IN (?, ?, ?, ?)
             LIMIT 1
             """,
-            (
-                local_file_id, filename, model_version,
+            [
+                local_file_id, *scope, filename, model_version,
                 DECISION_NO_PROPOSAL, DECISION_LOW_CONFIDENCE,
                 DECISION_REJECTED_POLICY, DECISION_KEPT,
-            ),
+            ],
         ).fetchone()
         return row is not None
 
     # -- classification / retention ----------------------------------------
 
     def latest_classification(self, key: str) -> dict[str, Any] | None:
+        clause, scope = self._generation_clause(key)
         row = self._conn.execute(
-            """
+            f"""
             SELECT * FROM classification_runs
-            WHERE COALESCE(local_file_id, asset_id, '') = ?
+            WHERE COALESCE(local_file_id, asset_id, '') = ?{clause}
             ORDER BY created_at DESC, rowid DESC LIMIT 1
             """,
-            (key,),
+            [key, *scope],
         ).fetchone()
         return dict(row) if row is not None else None
 
@@ -200,49 +273,60 @@ class LedgerTables:
         verdict actually changes keeps the ledger a record of decisions rather
         than of scans, and keeps the sequence scan below bounded.
         """
+        record = dict(record)
         key = record.get("local_file_id") or record.get("asset_id") or ""
-        previous = self.latest_classification(key)
-        if previous is not None and all(
-            previous.get(field) == record.get(field)
-            for field in ("recommendation", "reason", "sha256", "policy_outcome", "human_corrected")
-        ):
-            return previous["run_id"]
-        sequence = self._conn.execute(
-            "SELECT COUNT(*) FROM classification_runs WHERE COALESCE(local_file_id, asset_id, '') = ?",
-            (key,),
-        ).fetchone()[0]
-        run_id = classification_run_id_for(key, sequence)
+        if record.get("generation") is None:
+            record["generation"] = self._current_generation(key) or 0
         columns = (
             "run_id", "local_file_id", "asset_id", "source_volume_id", "source_class", "sha256",
             "recommendation", "confidence", "reason", "client_proposal", "project_proposal",
             "tags", "content_description", "canonical_filename_proposal", "destination_proposal",
             "model", "model_version", "policy_outcome", "human_state", "human_corrected", "created_at",
+            "generation",
         )
-        values = [run_id] + [record.get(column) for column in columns[1:]]
         placeholders = ", ".join("?" for _ in columns)
-        self._conn.execute(
-            f"INSERT OR REPLACE INTO classification_runs({', '.join(columns)}) VALUES ({placeholders})",
-            values,
-        )
+        # The unchanged-verdict check reads the same rows the sequence counts,
+        # so it belongs inside the transaction too: otherwise two writers both
+        # see "changed", both derive the same id, and one overwrites the other.
+        with self._immediate():
+            previous = self.latest_classification(key)
+            if previous is not None and all(
+                previous.get(field) == record.get(field)
+                for field in ("recommendation", "reason", "sha256", "policy_outcome", "human_corrected")
+            ):
+                return previous["run_id"]
+            sequence = self._conn.execute(
+                "SELECT COUNT(*) FROM classification_runs WHERE COALESCE(local_file_id, asset_id, '') = ?",
+                (key,),
+            ).fetchone()[0]
+            run_id = classification_run_id_for(key, sequence)
+            values = [run_id] + [record.get(column) for column in columns[1:]]
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO classification_runs({', '.join(columns)}) VALUES ({placeholders})",
+                values,
+            )
         return run_id
 
     def classification_runs(self, local_file_id: str) -> list[dict[str, Any]]:
+        clause, scope = self._generation_clause(local_file_id)
         rows = self._conn.execute(
-            "SELECT * FROM classification_runs WHERE local_file_id = ? ORDER BY created_at, rowid",
-            (local_file_id,),
+            f"SELECT * FROM classification_runs WHERE local_file_id = ?{clause} ORDER BY created_at, rowid",
+            [local_file_id, *scope],
         ).fetchall()
         return [dict(row) for row in rows]
 
     def link_classification_to_asset(self, local_file_id: str, asset_id: str) -> None:
+        clause, scope = self._generation_clause(local_file_id)
         self._conn.execute(
-            "UPDATE classification_runs SET asset_id = ? WHERE local_file_id = ? AND asset_id IS NULL",
-            (asset_id, local_file_id),
+            f"UPDATE classification_runs SET asset_id = ? WHERE local_file_id = ?{clause} AND asset_id IS NULL",
+            [asset_id, local_file_id, *scope],
         )
 
     def has_human_classification(self, local_file_id: str) -> bool:
+        clause, scope = self._generation_clause(local_file_id)
         row = self._conn.execute(
-            "SELECT 1 FROM classification_runs WHERE local_file_id = ? AND human_corrected = 1 LIMIT 1",
-            (local_file_id,),
+            f"SELECT 1 FROM classification_runs WHERE local_file_id = ?{clause} AND human_corrected = 1 LIMIT 1",
+            [local_file_id, *scope],
         ).fetchone()
         return row is not None
 
@@ -368,7 +452,18 @@ def _local_migration_1(conn: sqlite3.Connection) -> None:
     conn.executescript(DUPLICATE_OBSERVATIONS_SQL)
 
 
-LOCAL_MIGRATIONS = (_local_migration_1,)
+def _local_migration_2_generation(conn: sqlite3.Connection) -> None:
+    """Tie each lineage row to the generation of the file it describes.
+
+    Additive, and the default is right for every existing row: a ledger
+    written before this column existed only ever tracked generation 0, because
+    nothing had a way to record that an inode had been reused.
+    """
+    add_column_if_missing(conn, "naming_history", "generation", "INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(conn, "classification_runs", "generation", "INTEGER NOT NULL DEFAULT 0")
+
+
+LOCAL_MIGRATIONS = (_local_migration_1, _local_migration_2_generation)
 
 
 @dataclass(frozen=True)
@@ -409,6 +504,17 @@ class LocalLedger(LedgerTables):
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+    def _current_generation(self, subject_id: str) -> int | None:
+        """The generation `subject_id` is on right now, if this ledger knows it.
+
+        Unknown (no `local_files` row) means no restriction rather than
+        generation 0: the caller is asking about an identity this ledger never
+        observed, and inventing a scope for it would hide rows rather than
+        attribute them correctly.
+        """
+        row = self.get_local_file(subject_id)
+        return int(row["generation"]) if row is not None else None
 
     # -- local file state ---------------------------------------------------
 

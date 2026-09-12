@@ -12,11 +12,20 @@ there is exactly one implementation of the ingestion logic.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from tools.ingest.automation import RunLockBusy, RunPaths, new_run_id, now_iso, run_lock, write_status
+from tools.ingest.automation import (
+    RunLockBusy,
+    RunLockLost,
+    RunPaths,
+    new_run_id,
+    now_iso,
+    run_lock,
+    write_status,
+)
 from tools.ingest.catalog import (
     STATE_COMMITTED,
     STATE_FAILED_ERROR,
@@ -150,8 +159,40 @@ def cmd_organize(
     prober: VolumeProber | None = None,
     config: IngestConfig | None = None,
 ) -> int:
+    """Ingest one or more sources into the T7, under the same lock as `triage`.
+
+    `--apply` transfers files, writes the catalog, and unlinks verified
+    sources -- and since `triage --apply` now transfers too, the hourly agent
+    and a hand-run `organize all --apply` would otherwise reach the same
+    sources, the same catalog, and the same `staging/{asset_id}.partial` paths
+    at the same time. This was the unlocked destructive command.
+
+    A dry run deliberately takes no lock: it reads and reports, and making the
+    one safe command the one the owner cannot get an answer from while the
+    agent is running would be backwards.
+    """
     prober = prober or diskutil_volume_prober
     config = config if config is not None else load_config(args.config)
+    if not args.apply:
+        return _organize(args, prober, config)
+
+    paths = RunPaths.for_state_dir(config.state_dir)
+    try:
+        # Before the scan, not merely before the first transfer: there is no
+        # point hashing sources another run is already moving out from under us.
+        with run_lock(paths):
+            return _organize(args, prober, config)
+    except RunLockBusy as exc:
+        # Same stance as `triage`: the work is picked up by whoever holds the
+        # lock or by the next run, so a skip is not a failure.
+        print(f"Skipped: {exc}")
+        return 0
+    except RunLockLost as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+def _organize(args: argparse.Namespace, prober: VolumeProber, config: IngestConfig) -> int:
     requested = _requested_classes(args.target)
     allow_dev_root = bool(getattr(args, "allow_dev_storage_root", False))
 
@@ -220,12 +261,20 @@ def cmd_organize(
     catalog_path = resolved_t7.catalog_path
     outcomes: list[TransferOutcome] = []
     total_removed_bytes = 0
-    # A file that `organize triage` renamed earlier is about to lose the only
-    # name the owner recognises, because the transfer unlinks the source. The
-    # ledger is opened read-mostly here purely to carry that lineage across
-    # (invariant 11); its absence is not an error.
-    ledger = LocalLedger(config.local_ledger_path) if config.local_ledger_path.exists() else None
-    with Catalog(catalog_path) as catalog:
+    # One stack so every handle closes on any path out of here, including a
+    # transfer that raises: the ledger used to be closed after the catalog's
+    # `with` block, which an exception skipped entirely.
+    with contextlib.ExitStack() as stack:
+        catalog = stack.enter_context(Catalog(catalog_path))
+        # A file that `organize triage` renamed earlier is about to lose the
+        # only name the owner recognises, because the transfer unlinks the
+        # source. The ledger is opened read-mostly here purely to carry that
+        # lineage across (invariant 11); its absence is not an error.
+        ledger = (
+            stack.enter_context(LocalLedger(config.local_ledger_path))
+            if config.local_ledger_path.exists()
+            else None
+        )
         for target in targets:
             catalog.upsert_volume(target.volume_uuid, label=target.label, mount_point=str(target.root))
             for f in scans[target.key].eligible:
@@ -296,9 +345,6 @@ def cmd_organize(
                     unpushed=details.unpushed,
                     stash=details.stash,
                 )
-
-    if ledger is not None:
-        ledger.close()
 
     skipped_reasons = ("still_changing", "source_vanished")
     attempted = [o for o in outcomes if o.skipped_reason not in skipped_reasons]
@@ -401,6 +447,10 @@ def cmd_triage(args: argparse.Namespace, prober: VolumeProber | None = None, con
         # scans behind each other would be worse than skipping one.
         print(f"Skipped: {exc}")
         return 0
+    except RunLockLost as exc:
+        # The run finished, but it can no longer claim it was the only one.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
     _print_triage_reports(report, apply=apply)
     return 0

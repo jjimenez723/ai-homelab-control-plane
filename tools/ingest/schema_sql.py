@@ -46,7 +46,13 @@ CREATE TABLE IF NOT EXISTS naming_history (
   approved_by TEXT NOT NULL,
   human_corrected INTEGER NOT NULL DEFAULT 0,
   policy_outcome TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- Which generation of `local_file_id` this row describes. Inode numbers are
+  -- reused, so one local identity can name two unrelated files over time; the
+  -- earlier file's rows are kept but must never be read back as this file's
+  -- history (see `LedgerTables._current_generation`). Rows on the T7 side are
+  -- reached by asset and simply carry the generation they were written with.
+  generation INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS naming_history_by_file
   ON naming_history(local_file_id, created_at);
@@ -81,7 +87,10 @@ CREATE TABLE IF NOT EXISTS classification_runs (
   policy_outcome TEXT NOT NULL,
   human_state TEXT,
   human_corrected INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- See `naming_history.generation`: an inode-reuse reset must not let a
+  -- stranger's file inherit the owner's standing retention decision.
+  generation INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS classification_runs_by_file
   ON classification_runs(local_file_id, created_at);

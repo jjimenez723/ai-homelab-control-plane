@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tools.ingest.automation import write_json_atomically
 from tools.ingest.ledger import LedgerTables
 from tools.ingest.migrations import add_column_if_missing, apply_migrations
 from tools.ingest.schema_sql import (
@@ -166,7 +167,20 @@ def _migration_2_file_intelligence(conn: sqlite3.Connection) -> None:
     add_column_if_missing(conn, "assets", "retention_run_id", "TEXT")
 
 
-MIGRATIONS = (_migration_1_phase_1a, _migration_2_file_intelligence)
+def _migration_3_generation(conn: sqlite3.Connection) -> None:
+    """Carry the Mac-side generation of a lineage row onto the T7 copy.
+
+    The catalog never scopes its own queries by generation -- its rows are
+    reached by asset -- but the column has to exist here because
+    `attach_local_provenance` copies ledger rows across verbatim, and dropping
+    the field on the way in would lose the only marker saying which physical
+    file a row is about.
+    """
+    add_column_if_missing(conn, "naming_history", "generation", "INTEGER NOT NULL DEFAULT 0")
+    add_column_if_missing(conn, "classification_runs", "generation", "INTEGER NOT NULL DEFAULT 0")
+
+
+MIGRATIONS = (_migration_1_phase_1a, _migration_2_file_intelligence, _migration_3_generation)
 
 
 def now_iso() -> str:
@@ -460,6 +474,9 @@ class Catalog(LedgerTables):
             },
             "media_metadata": self.get_media_metadata(asset_id, "asset"),
         }
-        sidecar_path = sidecars_dir / f"{asset_id}.json"
-        sidecar_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return sidecar_path
+        # Atomic, like the status file: a sidecar is the durable copy of a
+        # catalog row, and a process killed mid-write must not be able to
+        # leave a truncated one where a complete one used to be. The primitive
+        # lives in `automation` so that filesystem authority stays in the
+        # modules that already hold it (see tests/ingest/test_mutation_authority).
+        return write_json_atomically(sidecars_dir / f"{asset_id}.json", payload)

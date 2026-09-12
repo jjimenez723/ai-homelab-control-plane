@@ -41,10 +41,21 @@ def add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dec
 
     SQLite has no `ADD COLUMN IF NOT EXISTS`, and a failed ALTER inside a
     migration would abort the rest of it, so the check has to be explicit.
+
+    The check and the ALTER cannot be one transaction (see `apply_migrations`
+    for why migrations run without one), so two processes opening the same
+    database for the first time after an upgrade can both see the column
+    missing and both try to add it. Losing that race is not a failure: the
+    column exists, which is the entire promise of this function. Treating it
+    as one killed the whole invocation from inside `Catalog.__init__`.
     """
     if column in _columns(conn, table):
         return
-    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
 
 
 def apply_migrations(conn: sqlite3.Connection, migrations: Sequence[Migration]) -> int:
