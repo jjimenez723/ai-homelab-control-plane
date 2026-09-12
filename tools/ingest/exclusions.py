@@ -48,8 +48,15 @@ def has_keep_local_marker(directory: Path, config: ExclusionsConfig) -> bool:
     return (directory / config.keep_local_marker).exists()
 
 
-def is_incomplete_download(file_path: Path, config: ExclusionsConfig) -> bool:
-    return file_path.suffix.lower() in config.incomplete_download_suffixes
+def is_incomplete_download(path: Path, config: ExclusionsConfig) -> bool:
+    """Whether a file or directory is a browser-managed partial download.
+
+    Safari represents an active download as a `.download` directory/package,
+    while Chrome and other tools commonly use file suffixes such as
+    `.crdownload` and `.part`. The scanner must reject both shapes before
+    descending into a directory or considering a file eligible.
+    """
+    return path.suffix.lower() in config.incomplete_download_suffixes
 
 
 def is_settled(file_path: Path, settle_seconds: int, *, now: float | None = None) -> bool:
