@@ -13,7 +13,9 @@ Three separations are structural here and must not be collapsed:
    never overwrites a fact.
 2. **History vs. current state.** `naming_history` and `classification_runs`
    are append-only ledgers. Nothing rewrites a prior row when a model changes
-   its mind; a new run is appended and the newest row wins for display.
+   its mind; a new run is appended. For classification authority, append order
+   is canonical and `created_at` is audit metadata rather than a sequencing
+   primitive, so clock skew cannot move an owner decision behind a model row.
 3. **Machine vs. human.** `approved_by` / `human_corrected` mark rows a person
    authored or overrode. Those rows outrank every later model output
    (invariant 12) -- which is why they are rows and not a mutable flag.
