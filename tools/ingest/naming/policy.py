@@ -35,6 +35,21 @@ _CONTROL_CHARS = {chr(code) for code in range(0x20)} | {chr(0x7F)}
 # classic way to make one name look like another.
 _INVISIBLE_CHARS = {"​", "‌", "‍", "⁠", "﻿", "‪", "‫", "‭", "‮", "⁦", "⁧", "⁨", "⁩"}
 
+# Characters that render as a path separator but are not one. A name carrying
+# one looks like a directory in Finder and in any UI that shows it, and the
+# module already blocks invisible and bidi characters for the same reason:
+# a filename should not be able to misrepresent itself.
+_SLASH_HOMOGLYPHS = {"\u2044", "\u2215", "\uff0f", "\u29f8", "\u2216", "\uff3c", "\u29f5"}
+
+# Device names DOS reserved and Windows still refuses, with or without an
+# extension. Harmless on APFS; not on the exFAT and SMB paths these names are
+# meant to survive.
+_RESERVED_STEMS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{digit}" for digit in "123456789"}
+    | {f"lpt{digit}" for digit in "123456789"}
+)
+
 _SEPARATOR_RUN_RE = re.compile(r"[-_\s]+")
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 _MULTI_DASH_RE = re.compile(r"-{2,}")
@@ -100,6 +115,7 @@ def sanitize_stem(stem: str, *, max_length: int) -> str:
     stem = unicodedata.normalize("NFC", stem)
     stem = "".join(character for character in stem if character not in _CONTROL_CHARS)
     stem = "".join(character for character in stem if character not in _INVISIBLE_CHARS)
+    stem = "".join("-" if character in _SLASH_HOMOGLYPHS else character for character in stem)
     stem = "".join("-" if character in _FORBIDDEN_CHARS else character for character in stem)
 
     # `2026-09-12_kitchen-layout` reads better than an undifferentiated run of
@@ -168,6 +184,10 @@ def validate_proposal(
     stem = sanitize_stem(candidate, max_length=stem_budget)
     if not stem:
         raise NamePolicyError("proposal contains no usable characters")
+
+    if stem.lower() in _RESERVED_STEMS:
+        # Prefixing keeps the proposal's meaning instead of discarding it.
+        stem = f"file-{stem}"
 
     filename = f"{stem}{extension}"
     if len(filename.encode("utf-8")) > MAX_COMPONENT_BYTES:

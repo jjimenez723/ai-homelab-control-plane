@@ -555,3 +555,33 @@ class ProposalTypeTests(unittest.TestCase):
             policy.validate_proposal(
                 Hostile(), original_filename="IMG_6909.JPG", max_filename_length=120
             )
+
+
+class NamesThatMisrepresentThemselvesTests(unittest.TestCase):
+    """A filename should not be able to look like something it is not.
+
+    The module already strips invisible and bidi characters for this reason;
+    an adversarial review found two gaps in the same class.
+    """
+
+    def validate(self, proposed: str, original: str = "IMG_6909.HEIC") -> str:
+        return policy.validate_proposal(
+            proposed, original_filename=original, max_filename_length=120
+        ).filename
+
+    def test_a_slash_homoglyph_does_not_survive(self):
+        """U+2215 and friends render as `/`, so a name carrying one looks like
+        a directory in Finder and anywhere else it is displayed."""
+        for homoglyph in ("⁄", "∕", "／", "⧸", "∖", "＼"):
+            with self.subTest(homoglyph=homoglyph):
+                cleaned = self.validate(f"kitchen{homoglyph}layout reference")
+                self.assertNotIn(homoglyph, cleaned)
+                self.assertTrue(cleaned.endswith(".heic"))
+
+    def test_reserved_device_names_are_defused_not_emitted(self):
+        """Harmless on APFS; not on the exFAT and SMB paths these names travel."""
+        for reserved in ("CON", "con", "PRN", "AUX", "nul", "COM1", "LPT9"):
+            with self.subTest(reserved=reserved):
+                produced = self.validate(reserved)
+                self.assertNotEqual(produced.rsplit(".", 1)[0].lower(), reserved.lower())
+                self.assertIn(reserved.lower(), produced.lower(), "the proposal's meaning is kept, not discarded")
