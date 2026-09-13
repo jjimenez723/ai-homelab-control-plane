@@ -511,11 +511,11 @@ document. Gate 2 requires production-capability benchmark results for its
 required roles (`PLAN.md` Phase 2); it does not accept a raw baseline in
 their place, however good that baseline looks.
 
-## 10. Augmentation ablation experiment (planned, not yet run)
+## 10. Augmentation ablation experiment (run 2026-09-13, D-046)
 
 To measure whether Angel's capability augmentation materially improves
 small/local model performance — rather than assuming it does — a controlled
-ablation is planned for a representative subset of tasks, holding the model
+ablation was run for a representative subset of tasks, holding the model
 and the verifier fixed across five conditions:
 
 | Condition | Configuration |
@@ -528,19 +528,231 @@ and the verifier fixed across five conditions:
 
 This does not become the permanent benchmark for every task — it is a
 one-time (or periodically repeated) measurement of augmentation's marginal
-value, not a per-task grading rubric. It is **designed here, not run
-here**. Its prerequisite, the D-038 trusted fixture runner, is now done
-(D-045, `tools/fixtures/`) — this ablation is the next experiment, run
-before the broader SLM-by-role benchmarking pass in `PLAN.md` Phase 2, since
-its result should inform how much context/skill augmentation those later
-runs use.
+value, not a per-task grading rubric. Its prerequisite, the D-038 trusted
+fixture runner, was done first (D-045, `tools/fixtures/`), unblocking real
+`code_fixture` execution evidence for this ablation.
+
+### 10.1 Runner and reproducibility
+
+`tools/bench/ablation.py` implements the five conditions and reuses
+`tools.bench.harness.verify()` and `tools.fixtures.runner` unchanged — no new
+verifier or scoring path was introduced. Condition prompts are built by
+`build_condition_prompt()`:
+
+- **A** is the frozen `task.prompt` verbatim, no wrapper.
+- **B** is `tools.bench.harness.benchmark_prompt()` (classification/filename),
+  or the same function's no-fixture fallback text (code — see below).
+- **C** adds, for classification, the fixed 10-label taxonomy from §1.1; for
+  filename, a condensed version of the real rules in
+  `tools/ingest/naming/policy.py` (date-prefix, slug format, extension
+  policy); for code, it becomes `benchmark_prompt()`'s fixture branch (the
+  task's real `task.md` + starter file — D-045's bundle).
+- **D** adds a relevant trusted skill from `skills/`. At the time of this run
+  `skills/` held only `social-video-learner` and `ui-design-system-builder`,
+  neither applicable to routing/classification, semantic naming, or general
+  Python code-fixture work, so **D is identical to C for every task in this
+  subset** — recorded explicitly (`skill_applied:
+  "none-applicable: ..."`), not silently skipped. This is a gap in the skill
+  library, not a null result about whether skills help.
+- **E** adds reference material genuinely relevant to the task: three
+  few-shot examples for classification/filename drawn from Legacy-20 tasks
+  *outside* the tested subset (no answer leakage for the item being scored),
+  and one factual Python-stdlib note per code task (e.g. `json.dumps`/
+  `json.loads` for code-04) — never the hidden test or a full solution.
+
+Ten tasks were selected as the representative subset: `cls-01`, `cls-04`,
+`cls-09` (spanning §1.1's low→medium classification ambiguity), `name-01`,
+`name-05`, and all five code fixtures `code-01`..`code-05` (coding is
+over-weighted relative to its 5/20 corpus share because D-045 is what made
+real execution evidence possible here). `tests/test_ablation.py` covers
+condition construction and scoring with a fake provider (no network/model
+required) so this stays reproducible in CI; the live run against a real
+model requires local Ollama and is not part of the test suite.
+
+Sampling was held fixed across every run: `temperature=0`, `seed=42`,
+`num_ctx=4096`, `think=false`, `num_predict=64` (classification/filename) or
+`512` (code — `tools/models/ollama_local.py`'s production
+`OllamaTextProvider` hard-codes `num_predict=64`, which would truncate a
+code answer before it compiles; `tools/bench/ablation.py`'s
+`OllamaAblationProvider` is a separate, ablation-scoped client for exactly
+this reason and changes nothing under `tools/models/`). Ollama/llama.cpp at
+`temperature=0` is *not* a guaranteed bit-exact determinism contract across
+runs or hardware; the seed is recorded for repeatability, not claimed as a
+proof of it.
+
+### 10.2 Models tested
+
+| Model | Result |
+|---|---|
+| `qwen2.5:0.5b` (Ollama, digest `a8b0c5157701`, Q4_K_M) | Run — see §10.3 |
+| `qwen3.5:4b` | **Blocked**: not staged in the local Ollama model store for this pass. Staging it means a multi-GB transfer across the UUID-gated Angel/T7 boundary (D-034/D-037); this evaluation pass does not perform that transfer, to avoid touching gated production storage and open-ended disk/time cost that was not pre-authorized for this run. |
+| `qwen3.5:9b` | Blocked, same reason. |
+| `gpt-oss:20b` | Blocked, same reason; D-034 additionally flagged disk-floor risk for models at this size. |
+| `moondream:latest` | Not applicable — a vision model, out of scope for this text/code ablation. |
+
+No result for any blocked model is fabricated or estimated. Only
+`qwen2.5:0.5b` produced real evidence in this pass — **every finding below
+is an N=1-model observation** and is reported as such, not generalized to
+"small models" broadly.
+
+### 10.3 Results (`qwen2.5:0.5b`, 50 runs = 10 tasks × 5 conditions)
+
+Raw per-run records (prompt, raw model text, parsed output, verifier status,
+tokens, timing) are local runtime state at
+`.state/evaluation/ablation/20260913T051116Z_qwen2.5-0.5b.jsonl`
+(gitignored per D-035, not exported to Angel for this pass). The committed,
+non-raw aggregate is
+`data/evaluation/ablation_ae_20260913_qwen2.5-0.5b.json`.
+
+**Observed fact — pass rate by condition (10 tasks each):**
+
+| Condition | A | B | C | D | E |
+|---|---:|---:|---:|---:|---:|
+| Passed | 0/10 | 1/10 | 4/10 | 4/10 | 5/10 |
+
+**Observed fact — per task:**
+
+| Task | A | B | C | D | E |
+|---|---|---|---|---|---|
+| cls-01 | fail | pass | pass | pass | pass |
+| cls-04 | fail | fail | fail | fail | **pass** |
+| cls-09 | fail | fail | pass | pass | pass |
+| name-01 | fail | fail | fail | fail | fail |
+| name-05 | fail | fail | fail | fail | fail |
+| code-01 | fail | fail | pass | pass | pass |
+| code-02 | fail | fail | fail | fail | fail |
+| code-03 | fail | fail | pass | pass | pass |
+| code-04 | fail | fail | fail | fail | fail |
+| code-05 | fail | fail | fail | fail | fail |
+
+Every failure classified as `failure_category: verifier_reject` (a real,
+scored wrong answer) — zero timeouts, zero malformed/unparseable outputs,
+zero sandbox/tool failures across all 50 runs. `num_predict=512` was never
+exhausted for a code task (largest observed `output_tokens` was 124 of 512).
+
+**Observed fact — qualitative detail:**
+
+- `cls-04` (expected `meeting`): B/C/D all answer the semantically
+  defensible `agenda`, which the frozen corpus scores wrong (§1.1 already
+  flagged this task's ambiguity as "Medium (`agenda`)"). Only E's fixed
+  10-label taxonomy plus few-shot examples pushes the model to the exact
+  expected label.
+- `cls-09` (expected `contract`): B answers `agreement` (also flagged
+  ambiguous in §1.1); C's fixed taxonomy — which does not offer `agreement`
+  as an option — is what fixes it, not D or E.
+- `name-01`/`name-05`: outputs are semantically reasonable at every
+  condition (e.g. `invoice-2025-01-01.pdf` for `name-01`) but never
+  reconstruct the one frozen accepted string
+  (`2025-01-01_Acme_invoice.pdf`) even with the real naming-policy spec (C)
+  and few-shot canonical examples (E). Zero of 25 filename-task runs passed.
+- `code-04`: the model's answer at every condition returns only the new
+  `summarize_json` function and drops the pre-existing `summarize` function
+  and `import json` the task explicitly said to keep ("Return ONLY the full
+  new contents of `solution.py`... do not change `summarize` itself") — a
+  full-file-replacement instruction-following failure, not a logic error in
+  the new function itself, and it is not fixed by any augmentation level.
+- `code-02`/`code-05`: genuine logic bugs (missing `import re`; a slugify
+  regex that strips the hyphens it just inserted; a retry loop that
+  re-raises on the first exception instead of retrying `attempts` times) —
+  a real capability boundary for this model at this size, not an
+  augmentation or format problem.
+
+### 10.4 Interpretation
+
+*(Interpretation — not observed fact; based on N=1 model, 10 tasks.)*
+
+- Augmentation has clear, positive marginal value for this model on
+  classification and on the two code tasks it could ever solve: A→B and
+  B→C each move real tasks from fail to pass, and the model never solves a
+  classification or the two easiest code tasks without at least
+  condition-C augmentation.
+- **The largest single jump is B→C** — adding the concrete
+  spec/context (fixed label taxonomy; the fixture's real task.md + starter
+  file) — not the production-prompt wrapper alone (A→B) and not, in this
+  run, trusted skills or reference material (C→D→E), because D was
+  identical to C in every case (no applicable skill exists yet) and E only
+  changed one outcome (`cls-04`).
+- **Diminishing returns begin at D** for this subset, but this is
+  confounded, not a finding about skills' value in general: D could not
+  differ from C because `skills/` has nothing relevant to these three
+  capability classes yet. This ablation cannot say whether trusted skills
+  would help — it can only say Angel does not yet have one to test for
+  routing/classification, semantic naming, or general Python coding.
+- **No augmentation level increased malformed output or distraction** for
+  this model — failures were uniformly wrong-but-well-formed answers
+  (`verifier_reject`), never truncation, timeout, or unparseable text, even
+  at condition E's longest prompts.
+- **Filename tasks look immune to augmentation** in this run (0/25), which
+  corroborates §1.1's pre-existing "Weak" canary-fitness label for
+  `name-*` rather than contradicting it: the frozen single-accepted-string
+  verifier appears to be measuring exact-string reconstruction, not naming
+  quality, and no realistic amount of spec/example content closed that gap
+  for a 0.5B model. This is expected, not a new defect.
+- **Latency/cost**: all 50 runs completed in 33.7s wall time on CPU
+  (Ollama, loopback); no run approached its timeout budget (60s
+  classification/filename, 180s code). Cost is $0 — local inference has no
+  metered API, so no cost/latency trade-off curve exists for this model;
+  cost only becomes a real axis once a metered/frontier candidate is
+  evaluated.
+- **Consistency across tasks**: within the code class specifically,
+  augmentation's effect is bimodal, not smooth — `code-01`/`code-03` go
+  from unsolvable to solved at C and stay solved; `code-02`/`code-04`/
+  `code-05` stay unsolved at every condition. A 0.5B model's coding ceiling
+  in this sample looks closer to "spec unlocks what the model could already
+  express correctly" than "richer context teaches it a new skill."
+
+### 10.5 Recommended policy (evidence-backed, not implemented)
+
+- For future SLM benchmarking passes (`PLAN.md` Phase 2's remaining
+  bullets), use **at least condition-C-equivalent augmentation**
+  (production prompt + task-specific spec/context) as the default, not a
+  bare instruction (A) or a generic production wrapper alone (B): both
+  measured strictly worse here and A/B-only benchmarking would
+  under-measure real capability.
+- **Do not yet claim a measured skills/reference-material policy** — no
+  applicable skill existed to test, and only one reference-material change
+  (few-shot classification examples) altered an outcome. Building the
+  first routing/classification and semantic-naming skills (so D can
+  actually differ from C) is a prerequisite for a real D/E measurement,
+  not something this ablation can substitute for.
+- **Reject the Legacy-20 filename verifier as evidence for naming-quality
+  augmentation policy.** It is unanimously failed regardless of
+  augmentation and, per §1.1, was never meant to measure naming quality —
+  that belongs to the future `semantic-naming` ACB-v1 suite with a policy
+  validator, not exact-string match.
+- `qwen2.5:0.5b` remains uncertified for any production role by this
+  ablation alone — it is one diagnostic-adjacent run on a 10-task subset,
+  not a production-capability benchmark against a full ACB-v1 suite (§9),
+  and does not by itself justify routing changes.
+- What remains uncertain: whether `qwen3.5:4b`/`9b` or `gpt-oss:20b` show
+  the same B→C-dominant pattern (untested, blocked this pass); whether a
+  real trusted skill changes the D/E picture; whether the code-04
+  full-file-replacement failure is a prompt-clarity fix (say so more
+  emphatically) or a genuine model-size ceiling; and whether classification
+  ambiguity (`cls-04`, `cls-09`) is better fixed by a closed label set (C)
+  than by more examples (E) in general, or only in this sample.
+
+### 10.6 Next experiment
+
+Per D-046, the next steps are, in order: (1) run this same ablation against
+`qwen3.5:4b`/`9b` once/if they are legitimately staged (not as part of an
+evaluation pass alone — see the storage boundary note in §10.2); (2) build
+the first routing/classification and semantic-naming skill artifacts so
+condition D can be measured rather than defaulted to C; (3) proceed to the
+broader SLM-by-role ACB-v1 benchmarking pass in `PLAN.md` Phase 2 using
+condition-C-equivalent augmentation as the floor per §10.5, once (1) or (2)
+are available.
 
 ## 11. Scope of this document
 
-This document is architecture and inventory, not implementation. It does
-not: download additional models, run a new bakeoff, implement the prompt
-registry (`docs/20-prompt-management.md`), implement Inspect AI, wire
-certification into the router, build a Firebase capability subsystem, or
-run the ablation experiment in §10. It does not loosen the Legacy 20's
-tasks, answers, or verifiers, and it does not change Gate 2's status — see
-`PLAN.md` Phase 2 for the current gate wording, which remains **RED**.
+This document is architecture and inventory, not implementation, with one
+exception: §10's augmentation ablation was run on 2026-09-13 (D-046) because
+it was explicitly the next scheduled experiment once D-045 unblocked it.
+This document still does not: download additional models beyond what §10.2
+already had locally, run a new bakeoff, implement the prompt registry
+(`docs/20-prompt-management.md`), implement Inspect AI, wire certification
+into the router, or build a Firebase capability subsystem. It does not
+loosen the Legacy 20's tasks, answers, or verifiers, and §10's results do
+not change Gate 2's status — see `PLAN.md` Phase 2 for the current gate
+wording, which remains **RED** (Gate 2's minimum is routing/classification
+and semantic naming per D-044, not the coding-heavy subset §10 measured).

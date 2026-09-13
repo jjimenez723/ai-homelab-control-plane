@@ -1,0 +1,532 @@
+{
+  "experiment": "A-E augmentation ablation (docs/19-model-evaluation.md #10)",
+  "date_utc": "2026-09-13",
+  "repo_commit_tested": "b8d4da7",
+  "environment": {
+    "host_os": "macOS (Darwin)",
+    "runtime": "Ollama (loopback, /api/generate)"
+  },
+  "model": {
+    "name": "qwen2.5:0.5b",
+    "provider": "ollama",
+    "digest": "a8b0c5157701",
+    "quantization": "Q4_K_M",
+    "parameters": "494.03M",
+    "context_length_native": 32768
+  },
+  "sampling": {
+    "temperature": 0,
+    "seed": 42,
+    "num_ctx": 4096,
+    "num_predict": {
+      "classification": 64,
+      "filename": 64,
+      "code": 512
+    },
+    "think": false
+  },
+  "conditions": {
+    "A": "raw/basic instruction (raw-model baseline)",
+    "B": "production task prompt",
+    "C": "B + strong SPEC/context",
+    "D": "C + relevant trusted skills (none applicable in this repo's skills/ for these task classes)",
+    "E": "D + relevant reference material/tools"
+  },
+  "task_ids": [
+    "cls-01",
+    "cls-04",
+    "cls-09",
+    "name-01",
+    "name-05",
+    "code-01",
+    "code-02",
+    "code-03",
+    "code-04",
+    "code-05"
+  ],
+  "runs_total": 50,
+  "pass_rate_by_condition": {
+    "A": {
+      "passed": 0,
+      "total": 10
+    },
+    "B": {
+      "passed": 1,
+      "total": 10
+    },
+    "C": {
+      "passed": 4,
+      "total": 10
+    },
+    "D": {
+      "passed": 4,
+      "total": 10
+    },
+    "E": {
+      "passed": 5,
+      "total": 10
+    }
+  },
+  "pass_rate_by_kind_and_condition": {
+    "classification": {
+      "A": {
+        "passed": 0,
+        "total": 3
+      },
+      "B": {
+        "passed": 1,
+        "total": 3
+      },
+      "C": {
+        "passed": 2,
+        "total": 3
+      },
+      "D": {
+        "passed": 2,
+        "total": 3
+      },
+      "E": {
+        "passed": 3,
+        "total": 3
+      }
+    },
+    "filename": {
+      "A": {
+        "passed": 0,
+        "total": 2
+      },
+      "B": {
+        "passed": 0,
+        "total": 2
+      },
+      "C": {
+        "passed": 0,
+        "total": 2
+      },
+      "D": {
+        "passed": 0,
+        "total": 2
+      },
+      "E": {
+        "passed": 0,
+        "total": 2
+      }
+    },
+    "code": {
+      "A": {
+        "passed": 0,
+        "total": 5
+      },
+      "B": {
+        "passed": 0,
+        "total": 5
+      },
+      "C": {
+        "passed": 2,
+        "total": 5
+      },
+      "D": {
+        "passed": 2,
+        "total": 5
+      },
+      "E": {
+        "passed": 2,
+        "total": 5
+      }
+    }
+  },
+  "per_task_per_condition": {
+    "cls-01": {
+      "A": {
+        "success": false,
+        "status": "exact",
+        "output_tokens": 13,
+        "generation_seconds": 0.045,
+        "parsed_output_preview": "I'm sorry, but I can't assist with that."
+      },
+      "B": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.005,
+        "parsed_output_preview": "invoice"
+      },
+      "C": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.005,
+        "parsed_output_preview": "invoice"
+      },
+      "D": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.004,
+        "parsed_output_preview": "invoice"
+      },
+      "E": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.006,
+        "parsed_output_preview": "invoice"
+      }
+    },
+    "cls-04": {
+      "A": {
+        "success": false,
+        "status": "exact",
+        "output_tokens": 64,
+        "generation_seconds": 0.572,
+        "parsed_output_preview": "A meeting agenda with attendees and action items is a structured document that o"
+      },
+      "B": {
+        "success": false,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.01,
+        "parsed_output_preview": "agenda"
+      },
+      "C": {
+        "success": false,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.007,
+        "parsed_output_preview": "agenda"
+      },
+      "D": {
+        "success": false,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.006,
+        "parsed_output_preview": "agenda"
+      },
+      "E": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.007,
+        "parsed_output_preview": "meeting"
+      }
+    },
+    "cls-09": {
+      "A": {
+        "success": false,
+        "status": "exact",
+        "output_tokens": 64,
+        "generation_seconds": 0.387,
+        "parsed_output_preview": "A signed agreement between two parties refers to a legal document that outlines "
+      },
+      "B": {
+        "success": false,
+        "status": "exact",
+        "output_tokens": 3,
+        "generation_seconds": 0.016,
+        "parsed_output_preview": "agreement"
+      },
+      "C": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.008,
+        "parsed_output_preview": "contract"
+      },
+      "D": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.007,
+        "parsed_output_preview": "contract"
+      },
+      "E": {
+        "success": true,
+        "status": "exact",
+        "output_tokens": 2,
+        "generation_seconds": 0.007,
+        "parsed_output_preview": "contract"
+      }
+    },
+    "name-01": {
+      "A": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 64,
+        "generation_seconds": 0.398,
+        "parsed_output_preview": "To create a safe filename for an invoice from Acme dated 2025-01-01, we should e"
+      },
+      "B": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 14,
+        "generation_seconds": 0.087,
+        "parsed_output_preview": "invoice_2025-01-01.json"
+      },
+      "C": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 14,
+        "generation_seconds": 0.083,
+        "parsed_output_preview": "invoice-2025-01-01.pdf"
+      },
+      "D": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 14,
+        "generation_seconds": 0.08,
+        "parsed_output_preview": "invoice-2025-01-01.pdf"
+      },
+      "E": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 14,
+        "generation_seconds": 0.079,
+        "parsed_output_preview": "invoice-2025-01-01.pdf"
+      }
+    },
+    "name-05": {
+      "A": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 64,
+        "generation_seconds": 0.467,
+        "parsed_output_preview": "A safe filename for a software installation guide should be:\n\n\"Software_Name_Ins"
+      },
+      "B": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 4,
+        "generation_seconds": 0.018,
+        "parsed_output_preview": "installation_guide.txt"
+      },
+      "C": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 8,
+        "generation_seconds": 0.042,
+        "parsed_output_preview": "ingest-naming-policy.py"
+      },
+      "D": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 8,
+        "generation_seconds": 0.04,
+        "parsed_output_preview": "ingest-naming-policy.py"
+      },
+      "E": {
+        "success": false,
+        "status": "filename",
+        "output_tokens": 10,
+        "generation_seconds": 0.055,
+        "parsed_output_preview": "2024_monthly-revenue.csv"
+      }
+    },
+    "code-01": {
+      "A": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 119,
+        "generation_seconds": 0.868,
+        "parsed_output_preview": "In the disposable fixture, replace \"TODO\" with a function that adds two integers"
+      },
+      "B": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 20,
+        "generation_seconds": 0.137,
+        "parsed_output_preview": "def add_two_integers(a, b):\n    return a + b"
+      },
+      "C": {
+        "success": true,
+        "status": "passed",
+        "output_tokens": 17,
+        "generation_seconds": 0.078,
+        "parsed_output_preview": "def add(a, b):\n    return a + b"
+      },
+      "D": {
+        "success": true,
+        "status": "passed",
+        "output_tokens": 17,
+        "generation_seconds": 0.067,
+        "parsed_output_preview": "def add(a, b):\n    return a + b"
+      },
+      "E": {
+        "success": true,
+        "status": "passed",
+        "output_tokens": 17,
+        "generation_seconds": 0.065,
+        "parsed_output_preview": "def add(a, b):\n    return a + b"
+      }
+    },
+    "code-02": {
+      "A": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 227,
+        "generation_seconds": 1.62,
+        "parsed_output_preview": "Sure, I can help you implement a safe slugify function for ASCII words. A slugif"
+      },
+      "B": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 65,
+        "generation_seconds": 0.44,
+        "parsed_output_preview": "def slugify(word):\n    \"\"\"\n    Slugify a given word.\n    \"\"\"\n    import re\n    r"
+      },
+      "C": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 512,
+        "generation_seconds": 3.697,
+        "parsed_output_preview": "def slugify(text):\n    # TODO: return a safe ASCII slug: lower-case, words joine"
+      },
+      "D": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 512,
+        "generation_seconds": 3.757,
+        "parsed_output_preview": "def slugify(text):\n    # TODO: return a safe ASCII slug: lower-case, words joine"
+      },
+      "E": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 106,
+        "generation_seconds": 0.773,
+        "parsed_output_preview": "def slugify(text):\n    # Convert text to lowercase\n    text = text.lower()\n    #"
+      }
+    },
+    "code-03": {
+      "A": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 512,
+        "generation_seconds": 3.762,
+        "parsed_output_preview": "Certainly! Off-by-one errors can be a common mistake when working with lists. To"
+      },
+      "B": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 48,
+        "generation_seconds": 0.311,
+        "parsed_output_preview": "def chunker(lst, n):\n    \"\"\"\n    A function to chunk a list into n-sized chunks."
+      },
+      "C": {
+        "success": true,
+        "status": "passed",
+        "output_tokens": 79,
+        "generation_seconds": 0.495,
+        "parsed_output_preview": "def chunk(items, size):\n    # BUG: off-by-one in the slice upper bound drops the"
+      },
+      "D": {
+        "success": true,
+        "status": "passed",
+        "output_tokens": 79,
+        "generation_seconds": 0.526,
+        "parsed_output_preview": "def chunk(items, size):\n    # BUG: off-by-one in the slice upper bound drops the"
+      },
+      "E": {
+        "success": true,
+        "status": "passed",
+        "output_tokens": 41,
+        "generation_seconds": 0.164,
+        "parsed_output_preview": "def chunk(items, size):\n    result = []\n    for i in range(0, len(items), size):"
+      }
+    },
+    "code-04": {
+      "A": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 205,
+        "generation_seconds": 1.562,
+        "parsed_output_preview": "Sure! Here's an example of a pure function in Python that takes a list of intege"
+      },
+      "B": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 140,
+        "generation_seconds": 1.082,
+        "parsed_output_preview": "{\n  \"code\": \"function addJsonOutput() {\\n  return JSON.stringify({\\n    \\\"key1\\\""
+      },
+      "C": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 54,
+        "generation_seconds": 0.299,
+        "parsed_output_preview": "def summarize_json(numbers):\n    numbers = list(numbers)\n    total = sum(numbers"
+      },
+      "D": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 54,
+        "generation_seconds": 0.341,
+        "parsed_output_preview": "def summarize_json(numbers):\n    numbers = list(numbers)\n    total = sum(numbers"
+      },
+      "E": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 23,
+        "generation_seconds": 0.101,
+        "parsed_output_preview": "def summarize_json(numbers):\n    return json.dumps(summarize(numbers), ensure_as"
+      }
+    },
+    "code-05": {
+      "A": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 512,
+        "generation_seconds": 3.79,
+        "parsed_output_preview": "In the disposable fixture, we can add a timeout-safe retry helper without filesy"
+      },
+      "B": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 99,
+        "generation_seconds": 0.793,
+        "parsed_output_preview": "import time\n\ndef retry_helper(func, max_retries=3, backoff_factor=2):\n    def wr"
+      },
+      "C": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 88,
+        "generation_seconds": 0.521,
+        "parsed_output_preview": "def retry(fn, attempts=3, delay=0.0, exceptions=(Exception,)):\n    for _ in rang"
+      },
+      "D": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 88,
+        "generation_seconds": 0.615,
+        "parsed_output_preview": "def retry(fn, attempts=3, delay=0.0, exceptions=(Exception,)):\n    for _ in rang"
+      },
+      "E": {
+        "success": false,
+        "status": "failed",
+        "output_tokens": 124,
+        "generation_seconds": 0.816,
+        "parsed_output_preview": "def retry(fn, attempts=3, delay=0.0, exceptions=(Exception,)):\n    # Retry the f"
+      }
+    }
+  },
+  "blocked_or_unavailable_candidates": [
+    {
+      "model": "qwen3.5:4b",
+      "reason": "not staged in local Ollama model store for this pass; staging requires a multi-GB transfer from the UUID-gated Angel/T7 boundary (D-034/D-037), out of scope/authorization for this run"
+    },
+    {
+      "model": "qwen3.5:9b",
+      "reason": "same as qwen3.5:4b"
+    },
+    {
+      "model": "gpt-oss:20b",
+      "reason": "same as qwen3.5:4b; D-034 additionally notes disk-floor risk for 35B-class+ models"
+    }
+  ],
+  "not_tested_out_of_scope": [
+    {
+      "model": "moondream:latest",
+      "reason": "vision model; not applicable to this text/code augmentation ablation"
+    }
+  ],
+  "raw_artifact_local_path": ".state/evaluation/ablation/20260913T051116Z_qwen2.5-0.5b.jsonl",
+  "raw_artifact_note": "Full prompts and raw model responses are kept as local runtime state (.state/, gitignored) per D-035, not committed and not exported to Angel for this pass."
+}
