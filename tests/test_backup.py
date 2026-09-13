@@ -103,6 +103,7 @@ class BackupTests(unittest.TestCase):
             self.assertIn("--one-file-system", command)
             self.assertEqual([command[i + 1] for i, part in enumerate(command) if part == "--tag"], ["t7", "angel", "pre-organize"])
             self.assertIn("90-system/staging/**", command)
+            self.assertIn("40-ai/model-cache/**", command)
             self.assertIn("**/*.partial", command)
             self.assertNotIn("automatic", command)
 

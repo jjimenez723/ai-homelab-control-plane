@@ -247,3 +247,17 @@ Reasoning lives in `reviews/ASTRA-V0-ARCHITECTURE-REVIEW.md` (cited as "review �
 ## D-036 — Interpretation is read-only and non-authoritative
 - Status: accepted 2026-09-12.
 - Decision: `tools/ingest/interpretation/` consumes bounded plain evidence values and emits inspectable hypotheses only. It does not import naming, triage, transaction, pipeline, or filesystem mutation APIs. OCR/native/visual instruction text remains data. No hypothesis may become a filename, retention decision, ingestion, move, or deletion input in Phase 2.
+
+## D-037 — Angel is the UUID-gated bulk tier for regenerable AI artifacts
+- Status: accepted 2026-09-12; supersedes D-034's "never place it on Angel" storage conclusion.
+- Context: the verified, encrypted Angel T7 has ample capacity while model weights and runtime download caches are regenerable. Keeping them on the internal SSD needlessly constrained capable-local evaluation.
+- Decision: large regenerable AI artifacts live only below UUID-verified `40-ai/`: `model-cache/{ollama,huggingface,mlx,whisper}`, plus `datasets`, `evaluation`, `indexes`, and `manifests`. The resolver reuses the existing T7 APFS UUID check and fails closed for missing, locked, read-only, wrong, or merely name-matched volumes. It never creates or uses a fallback under `/Volumes/Angel` or the internal SSD.
+- Decision: Ollama is started with its supported `OLLAMA_MODELS` environment variable only after this preflight. The Mac-side coordinator ledger, source repository, local configuration, credentials, and essential runtime state remain internal.
+- Decision: restic excludes `40-ai/model-cache/**` precisely. It does not exclude all `40-ai`; manifests, evaluation results, deliberate datasets, and expensive non-regenerable indexes remain eligible for backup.
+- Consequence: with Angel absent, local model backends are unavailable and Tier 0 continues; no model download may silently consume internal storage. This availability trade-off is intentional.
+
+## D-038 — The frozen code-fixture verifier fails closed pending trusted execution
+- Status: accepted 2026-09-12 after bounded independent review.
+- Context: the frozen corpus retained only fixture selector names and no executable fixtures/tests. Its old harness accepted a model-produced boolean/`tests_passed` claim, contrary to the project's deterministic-verification rule.
+- Decision: the corpus, expected values, tier labels, and historical 4/20 RED record remain untouched. Until a verifier-owned confined runner and fixture bundle exist, every `code_fixture` result is `code-fixture-unavailable` and therefore fails. A model claim is never test evidence.
+- Consequence: Gate 2 cannot turn green from unverified code claims. A future repair must add public task contracts plus hidden verifier-owned tests, bounded execution with no filesystem/network/secret authority, and regression proof; it must then rerun the unchanged corpus.

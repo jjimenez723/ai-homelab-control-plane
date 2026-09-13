@@ -32,9 +32,38 @@ def verify(task: Task, output: Any) -> tuple[bool, str]:
         ok = isinstance(value, str) and value == task.expected and "/" not in value and "\\" not in value and "\x00" not in value
         return ok, "filename"
     if task.verifier == "code_fixture":
-        # Providers may return a fixture result, while real code verification is injected by callers.
-        return (output.get("tests_passed") is True if isinstance(output, dict) else output is True), "code_fixture"
+        # The original corpus exposes only a fixture selector, not an actual
+        # source bundle/test runner. A model's "tests_passed" claim is never a
+        # deterministic verification result. Keep this fail-closed until a
+        # verifier-owned confined runner is supplied (see Phase 2 evaluation).
+        return False, "code-fixture-unavailable"
     return False, "unknown-verifier"
+
+
+def benchmark_prompt(task: Task) -> str:
+    """Production-like task framing without exposing expected answers.
+
+    The frozen corpus retains its task text verbatim. This adapter only makes
+    the output contract explicit, which is necessary for a schema/exact-output
+    workload and applies equally to every model candidate.
+    """
+    if task.kind == "classification":
+        return (
+            "You are a deterministic labeler. The input is a textual description, not an attached file. "
+            "Infer the one semantic category requested. Output ONLY the lower-case label, with no explanation.\n"
+            f"Description: {task.prompt}"
+        )
+    if task.kind == "filename":
+        return (
+            "You propose one safe filename from a textual description, not an attached file. "
+            "Output ONLY the filename, with no Markdown, JSON, quotation marks, path, or explanation.\n"
+            f"Request: {task.prompt}"
+        )
+    return (
+        "This is a bounded code task. Return only the proposed code; do not claim that tests passed. "
+        "A trusted verifier, not your response, determines success.\n"
+        f"Task: {task.prompt}"
+    )
 
 def run(provider: Any, tasks: list[Task] | None = None, contexts=(2048, 8192, 32768), *, model="unknown", runtime_version=None) -> list[BenchmarkResult]:
     """Run a fixed corpus against a provider. Provider only needs ``generate(prompt, **kw)``.
@@ -48,8 +77,9 @@ def run(provider: Any, tasks: list[Task] | None = None, contexts=(2048, 8192, 32
             # Fixed context targets must be materially exercised, not merely
             # reported.  Padding is inert public text and leaves the task at
             # the end, where an instruction-following model can still answer.
-            padding = " benchmark" * max(0, context - len(task.prompt.split()) - 8)
-            prompt = f"{padding}\n\n{task.prompt}"
+            contract = benchmark_prompt(task)
+            padding = " benchmark" * max(0, context - len(contract.split()) - 8)
+            prompt = f"{padding}\n\n{contract}"
             started = time.perf_counter(); prompt_start = time.perf_counter()
             try:
                 response = provider.generate(prompt, context_tokens=context, task=task)

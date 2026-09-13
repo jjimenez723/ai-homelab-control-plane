@@ -73,8 +73,13 @@ class OllamaTextProvider:
     def available(self) -> bool:
         return self.client.available()
 
-    def generate(self, prompt: str, *, context_tokens: int, timeout_seconds: int | None = None, **_unused: Any) -> dict[str, Any]:
-        payload = json.dumps({"model": self.model, "prompt": prompt, "stream": False,
+    def generate(self, prompt: str, *, context_tokens: int, timeout_seconds: int | None = None,
+                 think: bool = False, **_unused: Any) -> dict[str, Any]:
+        # Tier 1 structured tasks are short, bounded transformations. Turning
+        # off optional thinking prevents reasoning tokens from consuming the
+        # deliberately small output cap, and avoids reasoning text contaminating
+        # an exact verifier. Callers that measure reasoning may opt in.
+        payload = json.dumps({"model": self.model, "prompt": prompt, "stream": False, "think": think,
                               "options": {"num_ctx": context_tokens, "temperature": 0, "num_predict": 64}}, separators=(",", ":")).encode("utf-8")
         request = urllib.request.Request(self.client.endpoint + "/api/generate", data=payload,
                                          headers={"Content-Type": "application/json"}, method="POST")
@@ -82,7 +87,7 @@ class OllamaTextProvider:
             outer = json.loads(response.read(2_000_000).decode("utf-8"))
         if not isinstance(outer, dict):
             raise ValueError("Ollama response is not an object")
-        return {"output": outer.get("response", ""), "input_tokens": outer.get("prompt_eval_count"),
+        return {"output": str(outer.get("response", "")).strip(), "input_tokens": outer.get("prompt_eval_count"),
                 "output_tokens": outer.get("eval_count"), "prefill_seconds": (outer.get("prompt_eval_duration") or 0) / 1e9,
                 "generation_seconds": (outer.get("eval_duration") or 0) / 1e9,
                 "runtime_model": outer.get("model")}

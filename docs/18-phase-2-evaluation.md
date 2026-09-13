@@ -78,3 +78,52 @@ capable tier cannot fit without violating the storage floor. Nothing has been
 tuned by weakening a verifier or changing benchmark answers. Interpretation
 remains inspectable/non-authoritative; it is not wired to naming, triage,
 ingestion, movement, retention, or deletion.
+
+## Storage migration and continued measurement — 2026-09-12
+
+The historical run above is retained verbatim. Its storage conclusion is now
+superseded by D-037: Angel was verified by its configured APFS UUID
+`14145145-9C19-4117-AD93-72D94AE235A7`, then the sole authorized AI tree was
+initialized at `/Volumes/Angel/40-ai/`. Ollama was manually started on
+loopback `127.0.0.1:11434` with `OLLAMA_MODELS` set to
+`/Volumes/Angel/40-ai/model-cache/ollama`; the server reported that exact
+value at startup. The resolver refuses missing, wrong, locked, read-only, and
+uninitialized volumes before returning any cache path, so it cannot fall back
+to a name-matched or internal location. The backup exclusion is precisely
+`40-ai/model-cache/**`.
+
+At measurement start, the M4 Pro/48 GB machine had 89,825,780 KiB free on the
+internal Data volume and Angel had 1,949,909,932 KiB free. The previous
+internal Ollama cache remains in place as historical evidence until a T7-backed
+replacement has been confirmed; no owner content was moved or changed.
+
+The first staged candidate, official Ollama `qwen3.5:4b` (digest
+`2a654d98e6fb`, Q4_K_M, 3.4 GB advertised), was downloaded directly into the
+verified T7 cache and passed a loopback load/inference smoke check. With
+thinking disabled for bounded structured tasks and a production output contract
+that does not reveal expected answers, its 2k corpus pass count was 4/20; all
+five code tasks were deliberately fail-closed. Its observed simple-request
+latency was about 1.2–3.7 seconds. This does not meet the Gate 2 threshold and
+does not select the model.
+
+### Verifier correction
+
+A bounded independent review found that `code_fixture` tasks had no executable
+fixture/test bundle and accepted a model-provided boolean. This was a verifier
+defect independent of model performance. Per D-038, the corpus itself was not
+changed, expected answers were not changed, and verifiers were not weakened:
+the claim path now fails closed as `code-fixture-unavailable`. The historical
+4/20 result remains historical evidence only; no code result from it is used as
+deterministic proof. Gate 2 remains **RED** pending both a trusted fixture
+runner and further candidate measurement.
+
+The 9B Qwen candidate (official `qwen3.5:9b`, digest `6488c96fa5fa`, Q4_K_M,
+6.6 GB) likewise ran from the verified T7 cache and produced 4/20 at 2k, with
+about 2.3–6.7 seconds per task after load. It was slower without an increase in
+verified success. Official `gpt-oss:20b` was also staged in the same cache. Its
+first four requests exceeded the 120-second adapter timeout while the model
+loaded; the remaining requests completed in roughly 2.0–78.9 seconds but none
+passed the strict verifier, for 0/20. It is rejected for this bounded Tier 1
+workload. The corrected measurement establishes no Tier 1 winner and no
+operational Tier 2 winner; the router must report local semantic work
+unavailable rather than silently claim correctness or use a frontier provider.

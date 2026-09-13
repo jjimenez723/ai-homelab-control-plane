@@ -305,6 +305,9 @@ backup:
   # owner; without excluding it restic exits 3 on every otherwise-healthy run.
   exclude_patterns:
     - "90-system/staging/**"
+    # Downloadable model weights are regenerated from recorded provider/tag/digest.
+    # Manifests and evaluation records under 40-ai remain backed up.
+    - "40-ai/model-cache/**"
     - "**/*.partial"
     - ".Spotlight-V100"
     - ".fseventsd"

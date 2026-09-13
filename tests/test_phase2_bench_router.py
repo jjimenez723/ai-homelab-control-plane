@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from tools.bench.corpus import load_corpus
-from tools.bench.harness import run
+from tools.bench.harness import benchmark_prompt, run, verify
 from tools.router.router import RouteRequest, Router
 from tools.router.report import report
 from tools.coordinator.ledger import JobLedger
@@ -24,6 +24,17 @@ class Phase2HarnessTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].model, "unknown")
         self.assertFalse(results[0].success)
+
+    def test_code_claims_fail_closed_without_a_trusted_fixture_runner(self):
+        task = next(task for task in load_corpus() if task.id == "code-02")
+        self.assertEqual(verify(task, True), (False, "code-fixture-unavailable"))
+        self.assertEqual(verify(task, {"tests_passed": True}), (False, "code-fixture-unavailable"))
+
+    def test_benchmark_contract_does_not_leak_expected_answer(self):
+        task = next(task for task in load_corpus() if task.id == "cls-01")
+        prompt = benchmark_prompt(task)
+        self.assertIn(task.prompt, prompt)
+        self.assertNotIn(str(task.expected), prompt.removesuffix(task.prompt))
 
     def test_router_deterministic_path(self):
         result = Router({1: FakeProvider()}).route(RouteRequest("x", deterministic=lambda: "yes", verifier=lambda x: x == "yes"))
