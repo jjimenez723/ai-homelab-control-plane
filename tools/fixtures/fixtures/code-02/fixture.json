@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "task_id": "code-02",
+  "instructions": "task.md",
+  "starter_files": ["solution.py"],
+  "editable_files": ["solution.py"],
+  "hidden_test_files": ["test_slugify.py"],
+  "run_module": "test_slugify",
+  "limits": {
+    "timeout_seconds": 10,
+    "cpu_seconds": 8,
+    "max_output_bytes": 65536,
+    "max_file_size_bytes": 1048576,
+    "max_processes": 32
+  }
+}

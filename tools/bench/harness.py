@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from .corpus import Task, load_corpus
+from tools.fixtures.runner import submission_from_model_output, evaluate_submission
+from tools.fixtures.spec import load_fixture
 
 @dataclass
 class BenchmarkResult:
@@ -32,11 +34,21 @@ def verify(task: Task, output: Any) -> tuple[bool, str]:
         ok = isinstance(value, str) and value == task.expected and "/" not in value and "\\" not in value and "\x00" not in value
         return ok, "filename"
     if task.verifier == "code_fixture":
-        # The original corpus exposes only a fixture selector, not an actual
-        # source bundle/test runner. A model's "tests_passed" claim is never a
-        # deterministic verification result. Keep this fail-closed until a
-        # verifier-owned confined runner is supplied (see Phase 2 evaluation).
-        return False, "code-fixture-unavailable"
+        # D-038: a model's own "tests_passed" claim is never verification
+        # evidence. An executable fixture bundle (tools/fixtures/) runs
+        # verifier-owned hidden tests in a bounded sandbox and returns real
+        # PASS/FAIL evidence. Tasks without a fixture bundle yet keep the
+        # original fail-closed behavior rather than trust an unverifiable
+        # claim.
+        try:
+            spec = load_fixture(task.id)
+        except (FileNotFoundError, ValueError):
+            return False, "code-fixture-unavailable"
+        submission = submission_from_model_output(output, spec.editable_files)
+        if submission is None:
+            return False, "invalid-submission"
+        result = evaluate_submission(task.id, submission)
+        return result.success, result.status
     return False, "unknown-verifier"
 
 
@@ -58,6 +70,22 @@ def benchmark_prompt(task: Task) -> str:
             "You propose one safe filename from a textual description, not an attached file. "
             "Output ONLY the filename, with no Markdown, JSON, quotation marks, path, or explanation.\n"
             f"Request: {task.prompt}"
+        )
+    try:
+        spec = load_fixture(task.id)
+    except (FileNotFoundError, ValueError):
+        spec = None
+    if spec is not None:
+        starter = "\n\n".join(
+            f"--- {name} ---\n{(spec.starter_dir / name).read_text(encoding='utf-8')}"
+            for name in spec.starter_files
+        )
+        return (
+            "This is a bounded code task with an executable fixture. Return ONLY the full new contents "
+            f"of {', '.join(spec.editable_files)}; do not claim that tests passed. A trusted verifier, "
+            "not your response, runs hidden tests you cannot see and determines success.\n\n"
+            f"{spec.instructions_path.read_text(encoding='utf-8')}\n\n"
+            f"Starter file(s):\n{starter}"
         )
     return (
         "This is a bounded code task. Return only the proposed code; do not claim that tests passed. "

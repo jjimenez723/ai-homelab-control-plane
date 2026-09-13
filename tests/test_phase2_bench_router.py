@@ -4,9 +4,16 @@ from pathlib import Path
 
 from tools.bench.corpus import load_corpus
 from tools.bench.harness import benchmark_prompt, run, verify
+from tools.fixtures.sandbox import sandbox_available
 from tools.router.router import RouteRequest, Router
 from tools.router.report import report
 from tools.coordinator.ledger import JobLedger
+
+# The code_fixture verifier executes candidate code inside a macOS Seatbelt
+# sandbox (tools/fixtures/); this repo's CI runs on ubuntu-latest, where
+# that isolation is honestly unavailable. See tests/test_fixture_runner.py
+# for the fail-closed behavior that covers that platform unconditionally.
+_NEEDS_SANDBOX = unittest.skipUnless(sandbox_available(), "sandbox-exec not available on this platform")
 
 class FakeProvider:
     name = "fake"; model = "fake-v1"; capabilities = ("text", "structured_output")
@@ -25,10 +32,30 @@ class Phase2HarnessTests(unittest.TestCase):
         self.assertEqual(results[0].model, "unknown")
         self.assertFalse(results[0].success)
 
-    def test_code_claims_fail_closed_without_a_trusted_fixture_runner(self):
+    def test_code_claims_alone_are_never_verification_evidence(self):
+        # D-038's trusted fixture runner (tools/fixtures/) now exists, so a
+        # code_fixture task actually executes hidden tests -- but a model
+        # claim with no real code attached must still fail closed, just as a
+        # more specific status than the pre-runner "code-fixture-unavailable".
         task = next(task for task in load_corpus() if task.id == "code-02")
-        self.assertEqual(verify(task, True), (False, "code-fixture-unavailable"))
-        self.assertEqual(verify(task, {"tests_passed": True}), (False, "code-fixture-unavailable"))
+        self.assertEqual(verify(task, True), (False, "invalid-submission"))
+        self.assertEqual(verify(task, {"tests_passed": True}), (False, "invalid-submission"))
+
+    @_NEEDS_SANDBOX
+    def test_code_fixture_runs_real_hidden_tests(self):
+        task = next(task for task in load_corpus() if task.id == "code-01")
+        correct = "def add(a, b):\n    return a + b\n"
+        wrong = "def add(a, b):\n    return a - b\n"
+        self.assertEqual(verify(task, correct), (True, "passed"))
+        ok, status = verify(task, wrong)
+        self.assertFalse(ok)
+        self.assertEqual(status, "failed")
+
+    def test_code_fixture_unavailable_for_a_task_with_no_bundle(self):
+        from tools.bench.corpus import Task
+        task = Task(id="code-99", kind="code", prompt="x", expected=True, intended_tier=0,
+                    capabilities=(), risk="medium", privacy="public", verifier="code_fixture")
+        self.assertEqual(verify(task, "def f(): pass"), (False, "code-fixture-unavailable"))
 
     def test_benchmark_contract_does_not_leak_expected_answer(self):
         task = next(task for task in load_corpus() if task.id == "cls-01")

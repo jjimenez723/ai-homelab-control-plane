@@ -148,26 +148,45 @@ already has to.
 | code-04 | Add JSON output for a pure function. | `test_json` | 1 | medium |
 | code-05 | Add a timeout-safe retry helper without filesystem access. | `test_retry` | 2 | high |
 
-`fixture.tests` is a **selector name only** — no executable fixture/test
-bundle exists in the repository for any of the five. Per D-038, `verify()`'s
-`code_fixture` branch unconditionally returns `(False,
-"code-fixture-unavailable")` without inspecting the model's output at all:
+**Update (D-045, 2026-09-12): `fixture.tests` is no longer a selector name
+only.** `tools/fixtures/fixtures/<task-id>/` now holds a real bundle for
+each of the five — `fixture.json`, a public `task.md` contract, `starter/`
+files the model sees, and `hidden/` verifier-owned `unittest` tests it never
+sees. `verify()`'s `code_fixture` branch (`tools/bench/harness.py`) loads
+that bundle and runs the submission's code against the hidden tests inside
+`tools.fixtures.runner.evaluate_submission`, a bounded macOS Seatbelt
+(`sandbox-exec`) sandbox:
 
 ```python
 if task.verifier == "code_fixture":
-    # The original corpus exposes only a fixture selector, not an actual
-    # source bundle/test runner. A model's "tests_passed" claim is never a
-    # deterministic verification result. Keep this fail-closed until a
-    # verifier-owned confined runner is supplied (see Phase 2 evaluation).
-    return False, "code-fixture-unavailable"
+    try:
+        spec = load_fixture(task.id)
+    except (FileNotFoundError, ValueError):
+        return False, "code-fixture-unavailable"
+    submission = submission_from_model_output(output, spec.editable_files)
+    if submission is None:
+        return False, "invalid-submission"
+    result = evaluate_submission(task.id, submission)
+    return result.success, result.status
 ```
 
-All five code tasks therefore always fail today, by design. They are not
-currently usable as a signal of model coding ability — only as a regression
-check that the fail-closed guard still fires
-(`tests/test_phase2_bench_router.py::test_code_claims_fail_closed_without_a_trusted_fixture_runner`
-re-creates the exact pre-repair claim shapes, `True` and `{"tests_passed":
-True}`, and asserts both are rejected).
+`submission_from_model_output` extracts only code text from the model's
+output — a `tests_passed`/`success` claim field is never read, so wrapping a
+claim around no code (or around wrong code) still fails. What the sandbox
+actually enforces, and what it explicitly does not (read-confidentiality of
+the hidden tests against a host-savvy adversary is not one of them, and
+that gap is documented rather than hidden), is in `tools/fixtures/sandbox.py`
+and D-045. `tests/test_fixture_runner.py` covers both directions (a correct
+solution passes, a wrong one fails) plus the adversarial cases D-045 lists;
+those tests — and
+`tests/test_phase2_bench_router.py::test_code_fixture_runs_real_hidden_tests`
+— skip rather than fail on a host without `sandbox-exec` (this repository's
+`ubuntu-latest` CI included), while
+`test_sandbox_unavailable_fails_closed_without_running_anything` proves the
+fail-closed behavior itself unconditionally on any platform. A task with no
+fixture bundle still gets the original fail-closed
+`code-fixture-unavailable`, exercised by
+`tests/test_phase2_bench_router.py::test_code_fixture_unavailable_for_a_task_with_no_bundle`.
 
 ### 1.2 What the harness actually does
 
@@ -510,12 +529,11 @@ and the verifier fixed across five conditions:
 This does not become the permanent benchmark for every task — it is a
 one-time (or periodically repeated) measurement of augmentation's marginal
 value, not a per-task grading rubric. It is **designed here, not run
-here**: running it now would compete with the higher-priority D-038 fixture
-repair (a trusted, verifier-owned code-execution runner) for the same
-coding-task infrastructure. Sequencing: finish the trusted fixture runner
-first; run this ablation immediately after, before the broader SLM-by-role
-benchmarking pass in `PLAN.md` Phase 2, since its result should inform how
-much context/skill augmentation those later runs use.
+here**. Its prerequisite, the D-038 trusted fixture runner, is now done
+(D-045, `tools/fixtures/`) — this ablation is the next experiment, run
+before the broader SLM-by-role benchmarking pass in `PLAN.md` Phase 2, since
+its result should inform how much context/skill augmentation those later
+runs use.
 
 ## 11. Scope of this document
 
