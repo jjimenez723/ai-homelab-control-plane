@@ -35,6 +35,13 @@ Examples:
 
 Candidates may include appropriately sized/quantized Qwen, DeepSeek-family, or other open-weight models validated on the actual hardware.
 
+Validation, going forward, means a specific role certification
+(`docs/19-model-evaluation.md` §3): `model + quant + runtime + prompt
+version + tool-schema version + capability`, not a bare model name. A model
+is not assumed capable of a tier merely because it is large, and is not
+excluded from a tier merely because it is small — see the SLM research
+framing in `docs/19-model-evaluation.md` §2.4.
+
 ### Tier 3 — frontier model
 Use for:
 - architecture;
@@ -118,3 +125,14 @@ while energy remains an estimate rather than a sensor reading.
 The tracked evaluation corpus and normalized summary are review artifacts.
 Raw runs/transcripts are local runtime state or may be deliberately exported
 to UUID-verified Angel `40-ai/evaluation/`; they are never committed.
+
+`tools/router/router.py`'s `_candidates()` selects today by tier,
+capability, and context match only (`ModelRegistry.available(...)`); it has
+no certification concept yet. Routing by certified capability data rather
+than parameter count alone is the target architecture in
+`docs/19-model-evaluation.md` §3, not a claim about the current
+implementation. Prompts sent to any routed model follow the composition and
+versioning rules in `docs/20-prompt-management.md` once the registry
+described there exists; today's evaluation prompts
+(`tools/bench/harness.py`) are the un-versioned seed that architecture is
+meant to replace.

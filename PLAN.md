@@ -111,7 +111,53 @@ The perception track. **Scope, stated honestly:** this phase teaches Angel to an
 
 **Phase 2 measurement:** `docs/18-phase-2-evaluation.md` records hardware, runtime/model versions, context measurements, all 20 task routes, and the full Gate result. The local VLM is behind the Phase 1C seam and opt-in; interpretation is a separate non-authoritative plain-data stage (D-036), never an input to naming or retention.
 
-**Gate 2: RED (2026-09-12).** Benchmark table committed and `report` runs, but measured Tier 0–1 deterministic-verifiable success is 4/20 (20%), below 90%; escalation is 16/20 (80%). Do not advance the model-selection gate until storage headroom and a suitable capable model are measured.
+### Phase 2 continued — capability-based evaluation architecture (documentation pass, 2026-09-12)
+
+The single mixed 20-task score above answers "did this model pass this
+corpus," not "which model/runtime/prompt configuration is qualified for
+which workload." D-039 through D-044 and `docs/19-model-evaluation.md` /
+`docs/20-prompt-management.md` define the replacement. Revised sequence:
+
+- [x] 2026-09-12 Consolidate existing Phase 2 implementation and confirm it against `main`: registry, harness, router, ledger, storage gating, and the 20-task corpus read directly from code, not from prior prose (D-039–D-044, `docs/19-model-evaluation.md`).
+- [x] 2026-09-12 Freeze/document the existing corpus as **Angel Canary v1 — Legacy 20**: exact task inventory, verifier per task, ambiguity/canary-fitness assessment, historical results preserved verbatim (D-040, `docs/19-model-evaluation.md` §1).
+- [x] 2026-09-12 Define the prompt registry/rendering architecture, composition layers, canonical vs. production tracks, and the untrusted-content boundary as it applies to prompt composition (D-041, `docs/20-prompt-management.md`).
+- [x] 2026-09-12 Define ACB-v1 capability suites, coding language/framework metadata, the SLM research framing, and the failure taxonomy (D-039, `docs/19-model-evaluation.md` §2).
+- [x] 2026-09-12 Define production task classes (`code.implementation`, `code.refactor`, `code.debug`, `code.testing`, `code.orchestration`, `repo.documentation`, `ui.implementation`, `backend.firebase` reserved, classification/naming) mapped to ACB-v1 suites and to the router job contract's `task_class` field, so different classes may certify different models (D-039, `docs/19-model-evaluation.md` §8).
+- [x] 2026-09-12 Define the raw-model-baseline vs. production-capability-benchmark distinction and Angel's production execution unit (model + production prompt + spec/context + relevant trusted skills + approved libraries/reference material + tools + deterministic verifier); design (not run) the augmentation ablation experiment that measures whether that augmentation materially helps small models (D-044, `docs/19-model-evaluation.md` §9–§10).
+- [ ] Audit and independently cross-validate evaluator behavior: this pass re-read `tools/bench/harness.py`/`corpus.py` line-by-line against the docs and found them consistent; an actual second-implementation cross-check (Inspect AI probe, D-043) has not been run.
+- [ ] Build development/validation/holdout dataset splits for each ACB-v1 suite once suite tasks exist (D-040; no suite tasks exist yet beyond the Legacy 20).
+- [ ] Validate Inspect AI (or another selected evaluator substrate) against the Legacy 20 per D-043 before adopting it for anything beyond a probe.
+- [ ] Finish the D-038 trusted, verifier-owned code-fixture runner (public task contracts, hidden tests, bounded execution with no filesystem/network/secret authority) before any code-class benchmarking proceeds.
+- [ ] Run the augmentation ablation experiment (`docs/19-model-evaluation.md` §10) immediately after the fixture runner above is trustworthy, to calibrate how much context/skill augmentation later benchmarking uses by default.
+- [ ] Benchmark SLM → small → capable → boundary-sized candidates **per task class** against ACB-v1 suites, using production-capability-benchmark configurations (D-044) rather than raw-model baselines (none run yet; no new model bakeoff is in scope for this documentation pass).
+- [ ] Certify model-role configurations (`model + quant + runtime + prompt_version + tool_schema_version + capability`) from production-capability-benchmark results (D-042, D-044).
+- [ ] Build router behavior (`tools/router/router.py` `_candidates()`) from measured certifications instead of tier/capability/context match alone.
+- [ ] Report capability/cost/latency/escalation evidence per suite/task class, extending `tools/report` beyond its current aggregate cost/latency/escalation view.
+- [ ] Satisfy the revised Gate 2 below honestly — not by loosening it.
+
+**Gate 2 (revised 2026-09-12): RED.** Gate 2 passes when: benchmark
+definitions are versioned; prompts are versioned; a frozen canary exists
+(true today — the Legacy 20); evaluator correctness has been independently
+cross-validated against a second implementation (not done); the V0-required
+production roles have role-specific evaluation suites with measured
+**production-capability-benchmark** results, per D-044 — a raw-model
+baseline is diagnostic information, never Gate 2 evidence, however good it
+looks — for Gate 2 specifically, that minimum is **routing/classification
+and semantic naming**, the two capabilities Phase 3's client/project/tag
+inference actually needs, not the full taxonomy in
+`docs/19-model-evaluation.md` §2.1 (tool-calling, coding, and orchestration
+suites gate Phase 4/5, not Phase 2); enabled model-role configurations have
+measured reliability/resource envelopes recorded as certifications; router
+decisions consult certified capability data rather than parameter count
+alone; unsupported work escalates correctly (true today, operationally, per
+D-033 and `tools/router/router.py`); reporting surfaces quality, cost,
+latency, and escalation (cost/latency/escalation are already reported;
+capability-specific quality is not yet); and models gain no unverified
+authority (true today, unconditionally — D-022, D-028, D-036, D-038). The
+original 2026-09-12 measurement (4/20, 4/20, 0/20) remains historical,
+raw-baseline-shaped evidence and does not by itself satisfy or block any
+clause above — a better-sounding architecture does not turn this gate
+green; only measured, verifier-backed production-capability results do.
 
 ## Phase 3 — Catalog pilot on one client (days 21–45)
 

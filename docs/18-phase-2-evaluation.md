@@ -1,5 +1,13 @@
 # Phase 2 evaluation — 2026-09-12
 
+> This document is the unedited historical record of the first Phase 2
+> measurement run. Its 20-task corpus is now referred to as **Angel Canary
+> v1 — Legacy 20**: a frozen regression canary, not a complete benchmark of
+> model capability. The current evaluation architecture, the full task
+> inventory, and the capability-based benchmark that supersedes "one score"
+> are in `docs/19-model-evaluation.md`; prompt architecture is in
+> `docs/20-prompt-management.md`. Nothing below is edited or reinterpreted.
+
 ## Machine and storage boundary
 
 - MacBookPro Mac16,7; Apple M4 Pro; 48 GB unified memory; macOS 26.5.2 (25F84).

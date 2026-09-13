@@ -87,7 +87,10 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 14-design-system-and-ui-library-policy.md
 │   ├── 15-file-intelligence-acceptance-drill.md   # the hand-run drill; do this before trusting the pipeline
 │   ├── 16-file-intelligence.md               # naming, triage, automation (read this before changing tools/ingest/)
-│   └── 17-file-evidence.md                   # perception: native text, OCR, vision. No authority.
+│   ├── 17-file-evidence.md                   # perception: native text, OCR, vision. No authority.
+│   ├── 18-phase-2-evaluation.md              # historical record: the Legacy 20 measurement run
+│   ├── 19-model-evaluation.md                # ACB-v1 capability suites + the Legacy 20 canary's role
+│   └── 20-prompt-management.md               # prompt registry, composition layers, eval/production parity
 ├── data/
 │   ├── video-learning-queue.yaml
 │   └── ui-library-registry.yaml
