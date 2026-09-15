@@ -202,3 +202,38 @@ Irreplaceable: original client footage, human corrections in the catalog, unpush
 | Generated | proxies/builds | low |
 | Cache | model/npm/pip caches | usually none |
 | Restricted secrets | broker/API credentials | secure secret backup, not ordinary file backup |
+
+## Coordinator telemetry (D-050)
+
+The Mac-local job ledger at `.state/coordinator/jobs.sqlite` is **not** in
+this backup, and that was an accident rather than a decision. D-033 put it
+on the Mac deliberately, so routing survives Angel being detached; `.state/`
+is gitignored; and the restic source is pinned to the T7 root. The net
+effect was that the telemetry model certification (D-042) and the Phase 6
+"measure before upgrading hardware" rule both depend on existed in exactly
+one copy, on one internal SSD.
+
+The ledger stays where it is and stays authoritative. What changed is that a
+normalized, derived snapshot can be written into UUID-verified Angel
+`40-ai/evaluation/telemetry/`, which this repository already covers
+(`40-ai/model-cache/**` is the only exclusion, D-037):
+
+```bash
+python -m tools.report --days 30 --snapshot-dir /Volumes/Angel/40-ai/evaluation/telemetry
+```
+
+Properties worth knowing before relying on it:
+
+- **Derived, not state.** Losing every snapshot costs history, never
+  correctness. Nothing reads a snapshot back into the ledger, and it is not
+  a restore source.
+- **Aggregates only.** Job counts, dispositions, tiers, task classes,
+  verification coverage, tokens, timing, cost and energy estimates. Never
+  prompt or response text, which stays on the Mac under D-030/D-035.
+- **UUID-gated.** `tools.coordinator.snapshot.export_to_angel` goes through
+  the same `resolve_ai_storage` check as everything else and raises on an
+  absent, locked, read-only or uninitialised volume. It does not fall back
+  to the internal disk, because a local fallback would recreate the
+  single-copy problem it exists to close.
+- **Atomic.** Written via `mkstemp` + `os.replace`, so a concurrent backup
+  never captures a half-written file.

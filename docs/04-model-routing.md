@@ -126,13 +126,51 @@ The tracked evaluation corpus and normalized summary are review artifacts.
 Raw runs/transcripts are local runtime state or may be deliberately exported
 to UUID-verified Angel `40-ai/evaluation/`; they are never committed.
 
-`tools/router/router.py`'s `_candidates()` selects today by tier,
-capability, and context match only (`ModelRegistry.available(...)`); it has
-no certification concept yet. Routing by certified capability data rather
-than parameter count alone is the target architecture in
-`docs/19-model-evaluation.md` §3, not a claim about the current
-implementation. Prompts sent to any routed model follow the composition and
-versioning rules in `docs/20-prompt-management.md` once the registry
-described there exists; today's evaluation prompts
-(`tools/bench/harness.py`) are the un-versioned seed that architecture is
-meant to replace.
+### Routing gates (D-051, 2026-09-14)
+
+`tools/router/router.py` applies three gates in order, each failing closed
+and each writing a named ledger event:
+
+1. **Authorization** — work above `autonomous_risk_ceiling` does not run
+   without an explicit human authorization token, checked before any
+   provider is contacted. An unrecognised risk label ranks above every
+   known one, so a typo escalates to a human rather than downgrading to
+   `low`. This is `PRINCIPLES.md` §4 as a branch.
+2. **Privacy** — confidential/local-only never reaches a frontier provider,
+   under any combination of `preferred_execution` and `frontier_enabled`. A
+   frontier that was configured and refused is recorded with the rule that
+   refused it, not silently dropped.
+3. **Certification** — for a task class an ACB-v1 suite gates, only a
+   configuration holding a live certification that matches the runtime,
+   quantization, prompt version, and tool-schema version about to be used
+   is a candidate (`tools/models/certification.py`, D-042).
+
+`tools/models/task_classes.py` is the join these gates need: production task
+class → required capabilities → gating suite. An unknown task class is
+refused rather than defaulted, because defaulting would let a typo drop a
+certification requirement. `code_generation` is a real registry capability;
+it used to be aliased to `text_generation`, which meant any text model
+satisfied "this job needs code".
+
+One consequence is deliberate: **an unpinned prompt version cannot satisfy
+any certification**, so until the `docs/20-prompt-management.md` registry
+exists, certification-gated work escalates. That is what makes "a prompt
+change is a capability change" enforceable rather than advisory. Today's
+evaluation prompts (`tools/bench/harness.py`) remain the un-versioned seed
+that architecture is meant to replace.
+
+**Nothing is certified today.** `config/certifications.example.yaml` ships
+an empty list and a test keeps it empty until a suite exists, so the
+mechanism above currently selects nothing for gated classes and escalates
+instead. The decision matrix that proves the gates is
+`tests/test_autonomous_routing.py`; the operating modes it does and does not
+license are in `docs/21-autonomous-routing.md`.
+
+### Verification is three-state, not two (D-048)
+
+`verified` means a deterministic verifier ran and passed. "Nobody checked"
+is `completed_unverified` with `verifier_result = NULL` and disposition
+`unverified` — never folded into success. `python -m tools.report` reports
+`verified_success_rate` and `completion_rate` separately and gives
+per-task-class verification coverage, so an unmeasured task class shows
+coverage 0 rather than a perfect score.

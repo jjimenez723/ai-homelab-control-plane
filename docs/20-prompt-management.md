@@ -158,3 +158,27 @@ and canonical/production track split described above are not built by this
 pass. Existing evaluation prompts (`tools/bench/harness.py`) and production
 prompts (none currently exist outside the naming/evidence deterministic
 proposers, which are not model-backed yet) are unchanged.
+
+**Two things changed on 2026-09-14 that make the registry a blocker rather
+than a plan.**
+
+First, §4's "a prompt change is a capability change" is now mechanically
+enforced. A certification pins `prompt_version` and `tool_schema_version`,
+and `tools/router/router.py` refuses a candidate whose pinned versions
+differ from the ones about to be used — including when they are simply
+absent. **An unpinned prompt version cannot satisfy any certification**
+(D-051), so certified autonomous routing is impossible until this registry
+exists. That is deliberate: it is the shortest honest statement of why
+D-041 sits on Gate 2's critical path.
+
+Second, §6's overfitting rule was being broken by the project's own tooling.
+The A→E ablation drew all six of condition E's few-shot examples verbatim
+from the Legacy 20 — the frozen holdout — prompt and expected answer both.
+The recorded run happened to evaluate a disjoint subset, but the holdout had
+been spent as prompt-construction material regardless. `tools/bench/
+ablation.py` now refuses at run time when evaluated items appear in its own
+prompt material (D-049), and it distinguishes a *worked example*, which can
+leak, from the *closed label set*, which is the output contract. A future
+renderer should carry the same guard: telling a model which labels exist is
+not telling it which one applies, but showing it a solved instance of the
+item being scored is.

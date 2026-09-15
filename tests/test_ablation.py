@@ -1,5 +1,7 @@
 import unittest
+from unittest import mock
 
+from tools.bench import ablation
 from tools.bench.ablation import (
     CONDITIONS,
     DEFAULT_TASK_IDS,
@@ -15,9 +17,15 @@ _TASKS = {task.id: task for task in load_corpus()}
 
 
 class FakeAblationProvider:
-    """Duck-types tools.bench.ablation.OllamaAblationProvider without a network call."""
+    """Duck-types tools.models.ollama_local.OllamaTextProvider without a network call.
+
+    Including `sampling()`, which the real adapter now owns so that a run
+    record and the request it describes cannot disagree about temperature,
+    seed, or the output ceiling (D-049).
+    """
 
     name = "fake"
+    think = False
 
     def __init__(self, model="fake-v1", seed=42, num_ctx=4096, response="ok"):
         self.model = model
@@ -25,6 +33,11 @@ class FakeAblationProvider:
         self.num_ctx = num_ctx
         self.response = response
         self.calls: list[str] = []
+
+    def sampling(self, *, num_predict=None, context_tokens=None):
+        return {"num_ctx": self.num_ctx or context_tokens or 4096, "temperature": 0,
+                "num_predict": int(num_predict if num_predict is not None else 64),
+                "seed": self.seed}
 
     def generate(self, prompt, *, num_predict, timeout_seconds):
         self.calls.append(prompt)
@@ -132,3 +145,120 @@ class RunAblationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CanaryContaminationTests(unittest.TestCase):
+    """The frozen canary is never used to build the prompt that scores it.
+
+    docs/19 section 2.5 and docs/20 section 6 both say the holdout is never
+    used for prompt construction. The first version of this runner took all
+    six of its few-shot examples verbatim from the Legacy 20 -- prompt and
+    expected answer -- and relied on the caller choosing a disjoint subset.
+    These tests make the runner enforce it. See D-049.
+    """
+
+    def setUp(self):
+        self.tasks = {task.id: task for task in load_corpus()}
+
+    def test_the_shipped_examples_are_clean_for_the_whole_corpus(self):
+        ablation.assert_no_canary_contamination(tuple(self.tasks), self.tasks)
+
+    def test_the_default_subset_is_clean(self):
+        ablation.assert_no_canary_contamination(ablation.DEFAULT_TASK_IDS, self.tasks)
+
+    def test_no_shipped_example_restates_a_corpus_prompt(self):
+        corpus_prompts = {ablation._normalize(task.prompt) for task in self.tasks.values()}
+        for prompt, _answer in ablation.example_material():
+            with self.subTest(example=prompt[:50]):
+                self.assertNotIn(ablation._normalize(prompt), corpus_prompts)
+
+    def test_a_worked_example_taken_from_the_corpus_is_refused(self):
+        leaked = self.tasks["cls-02"]
+        with mock.patch.object(ablation, "_CLASSIFICATION_FEWSHOT",
+                               ((leaked.prompt, str(leaked.expected)),)):
+            with self.assertRaises(ablation.CanaryContamination):
+                ablation.assert_no_canary_contamination(("cls-02",), self.tasks)
+
+    def test_a_leaked_filename_answer_is_refused(self):
+        leaked = self.tasks["name-04"]
+        with mock.patch.object(ablation, "_FILENAME_FEWSHOT",
+                               (("Some unrelated request.", str(leaked.expected)),)):
+            with self.assertRaises(ablation.CanaryContamination):
+                ablation.assert_no_canary_contamination(("name-04",), self.tasks)
+
+    def test_a_closed_label_set_is_the_output_contract_not_a_leak(self):
+        """Every classification answer is in the taxonomy. That is the point.
+
+        Refusing on this would make condition C impossible to express, and
+        telling a model which ten labels exist is not telling it which one
+        applies.
+        """
+        contract = "\n".join(ablation.output_contract_material())
+        self.assertIn("invoice", contract)
+        ablation.assert_no_canary_contamination(("cls-01",), self.tasks)
+
+    def test_run_ablation_refuses_a_contaminated_task_list(self):
+        leaked = self.tasks["cls-02"]
+        with mock.patch.object(ablation, "_CLASSIFICATION_FEWSHOT",
+                               ((leaked.prompt, str(leaked.expected)),)):
+            with self.assertRaises(ablation.CanaryContamination):
+                ablation.run_ablation(FakeAblationProvider(), ("cls-02",), ("E",))
+
+
+class InjectedSpecQualityTests(unittest.TestCase):
+    """Condition C must not steer a model away from the graded answer."""
+
+    def setUp(self):
+        self.tasks = {task.id: task for task in load_corpus()}
+
+    def test_the_naming_spec_cites_no_source_path(self):
+        """`qwen2.5:0.5b` answered name-05 with `ingest-naming-policy.py`.
+
+        It was copying the citation the spec opened with. A spec describes
+        a contract; it does not hand the model a filename to echo.
+        """
+        self.assertNotIn("tools/", ablation._NAMING_SPEC)
+        self.assertNotIn(".py", ablation._NAMING_SPEC)
+
+    def test_the_naming_spec_does_not_contradict_the_graded_answers(self):
+        """The old spec demanded lower-case hyphen-separated stems.
+
+        Two of the five frozen answers (`2025-01-01_Acme_invoice.pdf`,
+        `2024_monthly-revenue.csv`) do not have that shape, so a model that
+        obeyed the spec exactly could not score. A spec that makes the
+        graded answer unreachable measures nothing.
+        """
+        spec = ablation._NAMING_SPEC.lower()
+        self.assertNotIn("lower-case", spec)
+        self.assertNotIn("hyphen, no repeated", spec)
+
+
+class TruncationCategoryTests(unittest.TestCase):
+    """A cut-off generation is a harness limit, not a wrong answer."""
+
+    def test_hitting_the_token_ceiling_is_categorised_as_truncation(self):
+        self.assertEqual(
+            ablation._failure_category(False, "exact", truncated=True), ablation.TRUNCATED_OUTPUT)
+
+    def test_a_scored_wrong_answer_is_still_a_verifier_reject(self):
+        self.assertEqual(ablation._failure_category(False, "exact", truncated=False), "verifier_reject")
+
+    def test_success_has_no_failure_category_even_at_the_ceiling(self):
+        self.assertIsNone(ablation._failure_category(True, "exact", truncated=True))
+
+    def test_a_run_at_the_ceiling_is_flagged_on_the_record(self):
+        class CeilingProvider(FakeAblationProvider):
+            def generate(self, prompt, *, num_predict, timeout_seconds):
+                value = super().generate(prompt, num_predict=num_predict, timeout_seconds=timeout_seconds)
+                value["output_tokens"] = num_predict
+                return value
+
+        task = next(task for task in load_corpus() if task.id == "cls-01")
+        result = ablation.run_condition(CeilingProvider(), task, "A")
+        self.assertTrue(result.truncated)
+        self.assertEqual(result.failure_category, ablation.TRUNCATED_OUTPUT)
+
+    def test_a_normal_length_run_is_not_flagged(self):
+        task = next(task for task in load_corpus() if task.id == "cls-01")
+        result = ablation.run_condition(FakeAblationProvider(), task, "A")
+        self.assertFalse(result.truncated)

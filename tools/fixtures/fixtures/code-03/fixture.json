@@ -1,13 +1,13 @@
 {
-  "version": 1,
+  "version": 2,
   "task_id": "code-03",
   "instructions": "task.md",
   "starter_files": ["solution.py"],
   "editable_files": ["solution.py"],
-  "hidden_test_files": ["test_chunker.py"],
-  "run_module": "test_chunker",
+  "probes": "probes.py",
   "limits": {
     "timeout_seconds": 10,
+    "total_timeout_seconds": 60,
     "cpu_seconds": 8,
     "max_output_bytes": 65536,
     "max_file_size_bytes": 1048576,

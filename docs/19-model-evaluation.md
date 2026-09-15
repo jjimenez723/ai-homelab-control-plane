@@ -452,7 +452,16 @@ infrastructure — the plumbing, not the judgment.
 Every non-success run/result should classify into one of: `verifier_reject`
 (deterministic oracle said no), `tool_failure`, `context_missing`,
 `capability_boundary` (task is genuinely outside what this configuration was
-certified for), `timeout`, `malformed_output`, `escalation_required`. This
+certified for), `timeout`, `malformed_output`, `truncated_output`,
+`escalation_required`.
+
+`truncated_output` was added by D-049 and is not a nicety. Without it, a
+generation that stopped because it hit `num_predict` has nowhere to go but
+`verifier_reject`, and a harness limit is then read back as "the model was
+wrong" — which is exactly what happened to 8 of §10's 50 runs. It is set
+whenever generation ends at the ceiling, before any other classification.
+
+This
 gives `tools/report` something more useful than a bare pass/fail rate, and
 gives orchestration-suite scoring (§2.3) a vocabulary for what "recovery"
 means.
@@ -580,6 +589,32 @@ this reason and changes nothing under `tools/models/`). Ollama/llama.cpp at
 runs or hardware; the seed is recorded for repeatability, not claimed as a
 proof of it.
 
+**Amendments from the 2026-09-14 review (D-049, D-047).** Three corrections
+apply to everything in §10 and are recorded here rather than by editing the
+measured numbers, which stand:
+
+1. **Condition E's few-shot examples were six verbatim Legacy-20 items**
+   (`cls-02`, `cls-06`, `cls-08`, `name-02`, `name-03`, `name-04`), prompt
+   *and* expected answer. The run below evaluated a disjoint subset, so its
+   results are uncontaminated — but the runner accepted arbitrary task ids,
+   so a later run on any of those six would have scored a model on a prompt
+   containing its own answer, and 30% of the frozen holdout had been spent
+   as prompt material against §2.5 and `docs/20` §6. The examples are now
+   written for the experiment, and `assert_no_canary_contamination` refuses
+   at run time rather than relying on the caller being careful.
+2. **Condition B is not the production prompt for code tasks.** It uses the
+   generic no-fixture contract even where a fixture bundle exists, so that C
+   can isolate the fixture spec's marginal value. That was always the
+   design; the condition label now says so.
+3. **The code fixtures' semantics changed on 2026-09-14** (D-047, the
+   verdict-integrity rebuild). `code-01` and `code-03` — the two that passed
+   — keep their contracts and gain randomised inputs; `code-04` gains a
+   probe for the `summarize` function its `task.md` always told the model to
+   preserve, which is precisely the failure §10.4 observed and the fixture
+   could not see. **§10.3's code-task numbers are therefore not a comparable
+   baseline for future runs.** Classification and filename tasks are
+   unaffected.
+
 ### 10.2 Models tested
 
 | Model | Result |
@@ -678,16 +713,34 @@ exhausted for a code task (largest observed `output_tokens` was 124 of 512).
   capability classes yet. This ablation cannot say whether trusted skills
   would help — it can only say Angel does not yet have one to test for
   routing/classification, semantic naming, or general Python coding.
-- **No augmentation level increased malformed output or distraction** for
+- ~~**No augmentation level increased malformed output or distraction** for
   this model — failures were uniformly wrong-but-well-formed answers
   (`verifier_reject`), never truncation, timeout, or unparseable text, even
-  at condition E's longest prompts.
-- **Filename tasks look immune to augmentation** in this run (0/25), which
-  corroborates §1.1's pre-existing "Weak" canary-fitness label for
-  `name-*` rather than contradicting it: the frozen single-accepted-string
-  verifier appears to be measuring exact-string reconstruction, not naming
-  quality, and no realistic amount of spec/example content closed that gap
-  for a 0.5B model. This is expected, not a new defect.
+  at condition E's longest prompts.~~ **Withdrawn 2026-09-14 (D-049).** This
+  read a label back as a fact. The runner had no truncation category, so
+  every cut-off generation was recorded as `verifier_reject`; the committed
+  artifact shows **8 of the 50 runs ended with `output_tokens` exactly at
+  the `num_predict` ceiling** — `cls-04/A`, `cls-09/A`, `name-01/A`,
+  `name-05/A`, `code-03/A`, `code-05/A`, `code-02/C`, `code-02/D`. Six are
+  condition A, whose bare prompt invites prose that the 64-token cap then
+  cuts, so **part of the measured A→B gain is output-budget compliance
+  rather than capability**. Timeouts and unparseable text were genuinely
+  absent; truncation was not.
+- ~~**Filename tasks look immune to augmentation** in this run (0/25)...~~
+  **Withdrawn 2026-09-14 (D-049).** The 0/25 is real but it is not evidence
+  about augmentation, because condition C's injected spec pointed away from
+  the graded answer. `_NAMING_SPEC` demanded a "lower-case,
+  hyphen-separated" stem; two of the five frozen answers
+  (`2025-01-01_Acme_invoice.pdf`, `2024_monthly-revenue.csv`) do not have
+  that shape, and `tools/ingest/naming/policy.py` — which the spec claimed
+  to restate — produces a third shape again (`sanitize_stem` preserves a
+  capitalised word and only collapses separator runs). A model obeying the
+  spec exactly could not score. The spec also opened with the literal path
+  `tools/ingest/naming/policy.py`, and the model's condition-C answer for
+  `name-05` was `ingest-naming-policy.py` — it copied the citation. §1.1's
+  "Weak" canary-fitness label for `name-*` stands on its own merits, and
+  D-046's decision to reject that verifier as naming-augmentation evidence
+  stands; this run simply does not add to it either way.
 - **Latency/cost**: all 50 runs completed in 33.7s wall time on CPU
   (Ollama, loopback); no run approached its timeout budget (60s
   classification/filename, 180s code). Cost is $0 — local inference has no
@@ -706,9 +759,31 @@ exhausted for a code task (largest observed `output_tokens` was 124 of 512).
 - For future SLM benchmarking passes (`PLAN.md` Phase 2's remaining
   bullets), use **at least condition-C-equivalent augmentation**
   (production prompt + task-specific spec/context) as the default, not a
-  bare instruction (A) or a generic production wrapper alone (B): both
-  measured strictly worse here and A/B-only benchmarking would
-  under-measure real capability.
+  bare instruction (A).
+
+  **Status downgraded 2026-09-14 (D-049): this is a conservative default,
+  not a measured finding.** Exact paired McNemar tests over §10.3's own
+  committed per-task results:
+
+  | comparison | tasks gained | tasks lost | exact two-sided p |
+  |---|---:|---:|---:|
+  | A→B | 1 | 0 | 1.000 |
+  | B→C | 3 | 0 | 0.250 |
+  | A→C | 4 | 0 | 0.125 |
+  | C→D | 0 | 0 | 1.000 |
+  | C→E | 1 | 0 | 1.000 |
+  | A→E | 5 | 0 | 0.0625 |
+
+  No pairwise comparison reaches conventional significance at N=10 with one
+  sample per cell. The direction is consistent and every discordant pair
+  favours more augmentation, which is why the default stands; but §10.4's
+  claim that the largest jump is **B→C specifically** rests on three
+  discordant tasks and cannot be separated from A→B. Condition C is adopted
+  because A is clearly inadequate and C is the safe side of an unresolved
+  question — not because C was measured to beat B.
+
+  Future suites require **k≥5 samples per item with reported confidence
+  intervals**. One sample per cell cannot support a locus claim.
 - **Do not yet claim a measured skills/reference-material policy** — no
   applicable skill existed to test, and only one reference-material change
   (few-shot classification examples) altered an outcome. Building the

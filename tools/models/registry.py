@@ -13,7 +13,15 @@ from typing import Any, Iterable
 import yaml
 
 
-CAPABILITIES = {"text_generation", "structured_output", "vision", "embeddings", "transcription"}
+CAPABILITIES = {
+    "text_generation", "structured_output", "vision", "embeddings", "transcription",
+    # Code generation is its own declared capability. It used to be an alias
+    # for text_generation, which meant "this job needs code" was satisfied by
+    # any text model -- parameter-count reasoning with a registry's manners.
+    # Declaring it is still only a claim about shape; `tools/models/
+    # certification.py` is what turns a claim into eligibility.
+    "code_generation",
+}
 # Public alias for callers that want to type-check capability names without
 # coupling themselves to the registry's internal set.
 Capability = str
@@ -37,7 +45,7 @@ class ModelSpec:
     output_price_per_million: float | None = None
 
     def supports(self, required: Iterable[str], *, context_tokens: int | None = None) -> bool:
-        aliases = {"text": "text_generation", "code": "text_generation"}
+        aliases = {"text": "text_generation", "code": "code_generation"}
         required = {aliases.get(value, value) for value in required}
         return required.issubset(self.capabilities) and (
             context_tokens is None or (self.context_length is not None and self.context_length >= context_tokens)

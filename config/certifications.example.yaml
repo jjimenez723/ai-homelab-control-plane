@@ -1,0 +1,50 @@
+# Measured model-role certifications (D-042, D-044).
+#
+# A certification is not a preference and not a capability claim: it is the
+# recorded result of a production-capability benchmark against one ACB-v1
+# suite, pinned to the exact configuration that was measured. The router
+# reads this file to answer "may this configuration be routed this task
+# class right now?" and escalates when the answer is no.
+#
+# Copy to config/certifications.yaml (gitignored, machine-specific) once a
+# suite exists and a benchmark has actually been run.
+#
+# THE CURRENT REAL STATE OF THIS PROJECT IS THE EMPTY LIST BELOW.
+# No ACB-v1 suite exists yet, so nothing is certified, so certification-gated
+# task classes (classification, routing, naming.semantic) escalate rather
+# than run. That is Gate 2 being RED, expressed as behaviour instead of as a
+# sentence in a document.
+
+version: 1
+
+certifications: []
+
+# The shape a real record takes, once there is one to record. Every field is
+# required; the loader refuses a record that omits its own evidence.
+#
+# certifications:
+#   - model: small-local                      # must match a config/models.yaml entry name
+#     task_class: classification              # must be a certifiable class (tools/models/task_classes.py)
+#     suite: acb-v1/routing-classification    # must be the suite that gates that class
+#     suite_version: "1"
+#     # The configuration this measurement is about. The router compares all
+#     # four against what it is about to run; any difference means the
+#     # certification does not apply and the job escalates. A prompt change
+#     # is a capability change (docs/20 section 4).
+#     runtime: ollama
+#     quantization: Q4_K_M
+#     prompt_id: classify.closed-taxonomy
+#     prompt_version: "1.0.0"
+#     tool_schema_version: "none"
+#     # Evidence. `status: active` is refused unless measured >= threshold.
+#     threshold: 0.90
+#     measured_pass_rate: 0.94
+#     measured_samples: 200                   # items x samples-per-item
+#     p95_latency_seconds: 1.8
+#     peak_rss_bytes: 1073741824
+#     evaluated_at: 2026-10-01
+#     expires_at: 2027-04-01                  # a measurement has a shelf life
+#     status: active                          # active | provisional | revoked
+#     known_failure_modes:
+#       - "confuses 'contract' and 'agreement' when the document is unsigned"
+#     notes: "ACB-v1 holdout split; condition-C-equivalent augmentation per D-046."

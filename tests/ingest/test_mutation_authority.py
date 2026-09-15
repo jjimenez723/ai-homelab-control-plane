@@ -99,6 +99,10 @@ PURE_MODULES = (
     "evidence/reading_order.py",
     "evidence/cache.py",
     "evidence/backends/null.py",
+    # The interpretation layer turns evidence into hypotheses (D-036). It is
+    # squarely on the path a model's output travels, so it belongs on this
+    # list rather than only under the whole-tree deletion guard below.
+    "interpretation/layer.py",
 )
 
 EVIDENCE = INGEST / "evidence"

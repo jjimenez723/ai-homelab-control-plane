@@ -6,7 +6,10 @@ from pathlib import Path
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures"
 
+SUPPORTED_MANIFEST_VERSION = 2
+
 _DEFAULT_TIMEOUT_SECONDS = 10.0
+_DEFAULT_TOTAL_TIMEOUT_SECONDS = 60.0
 _DEFAULT_CPU_SECONDS = 8
 _DEFAULT_MAX_OUTPUT_BYTES = 65536
 _DEFAULT_MAX_FILE_SIZE_BYTES = 1_048_576
@@ -18,21 +21,26 @@ class FixtureSpec:
     """A verifier-owned executable fixture bundle for one code task.
 
     ``starter_files``/``editable_files`` are what the model may see and
-    change. ``hidden_test_files`` are never shown to the model and are
-    copied into the disposable work directory only at execution time, after
-    the submission already exists.
+    change. ``probes_path`` points at the verifier-owned probe module whose
+    expected values never enter the sandbox at all (see
+    ``tools/fixtures/probes.py``); manifest version 2 replaced version 1's
+    ``hidden_test_files``, which were copied into the work directory
+    alongside the candidate and executed in its process.
+
+    ``timeout_seconds`` bounds one probe; ``total_timeout_seconds`` bounds
+    the whole fixture, so a submission cannot turn N probes into N times the
+    advertised budget.
     """
 
     task_id: str
     dir: Path
     instructions_path: Path
     starter_dir: Path
-    hidden_dir: Path
+    probes_path: Path
     starter_files: tuple[str, ...]
     editable_files: tuple[str, ...]
-    hidden_test_files: tuple[str, ...]
-    run_module: str
     timeout_seconds: float
+    total_timeout_seconds: float
     cpu_seconds: int
     max_output_bytes: int
     max_file_size_bytes: int
@@ -57,35 +65,35 @@ def load_fixture(task_id: str, *, root: Path = FIXTURES_ROOT) -> FixtureSpec:
         raise FileNotFoundError(f"no fixture bundle for task {task_id!r} at {manifest_path}")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("version") != 1:
-        raise ValueError(f"unsupported fixture manifest version for {task_id!r}")
+    if manifest.get("version") != SUPPORTED_MANIFEST_VERSION:
+        raise ValueError(
+            f"unsupported fixture manifest version for {task_id!r}: "
+            f"expected {SUPPORTED_MANIFEST_VERSION}, got {manifest.get('version')!r}"
+        )
     if manifest.get("task_id") != task_id:
         raise ValueError(f"fixture manifest task_id mismatch: expected {task_id!r}, got {manifest.get('task_id')!r}")
 
     starter_files = tuple(manifest.get("starter_files") or ())
     editable_files = tuple(manifest.get("editable_files") or ())
-    hidden_test_files = tuple(manifest.get("hidden_test_files") or ())
-    run_module = manifest.get("run_module")
-    if not starter_files or not editable_files or not hidden_test_files or not run_module:
+    probes_name = manifest.get("probes")
+    if not starter_files or not editable_files or not probes_name:
         raise ValueError(f"fixture manifest for {task_id!r} is missing required fields")
     if not set(editable_files) <= set(starter_files):
         raise ValueError(f"fixture manifest for {task_id!r}: editable_files must be a subset of starter_files")
 
     for name in starter_files:
         _require_relative(name, "starter_files")
-    for name in hidden_test_files:
-        _require_relative(name, "hidden_test_files")
+    _require_relative(str(probes_name), "probes")
 
     starter_dir = fixture_dir / "starter"
-    hidden_dir = fixture_dir / "hidden"
+    probes_path = fixture_dir / str(probes_name)
     instructions_path = fixture_dir / str(manifest.get("instructions", "task.md"))
 
     for name in starter_files:
         if not (starter_dir / name).is_file():
             raise FileNotFoundError(f"fixture {task_id!r} missing starter file {name!r}")
-    for name in hidden_test_files:
-        if not (hidden_dir / name).is_file():
-            raise FileNotFoundError(f"fixture {task_id!r} missing hidden test file {name!r}")
+    if not probes_path.is_file():
+        raise FileNotFoundError(f"fixture {task_id!r} missing probes module {probes_name!r}")
     if not instructions_path.is_file():
         raise FileNotFoundError(f"fixture {task_id!r} missing instructions file {instructions_path.name!r}")
 
@@ -95,12 +103,11 @@ def load_fixture(task_id: str, *, root: Path = FIXTURES_ROOT) -> FixtureSpec:
         dir=fixture_dir,
         instructions_path=instructions_path,
         starter_dir=starter_dir,
-        hidden_dir=hidden_dir,
+        probes_path=probes_path,
         starter_files=starter_files,
         editable_files=editable_files,
-        hidden_test_files=hidden_test_files,
-        run_module=str(run_module),
         timeout_seconds=float(limits.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS)),
+        total_timeout_seconds=float(limits.get("total_timeout_seconds", _DEFAULT_TOTAL_TIMEOUT_SECONDS)),
         cpu_seconds=int(limits.get("cpu_seconds", _DEFAULT_CPU_SECONDS)),
         max_output_bytes=int(limits.get("max_output_bytes", _DEFAULT_MAX_OUTPUT_BYTES)),
         max_file_size_bytes=int(limits.get("max_file_size_bytes", _DEFAULT_MAX_FILE_SIZE_BYTES)),

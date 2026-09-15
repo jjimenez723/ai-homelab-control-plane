@@ -1,6 +1,18 @@
+"""Execute a candidate code submission and decide the verdict outside its reach.
+
+The verdict is produced by comparing verifier-held expected values against
+observations reported by short-lived sandboxed processes. No comparison,
+assertion, or scoring logic ever runs in the same process as candidate
+code, and the expected values are never written into the disposable work
+directory. See ``tools/fixtures/probes.py`` for why (D-047) and
+``tools/fixtures/sandbox.py`` for what the isolation does and does not
+cover.
+"""
+
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import resource
 import shutil
@@ -9,12 +21,47 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .probes import (
+    ERROR_MARKER,
+    OBSERVATION_MARKER,
+    Probe,
+    build_probes,
+    observations_match,
+)
 from .sandbox import SANDBOX_EXEC, build_seatbelt_profile, sandbox_available
 from .spec import FixtureSpec, load_fixture
+
+DRIVER_SOURCE = Path(__file__).resolve().parent / "_probe_driver.py"
+DRIVER_NAME = "_angel_probe.py"
+PROBE_INPUT_NAME = "_angel_probe_input.py"
+
+# Candidate-side failures: the submission is what went wrong.
+CANDIDATE_FAILURE_STATUSES = frozenset({
+    "failed", "no-observation", "probe-error", "timeout", "cpu-limit-exceeded",
+})
+# Verifier-side or submission-shape problems: not evidence about capability.
+VERIFIER_FAILURE_STATUSES = frozenset({
+    "verifier-error", "sandbox-unavailable", "invalid-submission", "tamper-detected",
+})
+
+
+@dataclass(frozen=True)
+class ProbeOutcome:
+    """What one probe observed. Ordered evidence, never a bare boolean."""
+
+    probe_id: str
+    passed: bool
+    status: str
+    description: str
+    returncode: int | None
+    elapsed_seconds: float
+    observed_repr: str | None
+    expected_repr: str
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -22,11 +69,15 @@ class FixtureResult:
     """PASS/FAIL evidence for one code-fixture execution.
 
     ``status`` distinguishes *why* ``success`` is false: a candidate-code
-    failure (``failed``, ``timeout``, ``cpu-limit-exceeded``) is a different
-    kind of event from a verifier-side problem (``verifier-error``,
-    ``sandbox-unavailable``) or a submission-shape problem
-    (``invalid-submission``, ``tamper-detected``). Callers must not collapse
-    these into one boolean when reporting evidence.
+    failure (``failed``, ``no-observation``, ``probe-error``, ``timeout``,
+    ``cpu-limit-exceeded``) is a different kind of event from a
+    verifier-side problem (``verifier-error``, ``sandbox-unavailable``) or a
+    submission-shape problem (``invalid-submission``, ``tamper-detected``).
+    Callers must not collapse these into one boolean when reporting
+    evidence.
+
+    ``success`` is true only when every probe was observed *and* matched.
+    Absence of an observation is a failure, never a pass.
     """
 
     task_id: str
@@ -39,6 +90,10 @@ class FixtureResult:
     stdout_truncated: bool
     stderr_truncated: bool
     detail: str | None = None
+    probes_total: int = 0
+    probes_passed: int = 0
+    probe_seed: int | None = None
+    probes: tuple[ProbeOutcome, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -51,8 +106,9 @@ def _fail(task_id: str, status: str, started: float, detail: str, returncode: in
 def _minimal_env(workdir: str) -> dict[str, str]:
     """An explicit allowlist, never the harness's own ``os.environ``.
 
-    No ambient credential, token, or repository path reaches the candidate
-    process this way. See ``sandbox.py`` for the full rationale.
+    No ambient credential, token, or repository path reaches a probe
+    process this way. ``HOME`` is redirected for convenience; the Seatbelt
+    home-read denial in ``sandbox.py``, not this value, is the boundary.
     """
     return {
         "PATH": "/usr/bin:/bin",
@@ -70,19 +126,16 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _read_capped(path: Path, cap: int) -> tuple[str, bool]:
-    if not path.is_file():
-        return "", False
-    data = path.read_bytes()
-    truncated = len(data) > cap
-    return data[:cap].decode("utf-8", errors="replace"), truncated
+def _cap(text: str, cap: int) -> tuple[str, bool]:
+    data = text.encode("utf-8", errors="replace")
+    return data[:cap].decode("utf-8", errors="replace"), len(data) > cap
 
 
 def submission_from_model_output(output: Any, editable_files: tuple[str, ...]) -> dict[str, str] | None:
     """Extract a ``{filename: content}`` submission from raw model output.
 
     A model's own claim about its result (``tests_passed``, ``success``, and
-    similar fields) is never read here and never influences the verdict —
+    similar fields) is never read here and never influences the verdict --
     only actual code text does. Returns ``None`` for any shape that is not
     honestly a code submission (a bare boolean claim, a dict with no usable
     code field, non-string content, ...), which the caller must treat as an
@@ -109,15 +162,19 @@ def submission_from_model_output(output: Any, editable_files: tuple[str, ...]) -
     return {target: code}
 
 
-def evaluate_submission(task_id: str, submission: dict[str, str] | None, *, root: Path | None = None) -> FixtureResult:
-    """Run ``submission`` against the hidden tests for ``task_id``.
+def evaluate_submission(task_id: str, submission: dict[str, str] | None, *,
+                        root: Path | None = None, seed: int | None = None) -> FixtureResult:
+    """Run ``submission`` against the verifier-owned probes for ``task_id``.
 
     ``submission`` maps editable filenames to their full replacement
-    content. Returns a :class:`FixtureResult` that is always evidence —
-    every code path below returns rather than raises, and the top-level
-    ``except`` guarantees a ``verifier-error`` result instead of letting an
-    unexpected internal exception look like a candidate failure or, worse,
-    escape unhandled and be mistaken for something outside this evaluation.
+    content. ``seed`` pins the randomised probe inputs so a failing run can
+    be replayed exactly; omit it and a fresh seed is drawn and recorded.
+
+    Returns a :class:`FixtureResult` that is always evidence -- every code
+    path below returns rather than raises, and the top-level ``except``
+    guarantees a ``verifier-error`` result instead of letting an unexpected
+    internal exception look like a candidate failure or, worse, escape
+    unhandled and be mistaken for something outside this evaluation.
     """
     started = time.perf_counter()
 
@@ -136,7 +193,7 @@ def evaluate_submission(task_id: str, submission: dict[str, str] | None, *, root
         return _fail(task_id, "invalid-submission", started, "submission must be a non-empty dict of {filename: content}")
 
     allowed = set(spec.editable_files)
-    if set(submission) - allowed or set(submission) != allowed:
+    if set(submission) != allowed:
         return _fail(task_id, "invalid-submission", started, f"submission files must be exactly {sorted(allowed)}, got {sorted(submission)}")
 
     for name, content in submission.items():
@@ -145,44 +202,70 @@ def evaluate_submission(task_id: str, submission: dict[str, str] | None, *, root
         if len(content.encode("utf-8")) > spec.max_file_size_bytes:
             return _fail(task_id, "invalid-submission", started, f"submission file {name!r} exceeds {spec.max_file_size_bytes} byte limit")
 
+    try:
+        probes, probe_seed = build_probes(spec.probes_path, task_id, seed=seed)
+    except Exception as exc:
+        return _fail(task_id, "verifier-error", started, f"probe build error: {type(exc).__name__}: {exc}")
+
     if not sandbox_available():
         return _fail(task_id, "sandbox-unavailable", started, f"{SANDBOX_EXEC} not found; refusing to execute untrusted code unsandboxed")
 
     workdir = tempfile.mkdtemp(prefix=f"angel-fixture-{task_id}-")
     try:
-        return _run_in_sandbox(spec, submission, workdir, started)
+        return _run_probes(spec, submission, probes, probe_seed, workdir, started)
     except Exception as exc:
         return _fail(task_id, "verifier-error", started, f"{type(exc).__name__}: {exc}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _run_in_sandbox(spec: FixtureSpec, submission: dict[str, str], workdir: str, started: float) -> FixtureResult:
+def _parse_observation(stdout: str) -> tuple[str, Any]:
+    """Return ``(kind, payload)`` from a probe process's stdout.
+
+    ``kind`` is ``"observed"``, ``"error"``, or ``"absent"``. The last
+    well-formed marker wins, which is what an honest run produces; marker
+    ordering is not relied on as a security property (see
+    ``_probe_driver.py``).
+    """
+    kind, payload = "absent", None
+    for line in stdout.splitlines():
+        if line.startswith(OBSERVATION_MARKER):
+            try:
+                payload = json.loads(line[len(OBSERVATION_MARKER):])
+            except (TypeError, ValueError):
+                kind, payload = "error", "unparseable observation payload"
+            else:
+                kind = "observed"
+        elif line.startswith(ERROR_MARKER):
+            try:
+                payload = json.loads(line[len(ERROR_MARKER):])
+            except (TypeError, ValueError):
+                payload = "unparseable error payload"
+            kind = "error"
+    return kind, payload
+
+
+def _run_probes(spec: FixtureSpec, submission: dict[str, str], probes: list[Probe],
+                probe_seed: int, workdir: str, started: float) -> FixtureResult:
     real_workdir = os.path.realpath(workdir)
+    work = Path(real_workdir)
     task_id = spec.task_id
 
     for name in spec.starter_files:
-        shutil.copy2(spec.starter_dir / name, Path(real_workdir) / name)
+        shutil.copy2(spec.starter_dir / name, work / name)
     for name, content in submission.items():
-        (Path(real_workdir) / name).write_text(content, encoding="utf-8")
+        (work / name).write_text(content, encoding="utf-8")
 
-    # Hidden tests are copied in last, so they always win over any
-    # same-named file a submission tried to place — even though submission
-    # keys are already restricted to editable_files above, this ordering is
-    # a second, structural layer against a hidden test ever being shadowed.
-    hidden_sources = [spec.hidden_dir / name for name in spec.hidden_test_files]
-    hidden_targets = [Path(real_workdir) / name for name in spec.hidden_test_files]
-    before_hashes = [_sha256(p) for p in hidden_sources]
-    for src, dst in zip(hidden_sources, hidden_targets):
-        shutil.copy2(src, dst)
+    driver_path = work / DRIVER_NAME
+    shutil.copy2(DRIVER_SOURCE, driver_path)
+    driver_hash_before = _sha256(driver_path)
 
     python_bin = os.path.realpath(sys.executable)
-    profile_path = Path(real_workdir) / "_sandbox.sb"
+    profile_path = work / "_sandbox.sb"
     profile_path.write_text(build_seatbelt_profile(real_workdir, python_bin), encoding="utf-8")
+    profile_hash_before = _sha256(profile_path)
 
-    stdout_path = Path(real_workdir) / "_stdout.log"
-    stderr_path = Path(real_workdir) / "_stderr.log"
-
+    env = _minimal_env(real_workdir)
     cpu_seconds = int(spec.cpu_seconds)
     max_file_size_bytes = int(spec.max_file_size_bytes)
     max_processes = int(spec.max_processes)
@@ -194,52 +277,121 @@ def _run_in_sandbox(spec: FixtureSpec, submission: dict[str, str], workdir: str,
         try:
             resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
         except (ValueError, OSError):
-            pass  # best-effort defense-in-depth; exec restriction below is the primary guard
+            pass  # best-effort defense-in-depth; the exec restriction is the primary guard
 
-    cmd = [SANDBOX_EXEC, "-f", str(profile_path), python_bin, "-B", "-E", "-s", "-m", "unittest", spec.run_module, "-v"]
-    env = _minimal_env(real_workdir)
+    outcomes: list[ProbeOutcome] = []
+    transcript: list[str] = []
+    stderr_chunks: list[str] = []
+    last_returncode: int | None = None
+    deadline = time.perf_counter() + spec.total_timeout_seconds
+    budget_exhausted = False
 
-    timed_out = False
-    with open(stdout_path, "wb") as out_f, open(stderr_path, "wb") as err_f:
-        proc = subprocess.Popen(
-            cmd, cwd=real_workdir, env=env,
-            stdout=out_f, stderr=err_f,
-            preexec_fn=_preexec,
-        )
+    probe_input = work / PROBE_INPUT_NAME
+
+    for probe in probes:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            budget_exhausted = True
+            outcomes.append(ProbeOutcome(
+                probe.probe_id, False, "timeout", probe.description, None, 0.0, None,
+                repr(probe.expected), f"fixture budget of {spec.total_timeout_seconds}s exhausted before this probe ran",
+            ))
+            continue
+
+        # Only the probe currently running is ever present on disk, so
+        # candidate code cannot read ahead to the inputs of probes it has
+        # not been given yet.
+        probe_input.write_text(probe.source, encoding="utf-8")
+
+        cmd = [SANDBOX_EXEC, "-f", str(profile_path), python_bin, "-B", "-E", "-s",
+               DRIVER_NAME, PROBE_INPUT_NAME]
+        probe_started = time.perf_counter()
+        timed_out = False
+        # Pipes, not files in the work directory: a candidate can write to
+        # any path it is allowed to write, so an evidence log living inside
+        # the sandbox would be candidate-editable.
+        proc = subprocess.Popen(cmd, cwd=real_workdir, env=env, preexec_fn=_preexec,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            returncode = proc.wait(timeout=spec.timeout_seconds)
+            out_bytes, err_bytes = proc.communicate(timeout=min(spec.timeout_seconds, remaining))
         except subprocess.TimeoutExpired:
             timed_out = True
             try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
                 pass
             try:
-                returncode = proc.wait(timeout=5)
+                out_bytes, err_bytes = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                returncode = proc.wait(timeout=5)
+                out_bytes, err_bytes = proc.communicate(timeout=5)
+        finally:
+            probe_input.unlink(missing_ok=True)
 
-    elapsed = time.perf_counter() - started
-    stdout_text, stdout_trunc = _read_capped(stdout_path, spec.max_output_bytes)
-    stderr_text, stderr_trunc = _read_capped(stderr_path, spec.max_output_bytes)
+        elapsed = time.perf_counter() - probe_started
+        stdout_text = (out_bytes or b"").decode("utf-8", errors="replace")
+        stderr_text = (err_bytes or b"").decode("utf-8", errors="replace")
+        last_returncode = proc.returncode
+        transcript.append(f"--- probe {probe.probe_id} (rc={proc.returncode}, {elapsed:.3f}s) ---\n{stdout_text}")
+        if stderr_text.strip():
+            stderr_chunks.append(f"--- probe {probe.probe_id} ---\n{stderr_text}")
 
-    after_hashes = [_sha256(p) if p.is_file() else None for p in hidden_targets]
-    if after_hashes != before_hashes:
-        return FixtureResult(task_id, False, "tamper-detected", returncode, elapsed, stdout_text, stderr_text, stdout_trunc, stderr_trunc,
-                              "hidden test file content changed on disk during execution")
+        kind, payload = _parse_observation(stdout_text)
+        if timed_out:
+            status, detail, passed = "timeout", f"probe exceeded {spec.timeout_seconds}s", False
+        elif proc.returncode == -signal.SIGXCPU:
+            status, detail, passed = "cpu-limit-exceeded", f"probe exceeded {spec.cpu_seconds}s CPU", False
+        elif kind == "absent":
+            # The submission exited, crashed, or suppressed the driver
+            # before it could report. Silence is a failure.
+            status, detail, passed = "no-observation", "probe produced no observation", False
+        elif kind == "error":
+            status, detail, passed = "probe-error", str(payload)[:500], False
+        elif observations_match(payload, probe.expected):
+            status, detail, passed = "passed", None, True
+        else:
+            status, detail, passed = "failed", "observation did not match the expected value", False
 
-    if timed_out:
-        return FixtureResult(task_id, False, "timeout", returncode, elapsed, stdout_text, stderr_text, stdout_trunc, stderr_trunc,
-                              f"execution exceeded {spec.timeout_seconds}s wall-clock limit")
+        outcomes.append(ProbeOutcome(
+            probe.probe_id, passed, status, probe.description, proc.returncode, elapsed,
+            None if kind == "absent" else repr(payload), repr(probe.expected), detail,
+        ))
 
-    if returncode == -signal.SIGXCPU:
-        return FixtureResult(task_id, False, "cpu-limit-exceeded", returncode, elapsed, stdout_text, stderr_text, stdout_trunc, stderr_trunc,
-                              f"execution exceeded {spec.cpu_seconds}s CPU limit")
+    stdout_text, stdout_trunc = _cap("".join(transcript), spec.max_output_bytes)
+    stderr_text, stderr_trunc = _cap("".join(stderr_chunks), spec.max_output_bytes)
+    passed_count = sum(outcome.passed for outcome in outcomes)
 
-    if returncode == 0:
-        return FixtureResult(task_id, True, "passed", returncode, elapsed, stdout_text, stderr_text, stdout_trunc, stderr_trunc)
+    # The driver and the profile are verifier-owned and live inside a
+    # directory the candidate can write. If either changed, no observation
+    # from this run is trustworthy.
+    if _sha256(driver_path) != driver_hash_before or _sha256(profile_path) != profile_hash_before:
+        return FixtureResult(
+            task_id, False, "tamper-detected", last_returncode, time.perf_counter() - started,
+            stdout_text, stderr_text, stdout_trunc, stderr_trunc,
+            "verifier-owned driver or sandbox profile changed on disk during execution",
+            probes_total=len(probes), probes_passed=passed_count,
+            probe_seed=probe_seed, probes=tuple(outcomes),
+        )
 
-    return FixtureResult(task_id, False, "failed", returncode, elapsed, stdout_text, stderr_text, stdout_trunc, stderr_trunc,
-                          "hidden tests did not pass")
+    success = passed_count == len(probes) and len(probes) > 0
+
+    if success:
+        status, detail = "passed", None
+    else:
+        failures = [outcome for outcome in outcomes if not outcome.passed]
+        # The whole fixture takes the status of its first failure, so a
+        # timeout is never reported as a wrong answer.
+        status = failures[0].status if failures else "failed"
+        if budget_exhausted:
+            status = "timeout"
+        detail = (
+            f"{passed_count}/{len(probes)} probes passed; "
+            f"first failure: {failures[0].probe_id} ({failures[0].status})" if failures else None
+        )
+
+    return FixtureResult(
+        task_id, success, status, last_returncode, time.perf_counter() - started,
+        stdout_text, stderr_text, stdout_trunc, stderr_trunc, detail,
+        probes_total=len(probes), probes_passed=passed_count,
+        probe_seed=probe_seed, probes=tuple(outcomes),
+    )
