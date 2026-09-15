@@ -1,31 +1,24 @@
-# Gate-2 qualification campaign manifest (D-041, D-044, PLAN.md Phase 2).
+# Gate-2 validation bakeoff (D-041, D-044, D-053).
 #
-# This is a declarative description of *what* to measure -- it names no
-# machinery. `./scripts/angel-eval campaign --profile gate2` resolves this
-# file; `tools/campaign/manifest.py` validates it and
-# `tools/campaign/fingerprint.py` derives the exact-configuration identity
-# that makes two runs comparable or not.
-#
-# The candidate below is a placeholder pointing at a small model this repo
-# has already exercised (`docs/19-model-evaluation.md` section 10,
-# `qwen2.5:0.5b`) so the profile is runnable the moment a model is staged
-# locally -- add further `candidates` entries (qwen3.5:4b/9b, gpt-oss:20b,
-# ...) as they are explicitly staged (PLAN.md's storage-boundary rule,
-# D-034/D-037: this manifest never triggers a download itself). Running the
-# full campaign against this manifest as committed is NOT Gate-2
-# certification evidence by itself -- see docs/22-evaluation-campaign.md for
-# why a `report` is methodology, not a verdict, until real candidates are
-# staged and measured.
+# A real run may auto-pull ONLY these explicitly approved Ollama tags.
+# The runner resolves each local model's actual digest and quantization after
+# staging and includes them in the configuration fingerprint. This profile is
+# validation comparison evidence, not frozen-holdout certification evidence.
 
 version: 1
-campaign_id: gate2-qualification-001
+campaign_id: gate2-validation-001
 description: >
-  Gate-2 minimum per D-044: routing/classification and semantic-naming
-  production-capability measurement, validation split, k=5 samples/item.
+  Gate-2 validation bakeoff across the four local candidate families already
+  established by Phase-2 work. Memory-aware scheduler may run small candidates
+  concurrently when they fit; frozen-holdout campaigns are serialized.
 
 samples_per_item: 5
-timeout_seconds: 60
-concurrency: 1
+timeout_seconds: 120
+
+# Maximum simultaneous candidate batches. The scheduler also enforces its
+# conservative physical-memory budget, so this is a ceiling rather than a
+# promise that four models will be resident at once.
+concurrency: 4
 
 suites:
   - id: acb-v1/routing-classification
@@ -44,21 +37,44 @@ suites:
       max_provider_error_rate: 0.05
 
 candidates:
-  - name: qwen2.5-0.5b-q4km-ollama
+  - name: qwen2.5-0.5b-ollama
     model: qwen2.5:0.5b
     runtime: ollama
     endpoint: http://127.0.0.1:11434
-    quantization: Q4_K_M
     tool_schema_version: none
-    sampling:
+    sampling: &bounded_sampling
       temperature: 0
       seed: 42
       num_ctx: 4096
       num_predict: 64
-    prompts:
+    prompts: &gate2_prompts
       acb-v1/routing-classification:
         prompt_id: acb-v1-routing-classification
         prompt_version: "1.0.0"
       acb-v1/semantic-naming:
         prompt_id: acb-v1-semantic-naming
         prompt_version: "1.0.0"
+
+  - name: qwen3.5-4b-ollama
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    sampling: *bounded_sampling
+    prompts: *gate2_prompts
+
+  - name: qwen3.5-9b-ollama
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    sampling: *bounded_sampling
+    prompts: *gate2_prompts
+
+  - name: gpt-oss-20b-ollama
+    model: gpt-oss:20b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    sampling: *bounded_sampling
+    prompts: *gate2_prompts

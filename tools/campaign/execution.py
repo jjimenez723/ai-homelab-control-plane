@@ -46,13 +46,22 @@ def _work_unit_id(campaign_id: str, configuration_fp: str, suite_id: str, item_i
     return f"{campaign_id}:{configuration_fp}:{suite_id}:{item_id}:sample{sample_index}"
 
 
-def enumerate_work_units(manifest: CampaignManifest) -> list[WorkUnit]:
+def enumerate_work_units(manifest: CampaignManifest, *, candidates: tuple[Candidate, ...] | None = None) -> list[WorkUnit]:
+    """Enumerate work for the source manifest, optionally using runtime-resolved candidates.
+
+    Runtime resolution supplies exact model digest/quantization discovered from the
+    local provider after an approved model is staged. The source manifest fingerprint
+    remains the campaign identity; the per-work-unit configuration fingerprint uses
+    the resolved candidate, so a different model digest can never silently reuse an
+    earlier model's work-unit ids.
+    """
     manifest_fp = manifest.manifest_fingerprint()
     units: list[WorkUnit] = []
+    candidate_set = candidates if candidates is not None else manifest.candidates
     for spec in manifest.suites:
         definition = lookup_suite(spec.suite_id)
         items = definition.by_split(spec.split)
-        for candidate in manifest.candidates:
+        for candidate in candidate_set:
             config_fp = configuration_fingerprint(
                 candidate, suite_id=spec.suite_id, suite_version=definition.suite_version)
             for item in items:

@@ -35,11 +35,13 @@ this conversation, this session, or any AI agent present.
 * `config/campaigns/gate2.yaml` — the one shipped profile.
 * `scripts/angel-eval` — the thin wrapper (`python -m tools.campaign.cli`).
 
-Nothing in this pass has run a real campaign against a staged model. The
-committed manifest names `qwen2.5:0.5b` (already exercised in
-`docs/19-model-evaluation.md` section 10) as a placeholder candidate;
-running it requires that model to be staged locally first (this runner never
-downloads one itself -- see "Model installation boundary" below).
+Nothing in this pass has run the real Gate-2 campaign. The committed
+validation profile now names the four local candidates already established
+by Phase 2 history: `qwen2.5:0.5b`, `qwen3.5:4b`, `qwen3.5:9b`, and
+`gpt-oss:20b`. On a real run, a missing manifest-approved Ollama tag is
+pulled automatically through the loopback Ollama API, then its actual local
+digest and quantization are resolved and pinned into the work-unit
+configuration fingerprint. Dry-run remains zero-provider and zero-download.
 
 ## Command reference
 
@@ -48,9 +50,9 @@ downloads one itself -- see "Model installation boundary" below).
 # no provider contacted, safe to run at any time.
 ./scripts/angel-eval campaign --profile gate2 --dry-run
 
-# Run one item per (candidate, suite) pair against whatever is actually
-# reachable, to prove the harness works end to end. Never certification
-# evidence.
+# Run one item per (candidate, suite) pair. Missing manifest-approved
+# Ollama candidates are auto-pulled first unless --no-auto-pull is used.
+# Smoke output is never certification evidence.
 ./scripts/angel-eval campaign --profile gate2 --smoke
 
 # Run the full campaign. Checkpoints continuously (one durable JSONL line
@@ -70,7 +72,7 @@ downloads one itself -- see "Model installation boundary" below).
 # Regenerate JSON + Markdown reports from the raw append-only record store.
 # Reads only what is on disk; needs no model access and no memory of the
 # run that produced the records.
-./scripts/angel-eval report gate2-qualification-001
+./scripts/angel-eval report gate2-validation-001
 ```
 
 Exit codes: `0` success (or a completed run with no `--strict` violation),
@@ -205,26 +207,53 @@ role, not the suite oracles themselves (D-043: "Angel retains ownership of
 task definitions, deterministic truth, ... regardless of which harness runs
 the loop").
 
-## Model installation boundary
+## Model staging boundary
 
-`tools/campaign/runner.py::check_candidate_availability` calls each
-candidate provider's `available()` -- a loopback reachability/tag check
-(`OllamaLocalClient.available`, a `GET /api/tags`), never a pull. An
-unavailable candidate is skipped by default (recorded in the run summary)
-and the campaign continues with whatever is reachable; `--strict` instead
-fails the whole run. **`angel-eval` never downloads a model.** Staging a
-candidate is a separate, explicit, human-driven action outside this tool's
-scope (the same UUID-gated Angel/T7 storage boundary
-`docs/19-model-evaluation.md` section 10.2 already describes for
-`qwen3.5:4b`/`9b`/`gpt-oss:20b`).
+A real campaign stages only models explicitly named in its manifest. For
+Ollama candidates the runner first checks the exact local tag with
+`GET /api/tags`. If it is missing, the default behavior is to pull that
+approved tag through loopback Ollama (`POST /api/pull`); `--no-auto-pull`
+restores the old fail/skip behavior. The runner never searches for,
+recommends, or downloads an undeclared model.
 
-## Concurrency
+After staging, the runner resolves the actual local digest, quantization, and
+model size. Digest/quantization are injected into the per-suite configuration
+fingerprint before work-unit ids are built. The first successful resolution
+is also checkpointed under
+`.state/campaigns/<campaign_id>/resolved_candidates.json`. A later resume
+that sees a different digest or quantization under the same candidate name
+fails closed with manifest-drift semantics instead of mixing two weight
+identities in one campaign.
 
-`manifest.concurrency` (default `1`) bounds a `ThreadPoolExecutor`. This is
-a single-Mac evaluation campaign; there is no distributed scheduler, no
-message broker, and no plan to add one. Increasing concurrency risks
-resource contention against a local model server and is left to an operator
-who understands their own hardware -- the default stays conservative.
+Pulling still writes wherever the already-running Ollama service is
+configured to store model blobs. Angel does not bypass the existing
+Ollama/T7 storage configuration or write model files directly.
+
+## Resource-aware candidate concurrency
+
+`manifest.concurrency` is now the **maximum number of simultaneously active
+candidate batches**, not a request to run that many samples from one model
+at once. The shipped Gate-2 validation profile allows up to four candidates,
+but the runner admits them only while a conservative model-memory estimate
+fits inside 60% of physical RAM after subtracting unrelated models already
+resident in Ollama. The estimate is based on Ollama's staged model size plus
+headroom for runtime/context overhead. If the estimate is unavailable, the
+runner fails safe to serial candidate execution.
+
+Each admitted candidate runs its own items sequentially. When one finishes,
+it is explicitly unloaded and Ollama's running-model endpoint is polled
+until the unload is confirmed; only then is its memory budget released and
+another waiting candidate may be admitted. Manifest-approved candidate
+models that were already resident are cleared before scheduling to establish
+a known baseline; unrelated resident Ollama models are never unloaded and
+their memory is deducted from the campaign budget.
+
+Validation may therefore run several small models concurrently when they fit
+comfortably, while a large model naturally receives a slot by itself. A
+campaign containing any `frozen_holdout` suite is forced to one candidate
+at a time regardless of the manifest concurrency so final certification
+latency/reliability measurements are not contaminated by deliberate
+cross-model contention.
 
 ## Report contents
 
@@ -270,8 +299,9 @@ exactly this.
 
 ## What this document does not claim
 
-Gate 2 remains **RED**. This pass built and tested the machinery; it did not
-run the campaign against real candidate models, did not populate
+Gate 2 remains **RED**. The runner can now auto-stage the approved validation
+candidate set and schedule it without intentional memory overcommit, but no
+real measured campaign has been run and this pass did not populate
 `config/certifications.yaml`, and did not touch `config/certifications.
 example.yaml`'s empty-list invariant (`tests/test_autonomous_routing.py`
 still asserts it). The one command to start the real, unattended Gate-2
