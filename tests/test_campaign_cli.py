@@ -24,7 +24,7 @@ class DryRunCliTests(unittest.TestCase):
                 code = cli.main(["campaign", "--profile", "gate2", "--dry-run", "--state-root", tmp])
             self.assertEqual(code, 0)
             payload = json.loads(out.getvalue())
-            self.assertEqual(payload["campaign_id"], "gate2-qualification-001")
+            self.assertEqual(payload["campaign_id"], "gate2-validation-001")
             self.assertGreater(payload["total_work_units"], 0)
 
     def test_unknown_profile_exits_nonzero_not_a_traceback(self) -> None:
@@ -45,7 +45,7 @@ class ReportCliTests(unittest.TestCase):
 class CorruptStoreCliTests(unittest.TestCase):
     def test_corrupted_result_store_fails_the_campaign_command_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = result_store_path("gate2-qualification-001", root=Path(tmp))
+            path = result_store_path("gate2-validation-001", root=Path(tmp))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{not json\n", encoding="utf-8")
 
@@ -61,7 +61,7 @@ class CorruptStoreCliTests(unittest.TestCase):
 class ManifestDriftCliTests(unittest.TestCase):
     def test_changed_manifest_under_the_same_campaign_id_exits_nonzero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            fp_path = runner_mod.fingerprint_path("gate2-qualification-001", root=Path(tmp))
+            fp_path = runner_mod.fingerprint_path("gate2-validation-001", root=Path(tmp))
             fp_path.parent.mkdir(parents=True, exist_ok=True)
             fp_path.write_text("not-the-real-fingerprint", encoding="utf-8")
             code = cli.main(["campaign", "--profile", "gate2", "--dry-run", "--state-root", tmp])

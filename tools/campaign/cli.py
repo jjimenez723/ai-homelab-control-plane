@@ -47,6 +47,7 @@ def _cmd_campaign(args: argparse.Namespace) -> int:
             manifest, root=Path(args.state_root), resume=not args.no_resume,
             smoke=args.smoke, strict_candidates=args.strict, max_workers=args.workers,
             allow_manifest_change=args.allow_manifest_change,
+            auto_pull=not args.no_auto_pull,
         )
     except ManifestDrift as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -62,8 +63,13 @@ def _cmd_campaign(args: argparse.Namespace) -> int:
           f"{summary.skipped_already_done} already done, {summary.total_work_units} total work units")
     for status, count in sorted(summary.status_counts.items()):
         print(f"  {status}: {count}")
+    if summary.pulled_candidates:
+        print(f"  auto-pulled: {', '.join(summary.pulled_candidates)}")
     if summary.skipped_candidates:
-        print(f"  skipped (unavailable): {', '.join(summary.skipped_candidates)}")
+        print(f"  skipped (unavailable/lifecycle failure): {', '.join(summary.skipped_candidates)}")
+    if summary.memory_budget_bytes is not None:
+        gib = summary.memory_budget_bytes / (1024 ** 3)
+        print(f"  campaign model-memory budget: {gib:.1f} GiB; max parallel candidates: {summary.max_parallel_candidates}")
     infra_statuses = {"timeout", "provider_unavailable", "provider_error", "sandbox_error", "verifier_error"}
     had_infra_failure = any(summary.status_counts.get(s, 0) for s in infra_statuses)
     return 1 if had_infra_failure and args.strict else 0
@@ -108,7 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="fail rather than skip when a candidate model is unavailable, and exit "
                                "non-zero if any infrastructure failures occurred")
     campaign.add_argument("--workers", type=int, default=None,
-                          help="override the manifest's concurrency (default: manifest value, itself default 1)")
+                          help="override the manifest's maximum simultaneous candidate batches")
+    campaign.add_argument("--no-auto-pull", action="store_true",
+                          help="do not auto-pull missing manifest-approved Ollama candidates")
     campaign.add_argument("--allow-manifest-change", action="store_true",
                           help="acknowledge that this campaign_id's manifest changed since its last run")
     campaign.set_defaults(func=_cmd_campaign)

@@ -1,18 +1,36 @@
 """Tiny loopback-only Ollama HTTP client.
 
-This sits outside the evidence package on purpose: evidence has a strict
-no-network-import boundary.  The client only accepts already-bounded bytes
-and exposes no filesystem or command execution API.
+The client accepts only loopback HTTP endpoints and exposes no filesystem or
+command-execution API. Campaign staging may pull a model, but only because the
+caller supplied the exact manifest-approved tag; Ollama itself remains the
+owner of model-cache placement.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class OllamaModelRecord:
+    name: str
+    digest: str | None
+    size_bytes: int
+    quantization: str | None
+
+
+@dataclass(frozen=True)
+class OllamaRunningModel:
+    name: str
+    size_bytes: int
+    size_vram_bytes: int
 
 
 class OllamaLocalClient:
@@ -22,37 +40,154 @@ class OllamaLocalClient:
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("Ollama endpoint must be loopback-only HTTP")
 
+    def _json(self, path: str, *, payload: dict[str, Any] | None = None,
+              timeout_seconds: int = 30) -> dict[str, Any]:
+        data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint + path, data=data,
+            headers={"Content-Type": "application/json"} if data is not None else {},
+            method="POST" if data is not None else "GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=max(1, timeout_seconds)) as response:
+                if not 200 <= response.status < 300:
+                    raise ConnectionError(f"Ollama HTTP status {response.status}")
+                value = json.loads(response.read(4_000_000).decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read(16_384).decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                body = ""
+            raise ConnectionError(f"Ollama HTTP {exc.code}: {body or exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise TimeoutError("Ollama request timed out") from exc
+            raise ConnectionError(f"Ollama unavailable: {exc.reason}") from exc
+        if not isinstance(value, dict):
+            raise ValueError("Ollama response is not an object")
+        return value
+
     def available(self) -> bool:
         try:
-            with urllib.request.urlopen(self.endpoint + "/api/tags", timeout=1.5) as response:
-                return 200 <= response.status < 300
-        except (OSError, urllib.error.URLError):
+            self._json("/api/tags", timeout_seconds=2)
+            return True
+        except (ConnectionError, TimeoutError, ValueError):
             return False
 
+    def list_models(self) -> tuple[OllamaModelRecord, ...]:
+        outer = self._json("/api/tags", timeout_seconds=5)
+        raw_models = outer.get("models")
+        if not isinstance(raw_models, list):
+            raise ValueError("Ollama /api/tags response has no models list")
+        records: list[OllamaModelRecord] = []
+        for raw in raw_models:
+            if not isinstance(raw, dict):
+                continue
+            name = raw.get("name") or raw.get("model")
+            if not isinstance(name, str) or not name:
+                continue
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            records.append(OllamaModelRecord(
+                name=name,
+                digest=str(raw.get("digest")) if raw.get("digest") else None,
+                size_bytes=max(0, int(raw.get("size") or 0)),
+                quantization=(str(details.get("quantization_level"))
+                              if details.get("quantization_level") else None),
+            ))
+        return tuple(records)
+
+    def installed_model(self, model: str) -> OllamaModelRecord | None:
+        for record in self.list_models():
+            if record.name == model:
+                return record
+        return None
+
+    def pull_model(self, model: str) -> OllamaModelRecord:
+        """Pull one explicitly requested tag through Ollama, streaming progress.
+
+        There is intentionally no search/discovery here. The exact tag is a
+        caller-owned policy input (the campaign manifest).
+        """
+        payload = json.dumps({"model": model, "stream": True}, separators=(",", ":")).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint + "/api/pull", data=payload,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                if not 200 <= response.status < 300:
+                    raise ConnectionError(f"Ollama HTTP status {response.status}")
+                for raw_line in response:
+                    if not raw_line.strip():
+                        continue
+                    item = json.loads(raw_line.decode("utf-8"))
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("error"):
+                        raise ConnectionError(f"Ollama pull failed: {item['error']}")
+        except urllib.error.HTTPError as exc:
+            raise ConnectionError(f"Ollama pull HTTP {exc.code}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise TimeoutError("Ollama pull timed out waiting for progress") from exc
+            raise ConnectionError(f"Ollama unavailable during pull: {exc.reason}") from exc
+
+        record = self.installed_model(model)
+        if record is None:
+            raise RuntimeError(f"Ollama reported pull completion but {model!r} is not installed")
+        return record
+
+    def running_models(self) -> tuple[OllamaRunningModel, ...]:
+        outer = self._json("/api/ps", timeout_seconds=5)
+        raw_models = outer.get("models")
+        if not isinstance(raw_models, list):
+            raise ValueError("Ollama /api/ps response has no models list")
+        records: list[OllamaRunningModel] = []
+        for raw in raw_models:
+            if not isinstance(raw, dict):
+                continue
+            name = raw.get("name") or raw.get("model")
+            if not isinstance(name, str) or not name:
+                continue
+            records.append(OllamaRunningModel(
+                name=name,
+                size_bytes=max(0, int(raw.get("size") or 0)),
+                size_vram_bytes=max(0, int(raw.get("size_vram") or 0)),
+            ))
+        return tuple(records)
+
+    def is_loaded(self, model: str) -> bool:
+        return any(record.name == model for record in self.running_models())
+
+    def load_model(self, model: str, *, timeout_seconds: int = 600) -> None:
+        self._json("/api/generate", payload={
+            "model": model, "prompt": "", "stream": False, "keep_alive": -1,
+        }, timeout_seconds=timeout_seconds)
+        if not self.is_loaded(model):
+            raise RuntimeError(f"Ollama did not report {model!r} resident after preload")
+
+    def unload_model(self, model: str, *, timeout_seconds: int = 60) -> None:
+        if not self.is_loaded(model):
+            return
+        self._json("/api/generate", payload={
+            "model": model, "prompt": "", "stream": False, "keep_alive": 0,
+        }, timeout_seconds=timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if not self.is_loaded(model):
+                return
+            time.sleep(0.25)
+        raise RuntimeError(f"Ollama still reports {model!r} resident after unload timeout")
+
     def generate_json(self, *, model: str, prompt: str, png_bytes: bytes, timeout_seconds: int) -> dict[str, Any]:
-        payload = json.dumps({
+        payload = {
             "model": model,
             "prompt": prompt,
             "images": [base64.b64encode(png_bytes).decode("ascii")],
             "stream": False,
             "format": "json",
             "options": {"num_ctx": 4096, "temperature": 0},
-        }, separators=(",", ":")).encode("utf-8")
-        request = urllib.request.Request(
-            self.endpoint + "/api/generate", data=payload,
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=max(1, timeout_seconds)) as response:
-                if not 200 <= response.status < 300:
-                    raise ConnectionError(f"Ollama HTTP status {response.status}")
-                outer = json.loads(response.read(2_000_000).decode("utf-8"))
-        except urllib.error.URLError as exc:
-            if isinstance(exc.reason, TimeoutError):
-                raise TimeoutError("Ollama request timed out") from exc
-            raise ConnectionError(f"Ollama unavailable: {exc.reason}") from exc
-        if not isinstance(outer, dict):
-            raise ValueError("Ollama response is not an object")
+        }
+        outer = self._json("/api/generate", payload=payload, timeout_seconds=timeout_seconds)
         raw = outer.get("response")
         value = json.loads(raw) if isinstance(raw, str) else raw
         if not isinstance(value, dict):
@@ -62,28 +197,9 @@ class OllamaLocalClient:
 
 
 class OllamaTextProvider:
-    """The single loopback Ollama adapter used by the benchmark, the ablation, and the router.
-
-    There used to be two. This one hard-coded ``num_predict=64``, which
-    silently truncates any answer longer than a label, so the A->E ablation
-    grew a private near-copy of this class purely to raise that ceiling
-    (D-046). Two adapters with different sampling is exactly the
-    eval/production divergence `docs/20-prompt-management.md` section 4
-    exists to forbid: a score difference between them is unattributable
-    between the model and the harness.
-
-    Sampling is now per-instance configuration with an explicit default, so
-    a caller that needs 512 output tokens asks for 512 rather than forking
-    the client. ``think=False`` and ``temperature=0`` remain the defaults
-    for bounded structured work -- reasoning tokens otherwise consume the
-    output budget and contaminate an exact-match verifier -- and both are
-    runtime/sampling decisions, not prompt content (D-049).
-    """
+    """The single loopback Ollama adapter used by evaluation and routing."""
 
     name = "ollama"
-
-    # Enough for a label or a filename. Anything that returns code must say
-    # so; see `tools/bench/ablation.py`, which asks for 512.
     DEFAULT_NUM_PREDICT = 64
 
     def __init__(self, endpoint: str, model: str, *,
@@ -98,20 +214,44 @@ class OllamaTextProvider:
         self.seed = seed
         self.think = think
         self.temperature = temperature
+        self._managed_keep_alive: int | None = None
 
     @property
     def endpoint(self) -> str:
         return self.client.endpoint
 
     def available(self) -> bool:
-        return self.client.available()
+        """True only when the exact configured model tag is installed locally."""
+        try:
+            return self.client.installed_model(self.model) is not None
+        except (ConnectionError, TimeoutError, ValueError):
+            return False
+
+    def ensure_model(self, *, auto_pull: bool) -> tuple[OllamaModelRecord | None, bool]:
+        record = self.client.installed_model(self.model)
+        if record is not None:
+            return record, False
+        if not auto_pull:
+            return None, False
+        return self.client.pull_model(self.model), True
+
+    def running_models(self) -> tuple[OllamaRunningModel, ...]:
+        return self.client.running_models()
+
+    def is_loaded(self) -> bool:
+        return self.client.is_loaded(self.model)
+
+    def preload(self) -> None:
+        self.client.load_model(self.model)
+        self._managed_keep_alive = -1
+
+    def unload(self) -> None:
+        try:
+            self.client.unload_model(self.model)
+        finally:
+            self._managed_keep_alive = None
 
     def sampling(self, *, num_predict: int | None = None, context_tokens: int | None = None) -> dict[str, Any]:
-        """The exact sampling record for a call, for the run metadata.
-
-        Returned rather than assembled inline so an evaluation record and
-        the request it describes cannot drift apart.
-        """
         options: dict[str, Any] = {
             "num_ctx": self.num_ctx or context_tokens or 4096,
             "temperature": self.temperature,
@@ -124,28 +264,14 @@ class OllamaTextProvider:
     def generate(self, prompt: str, *, context_tokens: int | None = None, timeout_seconds: int | None = None,
                  num_predict: int | None = None, think: bool | None = None, **_unused: Any) -> dict[str, Any]:
         options = self.sampling(num_predict=num_predict, context_tokens=context_tokens)
-        payload = json.dumps(
-            {"model": self.model, "prompt": prompt, "stream": False,
-             "think": self.think if think is None else think, "options": options},
-            separators=(",", ":"),
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            self.client.endpoint + "/api/generate", data=payload,
-            headers={"Content-Type": "application/json"}, method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=max(1, timeout_seconds or 120)) as response:
-                if not 200 <= response.status < 300:
-                    raise ConnectionError(f"Ollama HTTP status {response.status}")
-                outer = json.loads(response.read(4_000_000).decode("utf-8"))
-        except urllib.error.URLError as exc:
-            # A transport failure is a runtime-unavailable event, not a
-            # capability result. Classifying it here keeps callers from
-            # recording "the model was wrong" when the model never ran.
-            if isinstance(exc.reason, TimeoutError):
-                raise TimeoutError("Ollama request timed out") from exc
-            raise ConnectionError(f"Ollama unavailable: {exc.reason}") from exc
-        if not isinstance(outer, dict):
-            raise ValueError("Ollama response is not an object")
+        body: dict[str, Any] = {
+            "model": self.model, "prompt": prompt, "stream": False,
+            "think": self.think if think is None else think, "options": options,
+        }
+        if self._managed_keep_alive is not None:
+            body["keep_alive"] = self._managed_keep_alive
+        outer = self.client._json(
+            "/api/generate", payload=body, timeout_seconds=max(1, timeout_seconds or 120))
         return {
             "output": str(outer.get("response", "")).strip(),
             "input_tokens": outer.get("prompt_eval_count"),
