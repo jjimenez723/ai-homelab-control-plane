@@ -110,13 +110,21 @@ asserts it stays empty until an ACB-v1 suite exists. Routing a
 certification-gated class therefore escalates rather than running. That is
 Gate 2 being RED expressed as behaviour instead of as a sentence.
 
-Three things are still required before attended-autonomous routing is
-useful rather than merely safe:
+Three things were required before attended-autonomous routing could be
+useful rather than merely safe. Two now exist:
 
-1. a versioned prompt registry (D-041), without which nothing can be pinned;
-2. the `routing/classification` and `semantic-naming` ACB-v1 suites, without
-   which nothing can be measured;
-3. at least one recorded certification from those suites.
+1. ~~a versioned prompt registry (D-041)~~ **done (D-052)**:
+   `tools/prompts/`, both Gate-2 prompts at `version: "1.0.0"`.
+2. ~~the `routing/classification` and `semantic-naming` ACB-v1 suites~~
+   **done (D-052)**: `tools/bench/acb_v1/`, `docs/19-model-evaluation.md`
+   §12.
+3. **still missing**: at least one recorded, measured certification from
+   those suites. `config/certifications.example.yaml` stays the empty list
+   the test above requires. The campaign machinery to produce that
+   measurement exists (`tools/campaign/`, `docs/22-evaluation-campaign.md`),
+   and has been validated with fakes and a `--smoke` pass against an
+   unreachable local model in this pass; it has not been run against a real,
+   staged candidate. Routing a certification-gated class still escalates.
 
 ## What it deliberately does not cover
 

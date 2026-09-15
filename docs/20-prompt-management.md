@@ -153,11 +153,40 @@ the resulting number is reported.
 
 ## 7. Scope of this document
 
-This document is architecture, not implementation. The registry, renderer,
-and canonical/production track split described above are not built by this
-pass. Existing evaluation prompts (`tools/bench/harness.py`) and production
-prompts (none currently exist outside the naming/evidence deterministic
-proposers, which are not model-backed yet) are unchanged.
+This document was architecture, not implementation, through 2026-09-14.
+**As of 2026-09-15 (D-052), the registry and renderer described in sections
+1-4 are implemented**: `tools/prompts/registry.py` (`PromptVersion`,
+`PromptRegistry`, immutability enforced by a recorded content fingerprint
+per version — `tests/test_prompt_registry.py::ImmutabilityTests`),
+`tools/prompts/renderer.py` (the policy -> role -> task/output-contract ->
+context-pack composition, deterministic: identical inputs render
+byte-identical text and SHA-256), `tools/prompts/adapters.py` (the Ollama
+runtime adapter, kept as a named seam separate from semantic content), and
+`tools/prompts/library.py` (the two Gate-2 prompts, `acb-v1-routing-
+classification` and `acb-v1-semantic-naming`, both `version: "1.0.0"`).
+
+`tools/prompts/production.py::render_for_task_class` is the one path both
+an ACB-v1 suite runner and a future production caller render through —
+proven identical by `tests/test_prompt_registry.py::SharedPathTests`, not
+merely asserted. There is still no production caller of
+`classification`/`routing`/`naming.semantic` (D-051), so this seam is
+currently exercised only by evaluation; it exists so a production caller,
+when built, has no reason to duplicate prompt construction.
+
+**The canonical/production track split (section 5) is not built.** Only one
+track exists today — the canonical one, a simple closed-label/property
+contract applied identically to every candidate, with no few-shot and no
+per-model tuning. A production-optimized track is future work once a
+production caller and real measured evidence exist to justify one.
+
+Existing evaluation prompts for the Legacy 20
+(`tools/bench/harness.py:benchmark_prompt()`) are **unchanged by this
+pass** — deliberately: D-040 keeps the Legacy 20 a frozen historical
+regression canary, and retrofitting its literal prompt text into the new
+registry was judged out of scope and unnecessary risk for this pass rather
+than a requirement this document makes. The registry's two prompts serve
+only the two new ACB-v1 suites (`docs/19-model-evaluation.md` §12,
+`docs/22-evaluation-campaign.md`).
 
 **Two things changed on 2026-09-14 that make the registry a blocker rather
 than a plan.**

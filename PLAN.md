@@ -124,9 +124,8 @@ which workload." D-039 through D-044 and `docs/19-model-evaluation.md` /
 - [x] 2026-09-12 Define ACB-v1 capability suites, coding language/framework metadata, the SLM research framing, and the failure taxonomy (D-039, `docs/19-model-evaluation.md` §2).
 - [x] 2026-09-12 Define production task classes (`code.implementation`, `code.refactor`, `code.debug`, `code.testing`, `code.orchestration`, `repo.documentation`, `ui.implementation`, `backend.firebase` reserved, classification/naming) mapped to ACB-v1 suites and to the router job contract's `task_class` field, so different classes may certify different models (D-039, `docs/19-model-evaluation.md` §8).
 - [x] 2026-09-12 Define the raw-model-baseline vs. production-capability-benchmark distinction and Angel's production execution unit (model + production prompt + spec/context + relevant trusted skills + approved libraries/reference material + tools + deterministic verifier); design (not run) the augmentation ablation experiment that measures whether that augmentation materially helps small models (D-044, `docs/19-model-evaluation.md` §9–§10).
-- [ ] Audit and independently cross-validate evaluator behavior: this pass re-read `tools/bench/harness.py`/`corpus.py` line-by-line against the docs and found them consistent; an actual second-implementation cross-check (Inspect AI probe, D-043) has not been run.
-- [ ] Build development/validation/holdout dataset splits for each ACB-v1 suite once suite tasks exist (D-040; no suite tasks exist yet beyond the Legacy 20).
-- [ ] Validate Inspect AI (or another selected evaluator substrate) against the Legacy 20 per D-043 before adopting it for anything beyond a probe.
+- [x] 2026-09-15 Audit and independently cross-validate evaluator behavior (D-043, D-052): `inspect_ai` is not importable in this repo's `.venv` and the venv has no `pip` to install it with — recorded as a compatibility finding in `tools/bench/cross_validation.py` rather than silently worked around or silently skipped. Per D-043's own fallback, built a from-scratch independent second implementation of both new ACB-v1 suites' oracles (sharing no code with `tools/bench/acb_v1/*` beyond the task data itself) and proved verdict agreement across representative and adversarial cases (`tests/test_cross_validation.py`). Does not migrate anything to Inspect AI; suite oracles remain authoritative.
+- [x] 2026-09-15 Build development/validation/holdout dataset splits for the two Gate-2 ACB-v1 suites (D-040, D-052): `acb-v1/routing-classification` (57 tasks, 15 scenarios, 19/19/19 split) and `acb-v1/semantic-naming` (42 tasks, 14 categories, 14/14/14 split), each with a run-time contamination guard (`tools/bench/suite.py::assert_no_holdout_leak`) refusing if holdout content appears in prompt material.
 - [x] 2026-09-12 Finish the D-038 trusted, verifier-owned code-fixture runner: `tools/fixtures/` executes `code-01`..`code-05` against hidden, verifier-owned tests inside a bounded macOS Seatbelt sandbox (network denied, writes confined to a disposable per-run directory, process-exec restricted to the interpreter binary, CPU/output/process-count limits, wall-clock timeout with process-group cleanup, hidden-test tamper detection); a model's own success claim is never read for the verdict (D-045, `tools/fixtures/`, `tests/test_fixture_runner.py`). Read-confidentiality of hidden tests against a host-savvy adversary is not enforced — documented precisely in `tools/fixtures/sandbox.py` rather than overclaimed. This does not itself turn Gate 2 green (D-044: Gate 2's required minimum is routing/classification and semantic naming, not coding); it unblocks the next two items.
 - [x] 2026-09-13 Run the augmentation ablation experiment (`docs/19-model-evaluation.md` §10, D-046): `qwen2.5:0.5b` only (`qwen3.5:4b`/`9b`, `gpt-oss:20b` blocked — not staged locally this pass; staging means a multi-GB Angel/T7 transfer this pass does not perform), 10 tasks × 5 conditions, `tools/bench/ablation.py`. Finding: condition C (production prompt + task-specific spec/context) is where most of the measured gain happens (0/10 → 1/10 → 4/10 pass rate across A→B→C); D added nothing because no applicable skill exists yet in `skills/` for these task classes; E fixed one more classification task via a closed label set/few-shot examples. Filename tasks (0/25) stayed unsolved at every condition, consistent with §1.1's existing "weak canary" caveat rather than a new defect. Does not change Gate 2 (still routing/classification + semantic naming per D-044) and does not certify `qwen2.5:0.5b` for any role.
 - [x] 2026-09-14 Rebuild the fixture runner so its verdict is not forgeable by the code it judges (D-047). D-045's runner ran verifier-owned `unittest` files in the candidate's own process and read the exit code as the verdict; `os._exit(0)` and a rebound `assertEqual` both scored `passed` on wrong code. Verifier-owned probes now hold their expected values in the parent process, each probe runs in its own short-lived sandboxed process, absence of an observation is a failure, inputs are randomised from a recorded seed, and the Seatbelt profile denies reads under the real home directory (`~/.ssh` was readable via `pwd.getpwuid`). `tools/fixtures/`, `tests/test_fixture_runner.py`.
@@ -134,6 +133,9 @@ which workload." D-039 through D-044 and `docs/19-model-evaluation.md` /
 - [x] 2026-09-14 Correct three D-046 methodology defects (D-049): condition E's few-shot examples were six verbatim Legacy-20 items (now replaced, with a run-time contamination guard); condition C's naming spec contradicted the graded answers and leaked its own file-path citation into a model answer (now rewritten); and 8 of 50 runs that hit the token ceiling were categorised as wrong answers (`truncated_output` is now a first-class failure category). The recorded A→E numbers stand; the filename sub-conclusion is withdrawn and the B-vs-C locus claim is downgraded to a conservative default.
 - [x] 2026-09-14 Build the attended-autonomous routing gates and their decision matrix (D-051, `docs/21-autonomous-routing.md`): authorization ceiling, privacy containment, certification eligibility, the `task_class` → capability → suite join (`tools/models/task_classes.py`), and the certification store (`tools/models/certification.py`). `config/certifications.example.yaml` ships empty and a test keeps it that way until a suite exists, so certification-gated work escalates. `tests/test_autonomous_routing.py`.
 - [x] 2026-09-14 Give the coordinator ledger a durable derived copy in UUID-verified Angel `40-ai/evaluation/telemetry/` (D-050). It was gitignored, outside the restic source, and therefore in no backup at all.
+- [x] 2026-09-15 Implement the D-041 versioned prompt registry (D-052): `tools/prompts/` (`registry.py`, `renderer.py`, `adapters.py`, `library.py`, `production.py`), immutability enforced by a recorded content-fingerprint lock per version, deterministic rendering proven byte-identical for identical inputs, and one shared render path (`render_for_task_class`) for both a suite runner and a future production caller (`tests/test_prompt_registry.py`, 23 tests). Two prompts exist so far, `acb-v1-routing-classification` and `acb-v1-semantic-naming`, both `version: "1.0.0"`; the Legacy-20 canary's own literal prompts are deliberately left untouched (D-040 freezes it).
+- [x] 2026-09-15 Build the autonomous evaluation-campaign runner (D-052, `docs/22-evaluation-campaign.md`): `tools/campaign/` + `./scripts/angel-eval`. Declarative manifest (`config/campaigns/gate2.yaml`); a configuration fingerprint over model/digest/quant/runtime/prompt-id-version/suite-version/tool-schema-version/sampling; work-unit identity `campaign + configuration fingerprint + suite + item + sample index`; an append-only JSONL result store that never rewrites a prior line; an 11-state status taxonomy separating verified outcomes from infrastructure failure (`timeout`/`provider_unavailable`/`provider_error`/`sandbox_error`/`verifier_error` are retried on resume, never counted against a candidate); `--dry-run` (pure enumeration, zero inference), `--smoke` (one item per candidate/suite pair), full unattended runs, and automatic resume with `ManifestDrift` refusing a changed manifest under the same `campaign_id`; Wilson-interval and exact-paired-sign-test statistics (`tools/campaign/statistics.py`); JSON+Markdown reports regenerated from disk alone, no model access or prior session needed. 73 tests across manifest/fingerprint/store/execution/runner/report/CLI. Never downloads a model — an unavailable candidate is skipped (or fails the run under `--strict`), and staging one stays a separate, explicit action.
+- [ ] Run the real Gate-2 campaign (`./scripts/angel-eval campaign --profile gate2`) against staged candidates and populate `config/certifications.yaml` from the result — not performed by this pass; see the two items above for what exists to run it with.
 - [ ] Benchmark real coding models against `code-01`..`code-05` using the trusted fixture runner (Phase 4/5 gate, not Gate 2) now that real execution evidence is possible. Note D-047 changed the fixtures' semantics, so D-046's code-task numbers are not a comparable baseline.
 - [ ] Benchmark SLM → small → capable → boundary-sized candidates **per task class** against ACB-v1 suites, using production-capability-benchmark configurations (D-044) rather than raw-model baselines (none run yet; no new model bakeoff is in scope for this documentation pass).
 - [ ] Certify model-role configurations (`model + quant + runtime + prompt_version + tool_schema_version + capability`) from production-capability-benchmark results (D-042, D-044).
@@ -141,45 +143,56 @@ which workload." D-039 through D-044 and `docs/19-model-evaluation.md` /
 - [~] Report capability/cost/latency/escalation evidence per suite/task class, extending `tools/report` beyond its current aggregate cost/latency/escalation view. **Partly done (D-048, 2026-09-14):** `quality_by_task_class` reports attempts, verified pass/fail, unverified count, verification coverage, and verified success rate per task class. What remains is per-*suite* reporting, which needs suites to exist.
 - [ ] Satisfy the revised Gate 2 below honestly — not by loosening it.
 
-**Gate 2 (revised 2026-09-12; clause status re-verified against code 2026-09-14): RED.**
+**Gate 2 (revised 2026-09-12; clause status re-verified against code 2026-09-15): RED.**
 
 Clause-by-clause, so "RED" says *which* parts are missing rather than only that something is:
 
 | # | Clause | Status |
 |---|---|---|
-| 1 | benchmark definitions are versioned | **partial** — `phase2_tasks.json` is versioned and validated; no ACB-v1 suite exists to version |
-| 2 | prompts are versioned | **no** — `benchmark_prompt()` is three unversioned literals; D-041 registry unbuilt. This now *blocks* certified routing by construction (D-051): an unpinned prompt version cannot satisfy any certification |
-| 3 | a frozen canary exists | **yes** — the Legacy 20. Its holdout value was degraded by D-046 using six of its items as prompt material; repaired by D-049 |
-| 4 | evaluator cross-validated against a second implementation | **no** — not started (D-043) |
-| 5 | routing/classification **and** semantic naming suites with measured production-capability results | **no** — zero ACB-v1 suite tasks exist. This is the bulk of the remaining work |
-| 6 | certifications with measured reliability/resource envelopes | **no** — the record type, loader, and expiry/pinning rules exist (D-051); `config/certifications.example.yaml` is empty because nothing has been measured |
+| 1 | benchmark definitions are versioned | **yes for the two Gate-2 suites** (D-052) — `phase2_tasks.json` (Legacy 20) plus `acb-v1/routing-classification` and `acb-v1/semantic-naming` (`tools/bench/acb_v1/`), all versioned |
+| 2 | prompts are versioned | **yes** (D-052) — `tools/prompts/`, two prompts at `version: "1.0.0"`, immutability-locked. The Legacy-20 canary's own literal prompts are deliberately left as they were (D-040) |
+| 3 | a frozen canary exists | **yes** — the Legacy 20. Its holdout value was degraded by D-046 using six of its items as prompt material; repaired by D-049. The two new suites each also carry their own `frozen_holdout` split (D-052) |
+| 4 | evaluator cross-validated against a second implementation | **partial** (D-052) — `inspect_ai` is not installable in this environment (no `pip` in the venv), recorded as evidence rather than worked around; a from-scratch independent second implementation of both suites' oracles agrees with the primary one on representative/adversarial cases (`tests/test_cross_validation.py`). Not a migration; suite oracles remain authoritative |
+| 5 | routing/classification **and** semantic naming suites with measured production-capability results | **suites exist, no measured results yet** (D-052) — 57 + 42 tasks with deterministic oracles and dev/validation/holdout splits; the campaign runner to produce measured results exists (`tools/campaign/`) but has not been run against a staged candidate |
+| 6 | certifications with measured reliability/resource envelopes | **no** — the record type, loader, and expiry/pinning rules exist (D-051), and the runner that would produce evidence for one exists (D-052); `config/certifications.example.yaml` is still empty because no campaign has actually been run |
 | 7 | router decisions consult certified capability data | **yes, mechanically** (D-051) — and it correctly selects nothing today |
 | 8 | unsupported work escalates correctly | **yes** — enforced and exhaustively tested (`tests/test_autonomous_routing.py`); still never exercised by a production caller |
-| 9 | reporting surfaces quality, cost, latency, escalation | **partial** (D-048) — per-task-class quality, verified vs. unverified separated, CLI fixed; per-*suite* reporting needs suites |
+| 9 | reporting surfaces quality, cost, latency, escalation | **partial** (D-048, D-052) — per-task-class quality, verified vs. unverified separated, CLI fixed; per-suite campaign reporting now exists (`tools/campaign/report.py`: Wilson CIs, latency, cost/resources, reliability, per-item consistency) but has no real run to report on yet |
 | 10 | models gain no unverified authority | **yes** — filesystem/naming/triage was already structurally enforced; the code-verification hole (D-047) and the telemetry hole (D-048) are now closed |
 
-The remaining critical path is clauses 2, 4, 5, 6 — in that order, because a
-suite cannot be certified against an unversioned prompt.
+Clauses 1, 2, and 3 are satisfied; clauses 4 and 9 are partially satisfied
+(machinery and cross-validation exist; no real measured run has used them
+yet); the remaining critical path is clauses 5 and 6 together — **running
+the actual campaign against a staged candidate and recording its result as
+a certification** — since both now have every prerequisite built and
+neither has been executed.
 
 Gate 2 passes when: benchmark
-definitions are versioned; prompts are versioned; a frozen canary exists
-(true today — the Legacy 20); evaluator correctness has been independently
-cross-validated against a second implementation (not done); the V0-required
-production roles have role-specific evaluation suites with measured
+definitions are versioned (true today for both Gate-2 suites); prompts are
+versioned (true today — D-052); a frozen canary exists (true today — the
+Legacy 20, plus each new suite's own holdout); evaluator correctness has
+been independently cross-validated against a second implementation (an
+independent implementation exists and agrees on representative cases,
+D-052 — not Inspect AI, which is not installable in this environment, a
+finding recorded rather than assumed); the V0-required production roles
+have role-specific evaluation suites with measured
 **production-capability-benchmark** results, per D-044 — a raw-model
 baseline is diagnostic information, never Gate 2 evidence, however good it
 looks — for Gate 2 specifically, that minimum is **routing/classification
 and semantic naming**, the two capabilities Phase 3's client/project/tag
 inference actually needs, not the full taxonomy in
 `docs/19-model-evaluation.md` §2.1 (tool-calling, coding, and orchestration
-suites gate Phase 4/5, not Phase 2); enabled model-role configurations have
-measured reliability/resource envelopes recorded as certifications; router
+suites gate Phase 4/5, not Phase 2) — **the suites and the runner to
+measure them exist (D-052); no measured result exists yet**; enabled
+model-role configurations have measured reliability/resource envelopes
+recorded as certifications (not yet — no campaign has been run); router
 decisions consult certified capability data rather than parameter count
 alone; unsupported work escalates correctly (true today, operationally, per
 D-033 and `tools/router/router.py`); reporting surfaces quality, cost,
 latency, and escalation (cost/latency/escalation are already reported;
-capability-specific quality is not yet); and models gain no unverified
-authority (true today, unconditionally — D-022, D-028, D-036, D-038). The
+capability-specific quality is per-task-class today and per-suite once a
+campaign runs, D-052); and models gain no unverified authority (true today,
+unconditionally — D-022, D-028, D-036, D-038). The
 original 2026-09-12 measurement (4/20, 4/20, 0/20) remains historical,
 raw-baseline-shaped evidence and does not by itself satisfy or block any
 clause above — a better-sounding architecture does not turn this gate

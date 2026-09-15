@@ -91,7 +91,8 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 18-phase-2-evaluation.md              # historical record: the Legacy 20 measurement run
 │   ├── 19-model-evaluation.md                # ACB-v1 capability suites + the Legacy 20 canary's role
 │   ├── 20-prompt-management.md               # prompt registry, composition layers, eval/production parity
-│   └── 21-autonomous-routing.md              # the gates and the test matrix for attended-autonomous runs
+│   ├── 21-autonomous-routing.md              # the gates and the test matrix for attended-autonomous runs
+│   └── 22-evaluation-campaign.md             # angel-eval: the unattended Gate-2 campaign runner
 ├── data/
 │   ├── video-learning-queue.yaml
 │   └── ui-library-registry.yaml
@@ -117,7 +118,10 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── models/            # registry (what exists) + task_classes (the join) + certification (what was measured)
 │   ├── coordinator/       # append-only job ledger + durable telemetry snapshots
 │   ├── report/            # read-only telemetry reporting; verified and unverified never merged
+│   ├── prompts/           # D-041 versioned prompt registry: library, renderer, adapters
 │   ├── bench/             # Legacy-20 harness + the A->E augmentation ablation
+│   │   └── acb_v1/        # routing-classification + semantic-naming suites (dev/validation/holdout)
+│   ├── campaign/          # angel-eval: manifest, fingerprint, runner, report, statistics
 │   ├── fixtures/          # verifier-owned code probes; the verdict lives outside the sandbox
 │   └── ingest/            # the `organize` CLI: ingestion + file intelligence
 │       ├── cli.py         # subcommands; every one defaults to a dry run
@@ -149,11 +153,13 @@ Version 0 should distribute **jobs**, not model tensors:
 ├── config/
 │   ├── ingest.example.yaml         # committed template; config/ingest.yaml is gitignored
 │   ├── models.example.yaml         # the provider/model registry
-│   └── certifications.example.yaml # measured role certifications; ships EMPTY until a suite exists
+│   ├── certifications.example.yaml # measured role certifications; ships EMPTY until a suite exists
+│   └── campaigns/gate2.yaml        # the Gate-2 campaign manifest angel-eval reads
 ├── "Organize Files.command"  # double-clickable launcher; calls the same CLI
 └── scripts/
     ├── bootstrap-t7.sh
     ├── organize                              # the ingestion / file-intelligence CLI
+    ├── angel-eval                             # dry-run / smoke / run / resume / report a campaign
     ├── learn-video
     ├── backup-t7  backup-t7-init  backup-t7-check  backup-t7-snapshots
     ├── backup-t7-retention  backup-t7-status  backup-t7-scheduled
@@ -274,6 +280,37 @@ answer table does not survive a second run, and the sandbox denies reads
 under the real home directory — `HOME` is redirected for convenience, but
 `pwd.getpwuid()` defeats that, so the Seatbelt profile is the actual
 boundary.
+
+## Evaluation campaigns: unattended, resumable, auditable
+
+`./scripts/angel-eval` runs an ACB-v1 capability campaign without an AI
+coding agent supervising it. A declarative manifest
+(`config/campaigns/gate2.yaml`) names suites, splits, candidates, and
+sample count; `tools/campaign/` fingerprints each evaluated configuration
+(model + digest + quant + runtime + prompt id/version + suite/version +
+tool-schema version + sampling), derives a stable work-unit id from
+`campaign + configuration fingerprint + suite + item + sample index`, and
+appends one durable JSONL record per finished attempt. Interrupting the
+process and re-running the identical command resumes: already-terminal
+work units (`verified_pass`/`verified_fail`/`truncated`/`invalid_output`/
+`unverified`) are skipped, infrastructure failures
+(`timeout`/`provider_unavailable`/`provider_error`/`sandbox_error`/
+`verifier_error`) are retried, and a changed manifest under the same
+`campaign_id` is refused rather than silently mixed with prior results.
+
+```bash
+./scripts/angel-eval campaign --profile gate2 --dry-run   # enumerate only; no inference
+./scripts/angel-eval campaign --profile gate2 --smoke     # one item/pair; proves the harness works
+./scripts/angel-eval campaign --profile gate2             # full run; checkpoints continuously
+./scripts/angel-eval report gate2-qualification-001       # regenerate JSON+Markdown from raw records
+```
+
+Reports carry Wilson confidence intervals, never a bare pass rate
+(`tools/campaign/statistics.py`) — see `docs/22-evaluation-campaign.md`.
+The two Gate-2 suites (`tools/bench/acb_v1/`) and the prompt registry
+(`tools/prompts/`, D-041) are the machinery this runs against; nothing in
+this repository has certified a model with it yet (`config/
+certifications.example.yaml` stays empty — Gate 2 is still **RED**).
 
 ## Immediate encrypted off-site backup
 

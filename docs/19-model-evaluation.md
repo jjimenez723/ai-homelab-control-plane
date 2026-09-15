@@ -820,14 +820,68 @@ are available.
 
 ## 11. Scope of this document
 
-This document is architecture and inventory, not implementation, with one
-exception: §10's augmentation ablation was run on 2026-09-13 (D-046) because
-it was explicitly the next scheduled experiment once D-045 unblocked it.
-This document still does not: download additional models beyond what §10.2
-already had locally, run a new bakeoff, implement the prompt registry
-(`docs/20-prompt-management.md`), implement Inspect AI, wire certification
-into the router, or build a Firebase capability subsystem. It does not
-loosen the Legacy 20's tasks, answers, or verifiers, and §10's results do
-not change Gate 2's status — see `PLAN.md` Phase 2 for the current gate
-wording, which remains **RED** (Gate 2's minimum is routing/classification
-and semantic naming per D-044, not the coding-heavy subset §10 measured).
+This document is architecture and inventory, not implementation, with two
+exceptions: §10's augmentation ablation was run on 2026-09-13 (D-046)
+because it was explicitly the next scheduled experiment once D-045 unblocked
+it, and §12 below records that the two Gate-2 ACB-v1 suites and the
+supporting campaign machinery were built on 2026-09-15 (D-052). This
+document still does not: download additional models beyond what §10.2
+already had locally, run the real campaign against a staged candidate, wire
+certification into the router, or build a Firebase capability subsystem. It
+does not loosen the Legacy 20's tasks, answers, or verifiers, and neither
+§10's nor §12's results change Gate 2's status — see `PLAN.md` Phase 2 for
+the current gate wording, which remains **RED**.
+
+## 12. ACB-v1 suites and the campaign runner exist (D-052, 2026-09-15)
+
+The two Gate-2 suites §2.1's table names as the required minimum (D-044) are
+implemented, each with `dev`/`validation`/`frozen_holdout` splits and a
+deterministic oracle (no LLM-as-judge, per §4):
+
+* `acb-v1/routing-classification` (`tools/bench/acb_v1/routing_
+  classification.py`) — 57 tasks across 15 scenarios (straightforward
+  routing, semantic paraphrase, ambiguous-but-resolvable, deterministic
+  work, model-assisted work, perception/OCR, semantic naming, structured
+  extraction, coding, orchestration, general generation, unsupported work,
+  escalation-required, adversarial-irrelevant, and prompt-injection-shaped
+  content), 19 tasks per split. The closed label set is the production
+  task-class taxonomy (`tools/models/task_classes.py`) plus `unsupported`
+  and `escalation_required`, so the suite and a future router share one
+  vocabulary rather than inventing a second.
+* `acb-v1/semantic-naming` (`tools/bench/acb_v1/semantic_naming.py`) — 42
+  tasks across 14 categories (invoices, receipts, contracts, screenshots,
+  photographs, spreadsheets, client documents, recordings, client media,
+  ambiguous assets, contradictory metadata, distracting text, prompt
+  injection, source-path leakage), 14 tasks per split. The oracle is
+  deterministic property verification layered on
+  `tools/ingest/naming/policy.py::validate_proposal` — the same function
+  production naming uses, not a second parallel implementation — so
+  multiple semantically valid filenames pass and a name is never rejected
+  merely for differing from one frozen string, which is exactly the defect
+  §1.1 documents in the Legacy-20 filename tasks.
+
+Both suites carry an explicit contamination guard
+(`tools/bench/suite.py::assert_no_holdout_leak`) that refuses if any
+`frozen_holdout` item's text appears in the prompt material used to build a
+suite's prompts, tested in both suites' test files.
+
+The prompt registry D-041 describes is implemented (`tools/prompts/`,
+D-052) and is the one path both suites and a future production caller
+render through (`tools/prompts/production.py::render_for_task_class`).
+
+The autonomous campaign runner (`tools/campaign/`, `./scripts/angel-eval`)
+that executes a suite against a set of candidate configurations,
+checkpointing and resuming without an AI agent supervising it, is
+documented in `docs/22-evaluation-campaign.md`.
+
+**None of this certifies a model.** No suite has been run against a staged
+candidate in this pass; `config/certifications.example.yaml` stays the
+empty list `tests/test_autonomous_routing.py` requires until a real,
+measured result exists. Gate 2 remains **RED** for exactly the reason
+`PLAN.md`'s clause table already gives: clauses 2 (prompts versioned) and 5
+(suites exist) move from "no" to "yes" as of D-052; clauses 4 (evaluator
+cross-validated) and 6 (measured certifications) do not — §6's Inspect AI
+compatibility finding and the independent-implementation fallback are
+recorded in `tools/bench/cross_validation.py` and `docs/22-evaluation-
+campaign.md`, and clause 6 waits on an actual campaign run against staged
+candidates, which this pass deliberately does not perform.

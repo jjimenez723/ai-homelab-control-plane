@@ -1,0 +1,64 @@
+# Gate-2 qualification campaign manifest (D-041, D-044, PLAN.md Phase 2).
+#
+# This is a declarative description of *what* to measure -- it names no
+# machinery. `./scripts/angel-eval campaign --profile gate2` resolves this
+# file; `tools/campaign/manifest.py` validates it and
+# `tools/campaign/fingerprint.py` derives the exact-configuration identity
+# that makes two runs comparable or not.
+#
+# The candidate below is a placeholder pointing at a small model this repo
+# has already exercised (`docs/19-model-evaluation.md` section 10,
+# `qwen2.5:0.5b`) so the profile is runnable the moment a model is staged
+# locally -- add further `candidates` entries (qwen3.5:4b/9b, gpt-oss:20b,
+# ...) as they are explicitly staged (PLAN.md's storage-boundary rule,
+# D-034/D-037: this manifest never triggers a download itself). Running the
+# full campaign against this manifest as committed is NOT Gate-2
+# certification evidence by itself -- see docs/22-evaluation-campaign.md for
+# why a `report` is methodology, not a verdict, until real candidates are
+# staged and measured.
+
+version: 1
+campaign_id: gate2-qualification-001
+description: >
+  Gate-2 minimum per D-044: routing/classification and semantic-naming
+  production-capability measurement, validation split, k=5 samples/item.
+
+samples_per_item: 5
+timeout_seconds: 60
+concurrency: 1
+
+suites:
+  - id: acb-v1/routing-classification
+    split: validation
+    threshold:
+      min_pass_rate: 0.80
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+  - id: acb-v1/semantic-naming
+    split: validation
+    threshold:
+      min_pass_rate: 0.75
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+
+candidates:
+  - name: qwen2.5-0.5b-q4km-ollama
+    model: qwen2.5:0.5b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    quantization: Q4_K_M
+    tool_schema_version: none
+    sampling:
+      temperature: 0
+      seed: 42
+      num_ctx: 4096
+      num_predict: 64
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.0.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.0.0"
