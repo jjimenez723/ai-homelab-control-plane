@@ -106,32 +106,36 @@ def _sample_timestamp(duration_seconds: float | None) -> float:
     return midpoint if midpoint > 0 else _DEFAULT_TIMESTAMP_SECONDS
 
 
-def extract_frame(
+def _sample_timestamps(duration_seconds: float | None, count: int) -> list[float]:
+    """`count` timestamps, evenly spaced strictly inside the video's duration.
+
+    Deliberately avoids the exact start (disproportionately likely to be a
+    black fade-in or title card) and the exact end (may already be past a
+    container's last decodable frame). With an unknown duration, falls back
+    to fixed one-second-apart offsets rather than refusing to sample at all.
+    """
+    count = max(1, count)
+    if not duration_seconds or duration_seconds <= 0:
+        return [_DEFAULT_TIMESTAMP_SECONDS * (index + 1) for index in range(count)]
+    return [duration_seconds * (index + 1) / (count + 1) for index in range(count)]
+
+
+def _extract_one_frame(
     path: Path,
     *,
+    timestamp_seconds: float,
     source_sha256: str,
-    duration_seconds: float | None,
+    page: int,
     timeout_seconds: int,
-    max_edge: int = MAX_FRAME_EDGE_PIXELS,
+    max_edge: int,
 ) -> tuple[RasterImage | None, tuple[EvidenceWarning, ...]]:
-    """One representative frame from `path`, as a `RasterImage`.
-
-    Never raises. A missing/broken ffmpeg, a timeout, or a video ffmpeg
-    cannot decode all degrade to `(None, warnings)`, mirroring every other
-    backend in this package.
-    """
-    if not available():
-        return None, (
-            EvidenceWarning(code=WARN_BACKEND_UNAVAILABLE, stage=_STAGE, detail="ffmpeg binary not found on PATH"),
-        )
-
-    timestamp_seconds = _sample_timestamp(duration_seconds)
+    """The actual ffmpeg invocation for one frame. Never raises."""
     scale_filter = (
         f"scale='min({max_edge},iw)':'min({max_edge},ih)':force_original_aspect_ratio=decrease"
     )
     command = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{timestamp_seconds:.3f}", "-i", str(path),
+        "-ss", f"{max(0.0, timestamp_seconds):.3f}", "-i", str(path),
         "-frames:v", "1", "-vf", scale_filter,
         "-f", "image2pipe", "-vcodec", "png", "-",
     ]
@@ -152,7 +156,7 @@ def extract_frame(
     if completed.returncode != 0 or not completed.stdout:
         stderr_lines = completed.stderr.decode("utf-8", "replace").strip().splitlines()
         detail = stderr_lines[-1] if stderr_lines else f"exit code {completed.returncode}"
-        return None, (EvidenceWarning(code=WARN_MALFORMED, stage=_STAGE, detail=f"ffmpeg produced no frame: {detail}"),)
+        return None, (EvidenceWarning(code=WARN_MALFORMED, stage=_STAGE, detail=f"ffmpeg produced no frame at {timestamp_seconds:.1f}s: {detail}"),)
 
     if len(completed.stdout) > MAX_FRAME_BYTES:
         return None, (
@@ -170,6 +174,66 @@ def extract_frame(
         )
 
     return (
-        RasterImage(png_bytes=completed.stdout, width=width, height=height, page=1, source_sha256=source_sha256),
+        RasterImage(png_bytes=completed.stdout, width=width, height=height, page=page, source_sha256=source_sha256),
         (),
     )
+
+
+def extract_frame(
+    path: Path,
+    *,
+    source_sha256: str,
+    duration_seconds: float | None,
+    timeout_seconds: int,
+    max_edge: int = MAX_FRAME_EDGE_PIXELS,
+) -> tuple[RasterImage | None, tuple[EvidenceWarning, ...]]:
+    """One representative (midpoint) frame from `path`, as a `RasterImage`.
+
+    Used for a quick preview thumbnail, independent of how many frames
+    `extract_frames` samples for vision/OCR. Never raises.
+    """
+    if not available():
+        return None, (
+            EvidenceWarning(code=WARN_BACKEND_UNAVAILABLE, stage=_STAGE, detail="ffmpeg binary not found on PATH"),
+        )
+    return _extract_one_frame(
+        path, timestamp_seconds=_sample_timestamp(duration_seconds), source_sha256=source_sha256,
+        page=1, timeout_seconds=timeout_seconds, max_edge=max_edge,
+    )
+
+
+def extract_frames(
+    path: Path,
+    *,
+    source_sha256: str,
+    count: int,
+    duration_seconds: float | None,
+    timeout_seconds: int,
+    max_edge: int = MAX_FRAME_EDGE_PIXELS,
+) -> tuple[list[RasterImage], tuple[EvidenceWarning, ...]]:
+    """`count` frames, evenly spaced across the video's duration, as `RasterImage`s.
+
+    `page` on each is its 1-based frame index in sampling order -- the same
+    field a multi-page PDF's pages carry, which is what lets this reuse
+    `extract.py`'s existing per-page OCR loop unchanged. One frame that
+    fails to extract is skipped, with its own warning, rather than aborting
+    every other frame -- the same degrade-per-page posture
+    `raster.py::rasterize_pdf_pages` already uses.
+    """
+    if not available():
+        return [], (
+            EvidenceWarning(code=WARN_BACKEND_UNAVAILABLE, stage=_STAGE, detail="ffmpeg binary not found on PATH"),
+        )
+
+    frames: list[RasterImage] = []
+    warnings: list[EvidenceWarning] = []
+    for index, timestamp in enumerate(_sample_timestamps(duration_seconds, count)):
+        frame, frame_warnings = _extract_one_frame(
+            path, timestamp_seconds=timestamp, source_sha256=source_sha256,
+            page=index + 1, timeout_seconds=timeout_seconds, max_edge=max_edge,
+        )
+        warnings.extend(frame_warnings)
+        if frame is not None:
+            frames.append(frame)
+
+    return frames, tuple(warnings)

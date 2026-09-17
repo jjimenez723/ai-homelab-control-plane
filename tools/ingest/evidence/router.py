@@ -141,14 +141,15 @@ def route_for(
             vision = True
             reason = "image of unknown origin: vision only"
     elif media_kind == MEDIA_VIDEO:
-        # One representative frame, described by the same vision backend an
-        # image gets. Never OCR: a sampled frame is evidence of the video's
-        # subject, not a text-bearing document, and text genuinely burned
-        # into a frame (e.g. a title card) is a job for a future dedicated
-        # rule, not a reason to run OCR on every video by default.
+        # Several sampled frames (config.vision.video_frame_count), each
+        # shown to both vision and OCR -- OCR as a deliberate fallback for
+        # text a vision model reads poorly or not at all (a slide, a title
+        # card, an on-screen caption), the same reasoning r6-screenshot
+        # already applies to a single screenshot image.
         rules.append("r14-video-frame")
         vision = True
-        reason = "video: vision on one representative sampled frame"
+        ocr = True
+        reason = "video: vision and OCR on several sampled frames"
     else:
         # MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_OTHER, and
         # anything this router does not otherwise recognise: opaque to

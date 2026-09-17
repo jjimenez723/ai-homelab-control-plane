@@ -100,6 +100,7 @@ from tools.ingest.evidence.types import (
     structure_evidence_to_json,
     visual_evidence_from_json,
     visual_evidence_to_json,
+    visual_frames_from_json,
 )
 from tools.ingest.identity import short_hash
 from tools.ingest.media.probe import MEDIA_DOCUMENT, MEDIA_IMAGE, MEDIA_VIDEO
@@ -148,6 +149,7 @@ def pipeline_version_for(config: EvidenceConfig) -> str:
             config.raster_max_pixels,
             config.max_text_chars,
             config.ocr.max_blocks,
+            config.vision.video_frame_count,
         )
     )
     return f"{EVIDENCE_PIPELINE_VERSION}-{short_hash(material)}"
@@ -222,9 +224,9 @@ def collect_evidence(
             config=config,
         )
 
-    visual: VisualEvidence | None = None
+    visual_frames: tuple[VisualEvidence, ...] = ()
     if route.vision:
-        visual = _vision_stage(
+        visual_frames = _vision_stage(
             source=source,
             facts=facts,
             config=config,
@@ -238,13 +240,16 @@ def collect_evidence(
         )
         # Vision has now actually looked at the pixels. If it says the image
         # is text-bearing, that outranks the filename-and-EXIF guess `route_for`
-        # had to make before anything was decoded.
-        route = router.refine_route(route, visual, config=config)
+        # had to make before anything was decoded. For a video, `route.ocr` is
+        # already True (r14-video-frame), so this is a no-op regardless of
+        # which sampled frame is checked.
+        route = router.refine_route(route, visual_frames[0] if visual_frames else None, config=config)
 
     ocr_blocks: tuple[OCRBlock, ...] = ()
     if route.ocr:
         ocr_blocks = _ocr_stage(
             source=source,
+            facts=facts,
             config=config,
             route_reason=route.reason,
             pipeline_version=pipeline_version,
@@ -263,7 +268,8 @@ def collect_evidence(
         route=route,
         native_text=native_text,
         ocr_blocks=ocr_blocks,
-        visual=visual,
+        visual=visual_frames[0] if visual_frames else None,
+        visual_frames=visual_frames,
         structure=structure,
         provenance=tuple(provenance),
         warnings=tuple(warnings),
@@ -372,7 +378,11 @@ def _vision_stage(
     now: str,
     warnings: list[EvidenceWarning],
     provenance: list[EvidenceProvenance],
-) -> VisualEvidence | None:
+) -> tuple[VisualEvidence, ...]:
+    """One `VisualEvidence` per image the backend is shown, in order --
+    always exactly one for a photo/screenshot, one per sampled frame for a
+    video (`_rasterize` is what decides how many, and is shared with
+    `_ocr_stage` so both stages see the same frames)."""
     backend = backend if backend is not None else build_vision_backend(config.vision)
     key = cache.CacheKey(
         content_sha256=source.sha256,
@@ -387,11 +397,13 @@ def _vision_stage(
     if cached is not None and cached.hit:
         warnings.extend(cached.warnings)
         payload = cached.payload or {}
-        visual = visual_evidence_from_json(payload["visual"]) if payload.get("visual") else None
+        frames = visual_frames_from_json(payload) if payload.get("frames") is not None else (
+            (visual_evidence_from_json(payload["visual"]),) if payload.get("visual") else ()
+        )
         provenance.append(
             _provenance(key, generated_at=cached.generated_at or now, cache_hit=True, status=cached.status)
         )
-        return visual
+        return frames
 
     if not _available(backend):
         stage_warnings = (
@@ -406,42 +418,60 @@ def _vision_stage(
         # Deliberately not cached. Availability is a property of the machine,
         # not of the bytes, and caching "absent" would mean installing the
         # backend never re-asks for files already scanned.
-        return None
+        return ()
 
-    image, raster_warnings = _raster_for_vision(source, config, facts=facts)
+    images, raster_warnings = _rasterize(source, config, facts=facts)
     warnings.extend(raster_warnings)
-    if image is None:
+    if not images:
         provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_FAILED))
-        return None
+        return ()
 
-    result = _call_backend(
-        lambda: backend.describe(image, timeout_seconds=config.vision.timeout_seconds),
-        stage=KIND_VISUAL,
-        name=backend.name,
-        empty=VisionResult(visual=None, status=STATUS_FAILED),
-    )
-    visual, coercions = _normalize_visual(result.visual, backend=backend)
-    stage_warnings = tuple(result.warnings) + coercions
-    warnings.extend(stage_warnings)
-    provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=result.status))
+    frames: list[VisualEvidence] = []
+    stage_warnings: list[EvidenceWarning] = []
+    status = STATUS_OK
+    for image in images:
+        result = _call_backend(
+            lambda image=image: backend.describe(image, timeout_seconds=config.vision.timeout_seconds),
+            stage=KIND_VISUAL,
+            name=backend.name,
+            empty=VisionResult(visual=None, status=STATUS_FAILED),
+        )
+        visual, coercions = _normalize_visual(result.visual, backend=backend)
+        stage_warnings.extend(result.warnings)
+        stage_warnings.extend(coercions)
+        if visual is not None:
+            frames.append(visual)
+        if result.status != STATUS_OK:
+            # One unreadable frame does not invalidate the rest of the video,
+            # but the file's evidence must not claim to be complete either --
+            # the same posture `_ocr_stage`'s per-page loop already takes.
+            status = STATUS_PARTIAL if frames else STATUS_FAILED
 
-    if ledger is not None and result.status != STATUS_UNAVAILABLE:
+    stage_warnings_tuple = tuple(stage_warnings)
+    warnings.extend(stage_warnings_tuple)
+    provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=status))
+
+    if ledger is not None and status != STATUS_UNAVAILABLE:
         _store(
             ledger,
             key,
-            payload={"visual": visual_evidence_to_json(visual) if visual is not None else None},
-            warnings=stage_warnings,
-            status=result.status,
+            payload={
+                "visual": visual_evidence_to_json(frames[0]) if frames else None,
+                "frames": [visual_evidence_to_json(frame) for frame in frames],
+            },
+            warnings=stage_warnings_tuple,
+            status=status,
             route_reason=route_reason,
             now=now,
             failures=warnings,
         )
-    return visual
+    return tuple(frames)
 
 
 def _ocr_stage(
     *,
     source: EvidenceSource,
+    facts: dict[str, Any],
     config: EvidenceConfig,
     route_reason: str,
     pipeline_version: str,
@@ -479,7 +509,7 @@ def _ocr_stage(
         provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_UNAVAILABLE))
         return ()  # not cached; see the same reasoning in `_vision_stage`
 
-    pages, raster_warnings = _rasterize(source, config)
+    pages, raster_warnings = _rasterize(source, config, facts=facts)
     warnings.extend(raster_warnings)
     if not pages:
         provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_FAILED))
@@ -548,8 +578,20 @@ def _ocr_stage(
 # -- rasterization ----------------------------------------------------------
 
 
-def _rasterize(source: EvidenceSource, config: EvidenceConfig) -> tuple[list[RasterImage], tuple[EvidenceWarning, ...]]:
-    """Pixels for OCR: every eligible page of a document, or the one image."""
+def _rasterize(
+    source: EvidenceSource, config: EvidenceConfig, *, facts: dict[str, Any]
+) -> tuple[list[RasterImage], tuple[EvidenceWarning, ...]]:
+    """Pixels for OCR and/or vision: every eligible page of a document, every
+    sampled frame of a video, or the one image.
+
+    Shared by both stages so a video's OCR pass and vision pass always see
+    the exact same sampled frames (one `ffmpeg` run per frame, not two) --
+    `page` on each `RasterImage` is its 1-based sampling order, which is
+    also what lets `_ocr_stage`'s existing per-page loop handle a video with
+    zero changes: it already treats "however many pages `_rasterize`
+    returned" as the unit of work, the way it already did for a multi-page
+    PDF.
+    """
     if source.media_kind == MEDIA_DOCUMENT:
         return rasterize_pdf_pages(
             source,
@@ -557,33 +599,16 @@ def _rasterize(source: EvidenceSource, config: EvidenceConfig) -> tuple[list[Ras
             max_pages=config.max_pages,
             max_pixels=config.raster_max_pixels,
         )
-    image, warnings = rasterize_image(source, max_pixels=config.raster_max_pixels)
-    return ([image] if image is not None else []), warnings
-
-
-def _raster_for_vision(
-    source: EvidenceSource, config: EvidenceConfig, *, facts: dict[str, Any]
-) -> tuple[RasterImage | None, tuple[EvidenceWarning, ...]]:
-    """Pixels for vision: one image, or one sampled video frame. A vision
-    backend describes a scene, and a multi-page document does not have one --
-    routing never asks for vision on a document, and this asserts that
-    rather than quietly describing page 1."""
     if source.media_kind == MEDIA_VIDEO:
-        return ffmpeg_video.extract_frame(
+        return ffmpeg_video.extract_frames(
             source.path,
             source_sha256=source.sha256,
+            count=config.vision.video_frame_count,
             duration_seconds=facts.get("duration_seconds"),
             timeout_seconds=config.vision.timeout_seconds,
         )
-    if source.media_kind != MEDIA_IMAGE:
-        return None, (
-            EvidenceWarning(
-                code=WARN_UNSUPPORTED,
-                stage=KIND_VISUAL,
-                detail=f"vision is only attempted for images and video, not {source.media_kind}",
-            ),
-        )
-    return rasterize_image(source, max_pixels=config.raster_max_pixels)
+    image, warnings = rasterize_image(source, max_pixels=config.raster_max_pixels)
+    return ([image] if image is not None else []), warnings
 
 
 # -- normalization ----------------------------------------------------------

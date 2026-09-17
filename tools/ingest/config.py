@@ -150,6 +150,7 @@ DEFAULTS: dict[str, Any] = {
             # no vision perception at all.
             "backend": "heuristic",
             "timeout_seconds": 30,
+            "video_frame_count": 5,
         },
     },
     "backup": {
@@ -298,6 +299,11 @@ class VisionConfig:
     model: str = "qwen3-vl:8b"
     max_image_bytes: int = 8_000_000
     max_prompt_chars: int = 4_000
+    # How many frames a video gets sampled into for vision/OCR (evenly spaced
+    # across its duration). The ROI knob: more frames catches a subject that
+    # only appears partway through a clip, at the cost of one backend call
+    # (and, if OCR is enabled, one OCR pass) per frame.
+    video_frame_count: int = 5
 
 
 @dataclass(frozen=True)
@@ -512,6 +518,7 @@ def load_config(path: Path | None = None) -> IngestConfig:
         model=str(vision_raw.get("model", "qwen3-vl:8b")),
         max_image_bytes=int(vision_raw.get("max_image_bytes", 8_000_000)),
         max_prompt_chars=int(vision_raw.get("max_prompt_chars", 4_000)),
+        video_frame_count=int(vision_raw.get("video_frame_count", 5)),
     )
     if not 1 <= vision.timeout_seconds <= 600:
         raise ValueError("evidence.vision.timeout_seconds must be between 1 and 600")
@@ -519,6 +526,8 @@ def load_config(path: Path | None = None) -> IngestConfig:
         raise ValueError("evidence.vision.max_image_bytes must be between 1 and 50000000")
     if not 100 <= vision.max_prompt_chars <= 100_000:
         raise ValueError("evidence.vision.max_prompt_chars must be between 100 and 100000")
+    if not 1 <= vision.video_frame_count <= 30:
+        raise ValueError("evidence.vision.video_frame_count must be between 1 and 30")
 
     evidence = EvidenceConfig(
         enabled=bool(evidence_raw["enabled"]),

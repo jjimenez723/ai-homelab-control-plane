@@ -115,6 +115,7 @@ class PipelineVersionFingerprintTests(unittest.TestCase):
             EvidenceConfig(raster_max_pixels=1_000_000),
             EvidenceConfig(max_text_chars=500),
             EvidenceConfig(ocr=OCRConfig(max_blocks=10)),
+            EvidenceConfig(vision=VisionConfig(video_frame_count=2)),
         )
         for variant in variants:
             with self.subTest(variant=variant):

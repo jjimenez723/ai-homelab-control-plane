@@ -111,21 +111,21 @@ class BuildTaskTextIncludesVisualDescriptionTests(unittest.TestCase):
     naming prompt -- perceiving it and then never telling the model about it
     would make the vision integration pointless."""
 
-    def test_visual_description_and_entities_appear_in_the_task_text(self):
+    def test_single_frame_visual_description_and_entities_appear_in_the_task_text(self):
         naming_evidence = NamingEvidence(
-            source_class="naming-lab", original_filename="IMG_clip.mp4", extension=".mp4",
-            size=2048, mime="video/mp4", media_kind="video",
+            source_class="naming-lab", original_filename="hawk.jpg", extension=".jpg",
+            size=2048, mime="image/jpeg", media_kind="image",
             name_quality="poor", name_quality_reason="machine-generated stem",
         )
-        route = EvidenceRoute(native_text=False, ocr=False, vision=True, reason="video: vision only", rules=("r14-video-frame",))
+        route = EvidenceRoute(native_text=False, ocr=False, vision=True, reason="image: vision only", rules=("r8-image-other",))
         visual = VisualEvidence(
             image_kind="ordinary_photo", description="a hawk perched on a wooden fence at dusk",
             entities=("hawk", "fence"), context="outdoor wildlife shot",
             confidence=0.8, backend="ollama", model="qwen3-vl:8b", model_version="1",
         )
         file_evidence = FileEvidence(
-            content_sha256="a" * 64, mime="video/mp4", media_kind="video",
-            facts={}, route=route, visual=visual,
+            content_sha256="a" * 64, mime="image/jpeg", media_kind="image",
+            facts={}, route=route, visual=visual, visual_frames=(visual,),
         )
         lab_evidence = LabEvidence(
             sha256="a" * 64, naming_evidence=naming_evidence, file_evidence=file_evidence,
@@ -135,6 +135,38 @@ class BuildTaskTextIncludesVisualDescriptionTests(unittest.TestCase):
         self.assertIn("a hawk perched on a wooden fence at dusk", text)
         self.assertIn("hawk, fence", text)
         self.assertIn("outdoor wildlife shot", text)
+
+    def test_multiple_video_frames_all_appear_in_the_task_text(self):
+        naming_evidence = NamingEvidence(
+            source_class="naming-lab", original_filename="IMG_clip.mp4", extension=".mp4",
+            size=2048, mime="video/mp4", media_kind="video",
+            name_quality="poor", name_quality_reason="machine-generated stem",
+        )
+        route = EvidenceRoute(
+            native_text=False, ocr=True, vision=True,
+            reason="video: vision and OCR on several sampled frames", rules=("r14-video-frame",),
+        )
+        frame_1 = VisualEvidence(
+            image_kind="ordinary_photo", description="a hawk perched on a fence",
+            entities=("hawk",), context="", confidence=0.8, backend="ollama", model="qwen3-vl:8b", model_version="1",
+        )
+        frame_2 = VisualEvidence(
+            image_kind="ordinary_photo", description="the hawk takes flight",
+            entities=("hawk", "sky"), context="", confidence=0.75, backend="ollama", model="qwen3-vl:8b", model_version="1",
+        )
+        file_evidence = FileEvidence(
+            content_sha256="a" * 64, mime="video/mp4", media_kind="video",
+            facts={}, route=route, visual=frame_1, visual_frames=(frame_1, frame_2),
+        )
+        lab_evidence = LabEvidence(
+            sha256="a" * 64, naming_evidence=naming_evidence, file_evidence=file_evidence,
+            semantic_date=None, document_date_candidates=(),
+        )
+        text = build_task_text(lab_evidence)
+        self.assertIn("2 sampled video frames", text)
+        self.assertIn("a hawk perched on a fence", text)
+        self.assertIn("the hawk takes flight", text)
+        self.assertIn("hawk, sky", text)
 
     def test_no_visual_evidence_omits_the_section_without_crashing(self):
         naming_evidence = NamingEvidence(

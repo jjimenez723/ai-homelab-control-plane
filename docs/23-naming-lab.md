@@ -269,18 +269,39 @@ records its `content_fingerprint` in `LOCKED_FINGERPRINTS`, and only then
 does a real evaluation run (a fresh validation corpus, not this Lab's
 development seeds) certify it.
 
-## Video: one sampled frame through the vision backend (D-055)
+## Video: several sampled frames through vision *and* OCR (D-055, D-056)
 
-A `.mp4`/`.mov`/etc. now routes to vision the same way an image does
-(`router.py`'s `r14-video-frame` rule): one representative frame — the
-midpoint of the video's duration, or 1s in if duration is unknown — is
-sampled via `tools/ingest/evidence/backends/ffmpeg_video.py` (the second
-module, alongside `backends/tesseract.py`, allowed to use `subprocess` in
-the evidence package; see D-055) and handed to whichever vision backend is
-selected, exactly like a photo. The Review screen shows that same sampled
-frame as the preview, and the resulting description/entities/context are
-both shown to the reviewer and included in the naming prompt's evidence
-text (`runner.py::build_task_text`).
+A `.mp4`/`.mov`/etc. routes to both vision and OCR (`router.py`'s
+`r14-video-frame` rule): `evidence.vision.video_frame_count` frames (5 by
+default), evenly spaced across the video's duration, are sampled via
+`tools/ingest/evidence/backends/ffmpeg_video.py::extract_frames` (the
+second module, alongside `backends/tesseract.py`, allowed to use
+`subprocess` in the evidence package; see D-055/D-056) and handed to both
+the vision backend and the OCR backend, one frame at a time. OCR-on-video
+is a deliberate fallback for text a vision model reads poorly or misses
+entirely — a slide, a title card, an on-screen caption — the same reasoning
+`r6-screenshot` already applies to a single screenshot image. `FileEvidence
+.visual_frames` carries one `VisualEvidence` per sampled frame (`.visual`
+stays the first one, for any existing caller that only ever looked at a
+single description); OCR text from every frame flows into the same
+`ocr_blocks`/`ocr_text` a scanned PDF's pages already use, `page` holding
+each frame's 1-based sampling order.
+
+**Frame count is the ROI knob** (spec: "the amount of frames taken should
+be a variable that can be edited to optimize the output"). It is
+`evidence.vision.video_frame_count` in `config/ingest.yaml` (default 5,
+valid range 1–30) for production callers, and a live "Video frames to
+sample" number input in the Lab's sidebar — changing it immediately
+re-samples and re-describes the currently displayed video. More frames
+catch a subject that only appears partway through a clip, at the cost of
+one vision call (and one OCR pass, if enabled) per additional frame.
+
+The Review screen shows the exact frames vision/OCR were given, as a small
+gallery (`preview.py::video_frames_preview_png` — re-samples the same
+deterministic timestamps for display, since `FileEvidence` itself never
+retains raw pixel bytes), and every frame's description/entities are both
+shown to the reviewer and included in the naming prompt's evidence text
+(`runner.py::build_task_text`).
 
 By default the Lab's sidebar "Vision backend" is `heuristic` — a real,
 offline, deterministic description (pixel/color statistics, no model), good
@@ -291,21 +312,21 @@ first (e.g. `ollama pull qwen3-vl:8b`, the default in
 `tools/ingest/config.py::VisionConfig.model`) — still loopback-only, still
 no cloud call.
 
-Only one frame is sampled today; a video where the subject changes
-significantly over its length will only be named from whatever moment that
-one frame lands on. Audio remains unperceived (no speech-to-text ships).
+Audio remains unperceived (no speech-to-text ships).
 
 ## Limitations, stated explicitly
 
-* Only one video frame is sampled per file (see above) — no multi-frame or
-  scene-change sampling yet.
+* No multi-frame *scene-change* sampling — frames are evenly spaced by
+  time, not chosen for visual difference, so a clip with a long static
+  opening and a short eventful ending spends frames unevenly relative to
+  what's actually interesting.
 * No speech-to-text or audio/video content-date extraction beyond whatever
   `ffprobe` container metadata (`media/probe.py`'s `capture_timestamp`)
   already exposes.
 * `hallucination` flags in `runner.py` are heuristic and best-effort —
   useful signal for a human reviewer, never a pass/fail gate.
-* Previews are intentionally modest: images, PDF first pages, and one
-  sampled video frame render; everything else shows metadata/evidence plus
-  a "reveal in Finder" action.
+* Previews are intentionally modest: images, PDF first pages, and sampled
+  video frames render; everything else shows metadata/evidence plus a
+  "reveal in Finder" action.
 * This Lab does not run, and must not be used to justify running,
   `gate2-validation-001` or any claim that Gate 2 is green.

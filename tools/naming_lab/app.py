@@ -29,7 +29,7 @@ from tools.naming_lab.preview import (
     pdf_first_page_png,
     reveal_in_finder,
     text_excerpt,
-    video_frame_preview_png,
+    video_frames_preview_png,
 )
 from tools.naming_lab.prompts_lab import PromptDraftStore, load_lab_registry, save_draft, starter_vnext_draft
 from tools.naming_lab.runner import run_candidate
@@ -62,13 +62,18 @@ def _scan_corpus(corpus: Path) -> list[Path]:
 
 
 @st.cache_data(show_spinner="Measuring file...")
-def _cached_lab_evidence(path_str: str, _mtime: float, ocr_backend: str, vision_backend: str) -> LabEvidence:
-    evidence_config = EvidenceConfig(ocr=OCRConfig(backend=ocr_backend), vision=VisionConfig(backend=vision_backend))
+def _cached_lab_evidence(
+    path_str: str, _mtime: float, ocr_backend: str, vision_backend: str, video_frame_count: int,
+) -> LabEvidence:
+    evidence_config = EvidenceConfig(
+        ocr=OCRConfig(backend=ocr_backend),
+        vision=VisionConfig(backend=vision_backend, video_frame_count=video_frame_count),
+    )
     return gather_lab_evidence(Path(path_str), evidence_config=evidence_config)
 
 
-def _lab_evidence_for(path: Path, ocr_backend: str, vision_backend: str) -> LabEvidence:
-    return _cached_lab_evidence(str(path), path.stat().st_mtime, ocr_backend, vision_backend)
+def _lab_evidence_for(path: Path, ocr_backend: str, vision_backend: str, video_frame_count: int) -> LabEvidence:
+    return _cached_lab_evidence(str(path), path.stat().st_mtime, ocr_backend, vision_backend, video_frame_count)
 
 
 def _seed_for(seed_store: SeedStore, path: Path, lab_evidence: LabEvidence) -> SeedRecord:
@@ -114,6 +119,16 @@ def main() -> None:
     st.sidebar.subheader("Evidence backends")
     ocr_backend = st.sidebar.selectbox("OCR backend", ["null", "tesseract"], index=0)
     vision_backend = st.sidebar.selectbox("Vision backend", ["null", "heuristic", "ollama"], index=1)
+    video_frame_count = st.sidebar.number_input(
+        "Video frames to sample", min_value=1, max_value=30,
+        value=EvidenceConfig().vision.video_frame_count, step=1,
+        help=(
+            "How many evenly-spaced frames a video gets split into for vision "
+            "and OCR. More frames catch a subject that only appears partway "
+            "through a clip, at the cost of one backend call (and one OCR pass, "
+            "if enabled) per frame -- tune this for your corpus's ROI."
+        ),
+    )
 
     registry = load_lab_registry(prompt_store)
     naming_prompts = [p for p in registry.all() if p.capability == NAMING_CAPABILITY]
@@ -134,7 +149,7 @@ def main() -> None:
             files=files, corpus=corpus, seed_store=seed_store, result_store=result_store,
             decision_store=decision_store, prompt_store=prompt_store, prompt_options=prompt_options,
             selected_prompt_keys=selected_prompt_keys, selected_models=selected_models,
-            ocr_backend=ocr_backend, vision_backend=vision_backend,
+            ocr_backend=ocr_backend, vision_backend=vision_backend, video_frame_count=int(video_frame_count),
         )
     else:
         _render_matrix(seed_store=seed_store, result_store=result_store)
@@ -142,7 +157,7 @@ def main() -> None:
 
 def _render_review(
     *, files, corpus, seed_store, result_store, decision_store, prompt_store,
-    prompt_options, selected_prompt_keys, selected_models, ocr_backend, vision_backend,
+    prompt_options, selected_prompt_keys, selected_models, ocr_backend, vision_backend, video_frame_count,
 ) -> None:
     if "file_index" not in st.session_state:
         st.session_state.file_index = 0
@@ -161,7 +176,7 @@ def _render_review(
     with nav_pos:
         st.write(f"File {st.session_state.file_index + 1} / {len(files)}: `{path.relative_to(corpus)}`")
 
-    lab_evidence = _lab_evidence_for(path, ocr_backend, vision_backend)
+    lab_evidence = _lab_evidence_for(path, ocr_backend, vision_backend, video_frame_count)
     seed = _seed_for(seed_store, path, lab_evidence)
 
     left, center, right = st.columns([2, 3, 2])
@@ -178,13 +193,15 @@ def _render_review(
             if png:
                 st.image(png)
         elif naming_evidence.media_kind == "video":
-            png = video_frame_preview_png(
+            frame_pngs = video_frames_preview_png(
                 path, sha256=lab_evidence.sha256, duration_seconds=naming_evidence.fact("duration_seconds"),
+                count=video_frame_count,
             )
-            if png:
-                st.image(png, caption="Sampled frame -- the same one the vision backend is shown")
+            if frame_pngs:
+                st.image(frame_pngs, caption=[f"frame {i + 1}" for i in range(len(frame_pngs))])
+                st.caption(f"{len(frame_pngs)} sampled frame(s) -- the same ones vision/OCR were shown")
             else:
-                st.caption("Could not sample a frame (ffmpeg not installed, or the video could not be read).")
+                st.caption("Could not sample any frames (ffmpeg not installed, or the video could not be read).")
         elif lab_evidence.combined_text:
             st.text(text_excerpt(lab_evidence.combined_text, max_chars=800))
         else:
@@ -214,12 +231,19 @@ def _render_review(
             st.caption("All document-date candidates found (best first):")
             for candidate in lab_evidence.document_date_candidates:
                 st.caption(f"- {candidate.kind}: {candidate.value} (confidence={candidate.confidence})")
-        if lab_evidence.visual is not None:
-            visual = lab_evidence.visual
-            st.caption(f"Vision ({visual.backend}/{visual.model}): {visual.image_kind}")
-            st.write(visual.description or "*(no description)*")
-            if visual.entities:
-                st.caption("Entities: " + ", ".join(visual.entities))
+        if lab_evidence.visual_frames:
+            frames = lab_evidence.visual_frames
+            first = frames[0]
+            st.caption(f"Vision ({first.backend}/{first.model}): {len(frames)} frame(s) described")
+            if len(frames) == 1:
+                st.write(first.description or "*(no description)*")
+                if first.entities:
+                    st.caption("Entities: " + ", ".join(first.entities))
+            else:
+                for index, visual in enumerate(frames, start=1):
+                    st.write(f"**Frame {index}** ({visual.image_kind}): {visual.description or '*(no description)*'}")
+                    if visual.entities:
+                        st.caption(f"Frame {index} entities: " + ", ".join(visual.entities))
         if lab_evidence.combined_text:
             with st.expander("Extracted text (native + OCR)"):
                 st.text(text_excerpt(lab_evidence.combined_text, max_chars=4000))
@@ -250,7 +274,7 @@ def _render_review(
             for target_path in target_paths:
                 target_evidence = (
                     lab_evidence if target_path == path
-                    else _lab_evidence_for(target_path, ocr_backend, vision_backend)
+                    else _lab_evidence_for(target_path, ocr_backend, vision_backend, video_frame_count)
                 )
                 target_seed = _seed_for(seed_store, target_path, target_evidence)
                 for prompt in prompts:

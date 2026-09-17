@@ -36,12 +36,30 @@ def pdf_first_page_png(
 
 
 def video_frame_preview_png(path: Path, *, sha256: str, duration_seconds: float | None) -> bytes | None:
-    """The same representative frame the vision backend would be shown --
-    lets a reviewer see exactly what the model saw, not a different frame."""
+    """A single representative (midpoint) frame -- a quick cover thumbnail,
+    independent of how many frames vision/OCR actually sampled."""
     raster, _warnings = ffmpeg_video.extract_frame(
         path, source_sha256=sha256, duration_seconds=duration_seconds, timeout_seconds=15,
     )
     return raster.png_bytes if raster else None
+
+
+def video_frames_preview_png(
+    path: Path, *, sha256: str, duration_seconds: float | None, count: int,
+) -> list[bytes]:
+    """The exact frames vision/OCR were shown, re-sampled for display.
+
+    `FileEvidence` never retains raw pixel bytes (only the derived
+    descriptions/OCR text), so showing a reviewer what the model actually
+    saw means re-running the same deterministic sampling -- cheap for a
+    handful of small frames, and guaranteed identical because
+    `ffmpeg_video.extract_frames` picks timestamps purely from
+    `duration_seconds` and `count`.
+    """
+    frames, _warnings = ffmpeg_video.extract_frames(
+        path, source_sha256=sha256, count=count, duration_seconds=duration_seconds, timeout_seconds=15,
+    )
+    return [frame.png_bytes for frame in frames]
 
 
 def text_excerpt(text: str, *, max_chars: int = 2000) -> str:

@@ -134,11 +134,20 @@ class RuleFiringTests(unittest.TestCase):
         self.assertEqual(route.rules, ("r9-opaque",))
         self.assertIn("unrecognised media kind", route.reason)
 
-    def test_r14_video_is_vision_only(self):
+    def test_r14_video_gets_vision_and_ocr_on_sampled_frames(self):
         route = _route(media_kind=MEDIA_VIDEO, extension=".mp4")
         self.assertEqual(route.rules, ("r14-video-frame",))
         self.assertTrue(route.vision)
-        self.assertFalse(route.ocr or route.native_text)
+        self.assertTrue(route.ocr)
+        self.assertFalse(route.native_text)
+
+    def test_r14_video_respects_ocr_disabled_independently_of_vision(self):
+        route = _route(
+            media_kind=MEDIA_VIDEO, extension=".mp4", config=EvidenceConfig(ocr=OCRConfig(enabled=False)),
+        )
+        self.assertEqual(route.rules, ("r14-video-frame", "r10-ocr-disabled"))
+        self.assertFalse(route.ocr)
+        self.assertTrue(route.vision)
 
     def test_r14_video_respects_vision_disabled(self):
         route = _route(

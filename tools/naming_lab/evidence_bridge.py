@@ -57,11 +57,23 @@ class LabEvidence:
     def visual(self) -> VisualEvidence | None:
         """The vision backend's description of the file, if any was run.
 
-        For a photo, screenshot, or (now) a sampled video frame -- the one
-        place a naming prompt or a human reviewer should look for "what does
-        this actually show," as opposed to `combined_text`'s OCR/native text.
+        For a photo, screenshot, or a sampled video frame -- the one place a
+        naming prompt or a human reviewer should look for "what does this
+        actually show," as opposed to `combined_text`'s OCR/native text. For
+        a video this is the *first* sampled frame's description; see
+        `visual_frames` for all of them.
         """
         return self.file_evidence.visual if self.file_evidence is not None else None
+
+    @property
+    def visual_frames(self) -> tuple[VisualEvidence, ...]:
+        """Every vision description the backend produced, in sampling order.
+
+        Length 1 for a photo/screenshot, one entry per sampled frame for a
+        video (`evidence.vision.video_frame_count` of them, fewer if some
+        frames failed to extract).
+        """
+        return self.file_evidence.visual_frames if self.file_evidence is not None else ()
 
 
 def gather_lab_evidence(

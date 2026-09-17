@@ -302,6 +302,13 @@ class FileEvidence:
     native_text: NativeText | None = None
     ocr_blocks: tuple[OCRBlock, ...] = ()
     visual: VisualEvidence | None = None
+    # One `VisualEvidence` per image the vision backend was actually shown,
+    # in sampling order -- `(visual,)` for a photo/screenshot (always
+    # length 1), one entry per sampled frame for a video. `visual` above
+    # always equals `visual_frames[0]` when either is present; it stays a
+    # separate field rather than being derived, so existing code reading
+    # only `.visual` keeps working unchanged.
+    visual_frames: tuple[VisualEvidence, ...] = ()
     structure: StructureEvidence | None = None
     provenance: tuple[EvidenceProvenance, ...] = ()
     warnings: tuple[EvidenceWarning, ...] = ()
@@ -523,6 +530,14 @@ def visual_evidence_from_json(data: dict[str, Any]) -> VisualEvidence:
         model=str(data["model"]),
         model_version=str(data["model_version"]),
     )
+
+
+def visual_frames_to_json(frames: tuple[VisualEvidence, ...]) -> dict[str, Any]:
+    return {"frames": [visual_evidence_to_json(frame) for frame in frames]}
+
+
+def visual_frames_from_json(data: dict[str, Any]) -> tuple[VisualEvidence, ...]:
+    return tuple(visual_evidence_from_json(frame) for frame in data.get("frames", []))
 
 
 def structure_evidence_to_json(structure: StructureEvidence) -> dict[str, Any]:
