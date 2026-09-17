@@ -29,6 +29,7 @@ from tools.naming_lab.preview import (
     pdf_first_page_png,
     reveal_in_finder,
     text_excerpt,
+    video_frame_preview_png,
 )
 from tools.naming_lab.prompts_lab import PromptDraftStore, load_lab_registry, save_draft, starter_vnext_draft
 from tools.naming_lab.runner import run_candidate
@@ -176,6 +177,14 @@ def _render_review(
             png = pdf_first_page_png(path, sha256=lab_evidence.sha256, size=naming_evidence.size)
             if png:
                 st.image(png)
+        elif naming_evidence.media_kind == "video":
+            png = video_frame_preview_png(
+                path, sha256=lab_evidence.sha256, duration_seconds=naming_evidence.fact("duration_seconds"),
+            )
+            if png:
+                st.image(png, caption="Sampled frame -- the same one the vision backend is shown")
+            else:
+                st.caption("Could not sample a frame (ffmpeg not installed, or the video could not be read).")
         elif lab_evidence.combined_text:
             st.text(text_excerpt(lab_evidence.combined_text, max_chars=800))
         else:
@@ -205,6 +214,12 @@ def _render_review(
             st.caption("All document-date candidates found (best first):")
             for candidate in lab_evidence.document_date_candidates:
                 st.caption(f"- {candidate.kind}: {candidate.value} (confidence={candidate.confidence})")
+        if lab_evidence.visual is not None:
+            visual = lab_evidence.visual
+            st.caption(f"Vision ({visual.backend}/{visual.model}): {visual.image_kind}")
+            st.write(visual.description or "*(no description)*")
+            if visual.entities:
+                st.caption("Entities: " + ", ".join(visual.entities))
         if lab_evidence.combined_text:
             with st.expander("Extracted text (native + OCR)"):
                 st.text(text_excerpt(lab_evidence.combined_text, max_chars=4000))

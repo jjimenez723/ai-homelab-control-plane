@@ -67,6 +67,7 @@ from tools.ingest.evidence.backends import (
     build_vision_backend,
     text_extractors,
 )
+from tools.ingest.evidence.backends import ffmpeg_video
 from tools.ingest.evidence.raster import rasterize_image, rasterize_pdf_pages
 from tools.ingest.evidence.reading_order import assign_reading_order
 from tools.ingest.evidence.types import (
@@ -101,7 +102,7 @@ from tools.ingest.evidence.types import (
     visual_evidence_to_json,
 )
 from tools.ingest.identity import short_hash
-from tools.ingest.media.probe import MEDIA_DOCUMENT, MEDIA_IMAGE
+from tools.ingest.media.probe import MEDIA_DOCUMENT, MEDIA_IMAGE, MEDIA_VIDEO
 
 KIND_NATIVE_TEXT = "native_text"
 KIND_OCR = "ocr"
@@ -225,6 +226,7 @@ def collect_evidence(
     if route.vision:
         visual = _vision_stage(
             source=source,
+            facts=facts,
             config=config,
             route_reason=route.reason,
             pipeline_version=pipeline_version,
@@ -361,6 +363,7 @@ def _native_text_stage(
 def _vision_stage(
     *,
     source: EvidenceSource,
+    facts: dict[str, Any],
     config: EvidenceConfig,
     route_reason: str,
     pipeline_version: str,
@@ -405,7 +408,7 @@ def _vision_stage(
         # backend never re-asks for files already scanned.
         return None
 
-    image, raster_warnings = _raster_for_vision(source, config)
+    image, raster_warnings = _raster_for_vision(source, config, facts=facts)
     warnings.extend(raster_warnings)
     if image is None:
         provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_FAILED))
@@ -559,17 +562,25 @@ def _rasterize(source: EvidenceSource, config: EvidenceConfig) -> tuple[list[Ras
 
 
 def _raster_for_vision(
-    source: EvidenceSource, config: EvidenceConfig
+    source: EvidenceSource, config: EvidenceConfig, *, facts: dict[str, Any]
 ) -> tuple[RasterImage | None, tuple[EvidenceWarning, ...]]:
-    """Pixels for vision: one image. A vision backend describes a scene, and
-    a multi-page document does not have one -- routing never asks for vision on
-    a document, and this asserts that rather than quietly describing page 1."""
+    """Pixels for vision: one image, or one sampled video frame. A vision
+    backend describes a scene, and a multi-page document does not have one --
+    routing never asks for vision on a document, and this asserts that
+    rather than quietly describing page 1."""
+    if source.media_kind == MEDIA_VIDEO:
+        return ffmpeg_video.extract_frame(
+            source.path,
+            source_sha256=source.sha256,
+            duration_seconds=facts.get("duration_seconds"),
+            timeout_seconds=config.vision.timeout_seconds,
+        )
     if source.media_kind != MEDIA_IMAGE:
         return None, (
             EvidenceWarning(
                 code=WARN_UNSUPPORTED,
                 stage=KIND_VISUAL,
-                detail=f"vision is only attempted for images, not {source.media_kind}",
+                detail=f"vision is only attempted for images and video, not {source.media_kind}",
             ),
         )
     return rasterize_image(source, max_pixels=config.raster_max_pixels)

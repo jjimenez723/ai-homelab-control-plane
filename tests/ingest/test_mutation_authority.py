@@ -120,6 +120,12 @@ EVIDENCE_SUBPROCESS_JUSTIFICATIONS = {
         "timeout, no shell, fed PNG bytes on stdin -- never a path, never a "
         "user-influenced argument."
     ),
+    "backends/ffmpeg_video.py": (
+        "The only offline video-frame sampler this project ships that needs "
+        "no Python package, only a system binary. Invoked with a fixed argv "
+        "and a hard timeout, no shell, no `-y` and no output path -- a "
+        "single PNG frame is read back on stdout, never written to disk."
+    ),
 }
 
 # Modules `tools.ingest.evidence` may never import, anywhere in the package:

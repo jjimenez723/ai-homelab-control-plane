@@ -7,9 +7,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from tools.ingest.evidence.router import EvidenceRoute
+from tools.ingest.evidence.types import FileEvidence, VisualEvidence
 from tools.naming_lab.dates import SemanticDateCandidate
 from tools.naming_lab.evidence_bridge import LabEvidence
-from tools.naming_lab.runner import run_candidate
+from tools.naming_lab.runner import build_task_text, run_candidate
 from tools.naming_lab.seeds import SeedRecord, new_seed
 from tools.ingest.naming.evidence import NamingEvidence
 from tools.prompts.library import SEMANTIC_NAMING_V1
@@ -102,6 +104,49 @@ class RunCandidateTests(unittest.TestCase):
         self.assertIsNotNone(result.end_to_end)
         self.assertNotEqual(result.raw_compliance.passed, True)  # wrong extension
         self.assertEqual(result.end_to_end.passed, True)  # deterministic normalization fixed it
+
+
+class BuildTaskTextIncludesVisualDescriptionTests(unittest.TestCase):
+    """A video's (or photo's) vision-backend description must reach the
+    naming prompt -- perceiving it and then never telling the model about it
+    would make the vision integration pointless."""
+
+    def test_visual_description_and_entities_appear_in_the_task_text(self):
+        naming_evidence = NamingEvidence(
+            source_class="naming-lab", original_filename="IMG_clip.mp4", extension=".mp4",
+            size=2048, mime="video/mp4", media_kind="video",
+            name_quality="poor", name_quality_reason="machine-generated stem",
+        )
+        route = EvidenceRoute(native_text=False, ocr=False, vision=True, reason="video: vision only", rules=("r14-video-frame",))
+        visual = VisualEvidence(
+            image_kind="ordinary_photo", description="a hawk perched on a wooden fence at dusk",
+            entities=("hawk", "fence"), context="outdoor wildlife shot",
+            confidence=0.8, backend="ollama", model="qwen3-vl:8b", model_version="1",
+        )
+        file_evidence = FileEvidence(
+            content_sha256="a" * 64, mime="video/mp4", media_kind="video",
+            facts={}, route=route, visual=visual,
+        )
+        lab_evidence = LabEvidence(
+            sha256="a" * 64, naming_evidence=naming_evidence, file_evidence=file_evidence,
+            semantic_date=None, document_date_candidates=(),
+        )
+        text = build_task_text(lab_evidence)
+        self.assertIn("a hawk perched on a wooden fence at dusk", text)
+        self.assertIn("hawk, fence", text)
+        self.assertIn("outdoor wildlife shot", text)
+
+    def test_no_visual_evidence_omits_the_section_without_crashing(self):
+        naming_evidence = NamingEvidence(
+            source_class="naming-lab", original_filename="notes.txt", extension=".txt",
+            size=10, mime="text/plain", media_kind="text", name_quality="good", name_quality_reason="fine",
+        )
+        lab_evidence = LabEvidence(
+            sha256="b" * 64, naming_evidence=naming_evidence, file_evidence=None,
+            semantic_date=None, document_date_candidates=(),
+        )
+        text = build_task_text(lab_evidence)
+        self.assertNotIn("visual_description", text)
 
 
 if __name__ == "__main__":

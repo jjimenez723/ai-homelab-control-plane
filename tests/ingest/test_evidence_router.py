@@ -122,7 +122,7 @@ class RuleFiringTests(unittest.TestCase):
         self.assertFalse(route.ocr or route.native_text)
 
     def test_r9_opaque_media_kinds_get_nothing(self):
-        for media_kind in (MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_VIDEO, MEDIA_OTHER):
+        for media_kind in (MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_OTHER):
             with self.subTest(media_kind=media_kind):
                 route = _route(media_kind=media_kind, extension=".bin")
                 self.assertEqual(route.rules, ("r9-opaque",))
@@ -133,6 +133,19 @@ class RuleFiringTests(unittest.TestCase):
         route = _route(media_kind="something-new", extension=".xyz")
         self.assertEqual(route.rules, ("r9-opaque",))
         self.assertIn("unrecognised media kind", route.reason)
+
+    def test_r14_video_is_vision_only(self):
+        route = _route(media_kind=MEDIA_VIDEO, extension=".mp4")
+        self.assertEqual(route.rules, ("r14-video-frame",))
+        self.assertTrue(route.vision)
+        self.assertFalse(route.ocr or route.native_text)
+
+    def test_r14_video_respects_vision_disabled(self):
+        route = _route(
+            media_kind=MEDIA_VIDEO, extension=".mp4", config=EvidenceConfig(vision=VisionConfig(enabled=False)),
+        )
+        self.assertEqual(route.rules, ("r14-video-frame", "r11-vision-disabled"))
+        self.assertFalse(route.vision)
 
     def test_r10_ocr_disabled_clears_ocr_but_not_vision(self):
         route = _route(

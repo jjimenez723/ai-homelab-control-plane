@@ -61,6 +61,13 @@ def build_task_text(lab_evidence: LabEvidence, *, max_chars: int = 4000) -> str:
         value = naming_evidence.fact(key)
         if value:
             lines.append(f"{key}: {value}")
+    if lab_evidence.visual is not None:
+        visual = lab_evidence.visual
+        lines.append(f"visual_description ({visual.image_kind}): {visual.description}")
+        if visual.entities:
+            lines.append(f"visual_entities: {', '.join(visual.entities)}")
+        if visual.context:
+            lines.append(f"visual_context: {visual.context}")
     text = lab_evidence.combined_text
     if text:
         lines.append("extracted_text:")

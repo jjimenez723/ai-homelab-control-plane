@@ -42,10 +42,11 @@ from tools.ingest.media.probe import (
 
 # Media kinds that never carry anything worth perceiving: an archive's
 # interesting facts are its listing (already in `media_metadata`), an
-# installer is a binary blob, and audio/video get no evidence backend in this
-# phase. Grouped under one rule id because the reason -- "opaque to this
-# layer" -- is the same for all of them.
-_OPAQUE_MEDIA_KINDS = frozenset({MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_VIDEO, MEDIA_OTHER})
+# installer is a binary blob, and audio gets no evidence backend in this
+# phase (no speech-to-text ships yet). Grouped under one rule id because the
+# reason -- "opaque to this layer" -- is the same for all of them. Video is
+# no longer in this set -- see `r14-video-frame` below.
+_OPAQUE_MEDIA_KINDS = frozenset({MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_OTHER})
 
 
 @dataclass(frozen=True)
@@ -139,9 +140,18 @@ def route_for(
             rules.append("r8-image-other")
             vision = True
             reason = "image of unknown origin: vision only"
+    elif media_kind == MEDIA_VIDEO:
+        # One representative frame, described by the same vision backend an
+        # image gets. Never OCR: a sampled frame is evidence of the video's
+        # subject, not a text-bearing document, and text genuinely burned
+        # into a frame (e.g. a title card) is a job for a future dedicated
+        # rule, not a reason to run OCR on every video by default.
+        rules.append("r14-video-frame")
+        vision = True
+        reason = "video: vision on one representative sampled frame"
     else:
-        # MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_VIDEO, MEDIA_OTHER,
-        # and anything this router does not otherwise recognise: opaque to
+        # MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_OTHER, and
+        # anything this router does not otherwise recognise: opaque to
         # perception in this phase.
         rules.append("r9-opaque")
         if media_kind in _OPAQUE_MEDIA_KINDS:

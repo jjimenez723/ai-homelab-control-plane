@@ -21,7 +21,7 @@ from pathlib import Path
 from tools.ingest.config import EvidenceConfig
 from tools.ingest.evidence.backends import OCRBackend, VisionBackend, build_ocr_backend, build_vision_backend
 from tools.ingest.evidence.extract import collect_evidence
-from tools.ingest.evidence.types import EvidenceSource, FileEvidence
+from tools.ingest.evidence.types import EvidenceSource, FileEvidence, VisualEvidence
 from tools.ingest.hashing import sha256_file
 from tools.ingest.media.probe import probe_file
 from tools.ingest.naming.evidence import NamingEvidence, gather_evidence
@@ -52,6 +52,16 @@ class LabEvidence:
         native = self.file_evidence.native_text.text if self.file_evidence.native_text else ""
         ocr = self.file_evidence.ocr_text
         return "\n".join(part for part in (native, ocr) if part)
+
+    @property
+    def visual(self) -> VisualEvidence | None:
+        """The vision backend's description of the file, if any was run.
+
+        For a photo, screenshot, or (now) a sampled video frame -- the one
+        place a naming prompt or a human reviewer should look for "what does
+        this actually show," as opposed to `combined_text`'s OCR/native text.
+        """
+        return self.file_evidence.visual if self.file_evidence is not None else None
 
 
 def gather_lab_evidence(

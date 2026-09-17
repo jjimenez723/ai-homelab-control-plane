@@ -269,14 +269,43 @@ records its `content_fingerprint` in `LOCKED_FINGERPRINTS`, and only then
 does a real evaluation run (a fresh validation corpus, not this Lab's
 development seeds) certify it.
 
+## Video: one sampled frame through the vision backend (D-055)
+
+A `.mp4`/`.mov`/etc. now routes to vision the same way an image does
+(`router.py`'s `r14-video-frame` rule): one representative frame — the
+midpoint of the video's duration, or 1s in if duration is unknown — is
+sampled via `tools/ingest/evidence/backends/ffmpeg_video.py` (the second
+module, alongside `backends/tesseract.py`, allowed to use `subprocess` in
+the evidence package; see D-055) and handed to whichever vision backend is
+selected, exactly like a photo. The Review screen shows that same sampled
+frame as the preview, and the resulting description/entities/context are
+both shown to the reviewer and included in the naming prompt's evidence
+text (`runner.py::build_task_text`).
+
+By default the Lab's sidebar "Vision backend" is `heuristic` — a real,
+offline, deterministic description (pixel/color statistics, no model), good
+enough to prove the pipeline works, but not real content understanding. For
+an actual vision-model description of what the video shows, switch that
+selector to `ollama` and make sure a vision-capable model is pulled locally
+first (e.g. `ollama pull qwen3-vl:8b`, the default in
+`tools/ingest/config.py::VisionConfig.model`) — still loopback-only, still
+no cloud call.
+
+Only one frame is sampled today; a video where the subject changes
+significantly over its length will only be named from whatever moment that
+one frame lands on. Audio remains unperceived (no speech-to-text ships).
+
 ## Limitations, stated explicitly
 
+* Only one video frame is sampled per file (see above) — no multi-frame or
+  scene-change sampling yet.
 * No speech-to-text or audio/video content-date extraction beyond whatever
   `ffprobe` container metadata (`media/probe.py`'s `capture_timestamp`)
   already exposes.
 * `hallucination` flags in `runner.py` are heuristic and best-effort —
   useful signal for a human reviewer, never a pass/fail gate.
-* Previews are intentionally modest: images and PDF first pages render;
-  everything else shows metadata/evidence plus a "reveal in Finder" action.
+* Previews are intentionally modest: images, PDF first pages, and one
+  sampled video frame render; everything else shows metadata/evidence plus
+  a "reveal in Finder" action.
 * This Lab does not run, and must not be used to justify running,
   `gate2-validation-001` or any claim that Gate 2 is green.
