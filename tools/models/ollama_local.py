@@ -274,6 +274,7 @@ class OllamaTextProvider:
             "/api/generate", payload=body, timeout_seconds=max(1, timeout_seconds or 120))
         return {
             "output": str(outer.get("response", "")).strip(),
+            "finish_reason": str(outer.get("done_reason")) if outer.get("done_reason") is not None else None,
             "input_tokens": outer.get("prompt_eval_count"),
             "output_tokens": outer.get("eval_count"),
             "prefill_seconds": (outer.get("prompt_eval_duration") or 0) / 1e9,

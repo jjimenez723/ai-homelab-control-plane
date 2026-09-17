@@ -160,7 +160,14 @@ def execute_work_unit(unit: WorkUnit, provider: OllamaTextProvider) -> ResultRec
     output = response.get("output", "") if isinstance(response, dict) else str(response)
     output_tokens = response.get("output_tokens") if isinstance(response, dict) else None
     input_tokens = response.get("input_tokens") if isinstance(response, dict) else None
-    truncated = bool(output_tokens is not None and output_tokens >= num_predict)
+    raw_finish_reason = response.get("finish_reason") if isinstance(response, dict) else None
+    finish_reason = str(raw_finish_reason) if raw_finish_reason is not None else None
+    if finish_reason is not None:
+        truncated = finish_reason.lower() in {"length", "max_tokens", "max_token", "token_limit"}
+    else:
+        # Backward-compatible fallback for providers/runtimes that expose no
+        # explicit stop reason. New Ollama records carry done_reason.
+        truncated = bool(output_tokens is not None and output_tokens >= num_predict)
 
     try:
         verify = lookup_verifier(unit.suite_id)
@@ -169,6 +176,7 @@ def execute_work_unit(unit: WorkUnit, provider: OllamaTextProvider) -> ResultRec
         return ResultRecord(**common, status="verifier_error", passed=None,
                             detail={"error": f"{type(exc).__name__}: {exc}"},
                             wall_seconds=wall, input_tokens=input_tokens, output_tokens=output_tokens,
+                            raw_output=output, finish_reason=finish_reason,
                             error=f"verifier raised: {type(exc).__name__}: {exc}")
 
     if not passed and isinstance(detail, dict) and detail.get("failure") == "non_string_output":
@@ -181,4 +189,5 @@ def execute_work_unit(unit: WorkUnit, provider: OllamaTextProvider) -> ResultRec
         status = "verified_fail"
 
     return ResultRecord(**common, status=status, passed=passed, detail=dict(detail or {}),
-                        wall_seconds=wall, input_tokens=input_tokens, output_tokens=output_tokens, error=None)
+                        wall_seconds=wall, input_tokens=input_tokens, output_tokens=output_tokens,
+                        raw_output=output, finish_reason=finish_reason, error=None)

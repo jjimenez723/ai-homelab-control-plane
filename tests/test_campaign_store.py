@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,14 +10,16 @@ from pathlib import Path
 from tools.campaign.store import CorruptResultRecord, ResultRecord, ResultStore
 
 
-def _record(work_unit_id: str, status: str, *, passed: bool | None = None) -> ResultRecord:
+def _record(work_unit_id: str, status: str, *, passed: bool | None = None,
+            raw_output: str | None = None, finish_reason: str | None = None) -> ResultRecord:
     return ResultRecord(
-        schema_version=1, work_unit_id=work_unit_id, campaign_id="c", manifest_fingerprint="fp",
+        schema_version=2, work_unit_id=work_unit_id, campaign_id="c", manifest_fingerprint="fp",
         candidate_name="cand", configuration_fingerprint="cfg", suite_id="s", suite_version="1",
         split="dev", item_id="item-1", scenario="sc", sample_index=0, prompt_id="p",
         prompt_version="1.0.0", prompt_sha256="x" * 64, tool_schema_version="none", status=status,
         passed=passed, detail={}, seed=None, wall_seconds=0.1, input_tokens=1, output_tokens=1,
         started_at="2026-01-01T00:00:00+00:00", host="test-host",
+        raw_output=raw_output, finish_reason=finish_reason,
     )
 
 
@@ -49,6 +52,30 @@ class ResultStoreTests(unittest.TestCase):
             store.append(_record("u2", "verified_fail", passed=False))
             records = store.read_all()
             self.assertEqual([r.work_unit_id for r in records], ["u1", "u2"])
+
+    def test_raw_output_and_finish_reason_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResultStore(Path(tmp) / "results.jsonl")
+            store.append(_record(
+                "u1", "verified_fail", passed=False,
+                raw_output="Northwind invoice.pdf", finish_reason="stop",
+            ))
+            record = store.read_all()[0]
+            self.assertEqual(record.raw_output, "Northwind invoice.pdf")
+            self.assertEqual(record.finish_reason, "stop")
+
+    def test_schema_v1_row_remains_readable_with_new_optional_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.jsonl"
+            payload = _record("u1", "verified_pass", passed=True).as_dict()
+            payload["schema_version"] = 1
+            payload.pop("raw_output")
+            payload.pop("finish_reason")
+            path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            record = ResultStore(path).read_all()[0]
+            self.assertEqual(record.schema_version, 1)
+            self.assertIsNone(record.raw_output)
+            self.assertIsNone(record.finish_reason)
 
     def test_appending_never_rewrites_prior_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
