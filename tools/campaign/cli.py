@@ -5,6 +5,8 @@
     ./scripts/angel-eval campaign --profile gate2
     ./scripts/angel-eval campaign --profile gate2 --resume
     ./scripts/angel-eval report <campaign-id>
+    ./scripts/angel-eval audit
+    ./scripts/angel-eval analyze <campaign-id>
 
 No step here requires an AI coding agent to supervise it -- see
 `docs/22-evaluation-campaign.md` for the full operational writeup.
@@ -17,6 +19,8 @@ import json
 import sys
 from pathlib import Path
 
+from tools.bench.gate2_audit import DEFAULT_SPLITS, generate_gate2_audit, to_markdown as audit_to_markdown
+from tools.bench.gate2_failure_analysis import write_failure_analysis
 from tools.campaign.manifest import ManifestError, load_manifest
 from tools.campaign.profiles import UnknownProfile, manifest_path_for_profile
 from tools.campaign.report import generate_report, write_report
@@ -92,6 +96,54 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit(args: argparse.Namespace) -> int:
+    splits = tuple(args.split or DEFAULT_SPLITS)
+    if "frozen_holdout" in splits and not args.include_frozen_holdout:
+        print(
+            "ERROR: refusing to render frozen-holdout content without "
+            "--include-frozen-holdout; keep holdout out of prompt/threshold tuning",
+            file=sys.stderr,
+        )
+        return 2
+
+    audit = generate_gate2_audit(splits=splits)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "gate2-contract-audit.json"
+    markdown_path = out_dir / "gate2-contract-audit.md"
+    json_path.write_text(json.dumps(audit, indent=2, sort_keys=True), encoding="utf-8")
+    markdown_path.write_text(audit_to_markdown(audit), encoding="utf-8")
+
+    summary = audit["summary"]
+    print(f"wrote {json_path}")
+    print(f"wrote {markdown_path}")
+    print(
+        f"audit: {summary['errors']} contract error(s), {summary['warnings']} warning(s); "
+        f"{summary['routing_items']} routing and {summary['naming_items']} naming items rendered"
+    )
+    return 1 if args.strict and summary["errors"] else 0
+
+
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out) if args.out else state_dir(
+        args.campaign_id, root=Path(args.state_root)
+    ) / "failure-analysis"
+    try:
+        json_path, markdown_path = write_failure_analysis(
+            args.campaign_id,
+            root=Path(args.state_root),
+            out_dir=out_dir,
+            candidates=args.candidate,
+            suites=args.suite,
+        )
+    except CorruptResultRecord as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 4
+    print(f"wrote {json_path}")
+    print(f"wrote {markdown_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--state-root", default=str(DEFAULT_STATE_ROOT),
@@ -128,6 +180,52 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--manifest", help="explicit manifest path, used only to attach qualification thresholds")
     report.add_argument("--out", help="output directory (default: <state-root>/<campaign-id>/report)")
     report.set_defaults(func=_cmd_report)
+
+    audit = subparsers.add_parser(
+        "audit",
+        help="render and self-check the Gate-2 prompt/oracle contract without running inference",
+    )
+    audit.add_argument(
+        "--split",
+        action="append",
+        choices=("dev", "validation", "frozen_holdout"),
+        help="split to render; repeat for multiple splits (default: dev + validation)",
+    )
+    audit.add_argument(
+        "--include-frozen-holdout",
+        action="store_true",
+        help="explicitly acknowledge rendering frozen-holdout task content",
+    )
+    audit.add_argument(
+        "--out",
+        default=".state/evaluation-audits/gate2",
+        help="output directory for audit JSON+Markdown",
+    )
+    audit.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero when deterministic contract errors are detected",
+    )
+    audit.set_defaults(func=_cmd_audit)
+
+    analyze = subparsers.add_parser(
+        "analyze", parents=[common],
+        help="summarize existing campaign failures without re-running inference",
+    )
+    analyze.add_argument("campaign_id")
+    analyze.add_argument(
+        "--candidate", action="append",
+        help="candidate name to include; repeat for multiple (default: all)",
+    )
+    analyze.add_argument(
+        "--suite", action="append",
+        help="suite id to include; repeat for multiple (default: all)",
+    )
+    analyze.add_argument(
+        "--out",
+        help="output directory (default: <state-root>/<campaign-id>/failure-analysis)",
+    )
+    analyze.set_defaults(func=_cmd_analyze)
 
     return parser
 

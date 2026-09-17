@@ -43,6 +43,7 @@ class ReportFromPartialCampaignTests(unittest.TestCase):
             self.assertEqual(cell["verified_fail"], 1)
             self.assertEqual(cell["infrastructure_failures"], 1)
             self.assertEqual(cell["truncated"], 1)
+            self.assertEqual(cell["end_to_end_success_rate"], 0.25)
 
     def test_report_on_an_empty_campaign_does_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -63,17 +64,42 @@ class ReportFromPartialCampaignTests(unittest.TestCase):
             self.assertAlmostEqual(cell["verified_pass_rate"], expected.point_estimate)
             self.assertAlmostEqual(cell["verified_pass_rate_wilson_95ci"][0], expected.lower)
 
-    def test_item_consistency_flags_a_flip_flopping_item(self) -> None:
+    def test_item_consistency_flags_flip_flop_within_one_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = ResultStore(result_store_path("camp-3", root=Path(tmp)))
-            store.append(_record("flaky", 0, "verified_pass", True))
-            store.append(_record("flaky", 1, "verified_fail", False))
-            store.append(_record("stable", 0, "verified_pass", True))
-            store.append(_record("stable", 1, "verified_pass", True))
+            store.append(_record("flaky", 0, "verified_pass", True, candidate="a"))
+            store.append(_record("flaky", 1, "verified_fail", False, candidate="a"))
+            store.append(_record("stable", 0, "verified_pass", True, candidate="a"))
+            store.append(_record("stable", 1, "verified_pass", True, candidate="a"))
             report = generate_report("camp-3", root=Path(tmp))
-            consistency = report.item_consistency["acb-v1/routing-classification"]
-            self.assertEqual(consistency["items_with_inconsistent_outcomes"], 1)
-            self.assertIn("flaky", consistency["inconsistent_item_ids"])
+            consistency = report.item_consistency["acb-v1/routing-classification"]["a"]
+            self.assertEqual(consistency["items_with_inconsistent_pass_fail"], 1)
+            self.assertIn("flaky", consistency["inconsistent_pass_fail_item_ids"])
+
+    def test_different_models_do_not_create_fake_within_model_inconsistency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResultStore(result_store_path("camp-3b", root=Path(tmp)))
+            for sample in range(2):
+                store.append(_record("same-item", sample, "verified_pass", True, candidate="good"))
+                store.append(_record("same-item", sample, "verified_fail", False, candidate="bad"))
+            report = generate_report("camp-3b", root=Path(tmp))
+            good = report.item_consistency["acb-v1/routing-classification"]["good"]
+            bad = report.item_consistency["acb-v1/routing-classification"]["bad"]
+            self.assertEqual(good["items_with_inconsistent_pass_fail"], 0)
+            self.assertEqual(bad["items_with_inconsistent_pass_fail"], 0)
+            disagreement = report.cross_model_disagreement["acb-v1/routing-classification"]
+            self.assertEqual(disagreement["items_with_cross_model_disagreement"], 1)
+            self.assertIn("same-item", disagreement["cross_model_disagreement_item_ids"])
+
+    def test_terminal_outcome_consistency_tracks_truncation_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResultStore(result_store_path("camp-3c", root=Path(tmp)))
+            store.append(_record("item", 0, "verified_pass", True))
+            store.append(_record("item", 1, "truncated", False))
+            report = generate_report("camp-3c", root=Path(tmp))
+            consistency = report.item_consistency["acb-v1/routing-classification"]["cand"]
+            self.assertEqual(consistency["items_with_inconsistent_pass_fail"], 0)
+            self.assertEqual(consistency["items_with_inconsistent_terminal_outcomes"], 1)
 
 
 class ReportWithoutModelAccessTests(unittest.TestCase):
@@ -83,8 +109,6 @@ class ReportWithoutModelAccessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = ResultStore(result_store_path("camp-4", root=Path(tmp)))
             store.append(_record("i1", 0, "verified_pass", True))
-            # If this touched a provider it would raise on a bogus endpoint;
-            # it does not even construct one.
             report = generate_report("camp-4", root=Path(tmp))
             self.assertEqual(report.total_records, 1)
 
@@ -97,6 +121,9 @@ class ReportWithoutModelAccessTests(unittest.TestCase):
             json_path, md_path = write_report(report, out_dir=out_dir)
             payload = json.loads(json_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["campaign_id"], "camp-5")
+            self.assertEqual(payload["schema_version"], 2)
+            self.assertIn("item_consistency_by_suite_candidate", payload)
+            self.assertIn("cross_model_disagreement_by_suite", payload)
             markdown = md_path.read_text(encoding="utf-8")
             self.assertIn("# Campaign report: camp-5", markdown)
 
@@ -123,6 +150,7 @@ class ReportWithoutModelAccessTests(unittest.TestCase):
             self.assertTrue(report.qualification[0]["satisfies_threshold"])
             markdown = to_markdown(report)
             self.assertIn("Qualification thresholds", markdown)
+            self.assertIn("End-to-end", markdown)
 
 
 if __name__ == "__main__":

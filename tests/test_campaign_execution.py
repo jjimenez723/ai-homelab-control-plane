@@ -32,9 +32,10 @@ def _manifest(*, suite_id="acb-v1/routing-classification", split="dev", samples=
 
 
 class FakeProvider:
-    def __init__(self, *, output=None, output_tokens=3, exc=None):
+    def __init__(self, *, output=None, output_tokens=3, finish_reason=None, exc=None):
         self.output = output
         self.output_tokens = output_tokens
+        self.finish_reason = finish_reason
         self.exc = exc
         self.calls = []
 
@@ -42,7 +43,12 @@ class FakeProvider:
         self.calls.append((prompt, kwargs))
         if self.exc is not None:
             raise self.exc
-        return {"output": self.output, "input_tokens": 5, "output_tokens": self.output_tokens}
+        return {
+            "output": self.output,
+            "input_tokens": 5,
+            "output_tokens": self.output_tokens,
+            "finish_reason": self.finish_reason,
+        }
 
 
 class EnumerateWorkUnitsTests(unittest.TestCase):
@@ -103,11 +109,33 @@ class ExecuteWorkUnitTests(unittest.TestCase):
         record = execute_work_unit(unit, provider)
         self.assertEqual(record.status, "provider_error")
 
-    def test_output_at_the_num_predict_ceiling_and_wrong_is_truncated_not_verifier_reject(self) -> None:
+    def test_output_at_the_num_predict_ceiling_and_wrong_is_truncated_without_finish_reason(self) -> None:
         unit = self._one_unit()
         provider = FakeProvider(output="not-a-real-label", output_tokens=64)  # == num_predict
         record = execute_work_unit(unit, provider)
         self.assertEqual(record.status, "truncated")
+
+    def test_explicit_stop_reason_beats_token_ceiling_heuristic(self) -> None:
+        unit = self._one_unit()
+        provider = FakeProvider(output="not-a-real-label", output_tokens=64, finish_reason="stop")
+        record = execute_work_unit(unit, provider)
+        self.assertEqual(record.status, "verified_fail")
+        self.assertEqual(record.finish_reason, "stop")
+
+    def test_explicit_length_reason_marks_truncation_below_configured_ceiling(self) -> None:
+        unit = self._one_unit()
+        provider = FakeProvider(output="not-a-real-label", output_tokens=12, finish_reason="length")
+        record = execute_work_unit(unit, provider)
+        self.assertEqual(record.status, "truncated")
+        self.assertEqual(record.finish_reason, "length")
+
+    def test_raw_model_output_is_persisted_on_measured_attempt(self) -> None:
+        unit = self._one_unit()
+        raw = "general\nextra text the verifier will reject"
+        provider = FakeProvider(output=raw, finish_reason="stop")
+        record = execute_work_unit(unit, provider)
+        self.assertEqual(record.raw_output, raw)
+        self.assertEqual(record.finish_reason, "stop")
 
     def test_non_string_output_is_invalid_output(self) -> None:
         unit = self._one_unit()

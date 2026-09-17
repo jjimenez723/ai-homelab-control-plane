@@ -9,6 +9,11 @@ requirement and giving crash-safety for free: a process killed mid-write
 loses at most the one in-flight line (open with line-buffering + `fsync`),
 never a previously recorded measurement.
 
+Result-record schema v2 adds the model's raw text output and provider finish
+reason. Both fields are optional so schema-v1 campaign files remain readable;
+old rows simply expose ``None`` for those fields. Raw output remains local,
+gitignored campaign state rather than a committed artifact.
+
 Resumability policy, from the "infrastructure failure is not model-quality
 failure" invariant this whole task is built around:
 
@@ -27,9 +32,9 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 RESULT_STATUSES = frozenset({
     "verified_pass", "verified_fail", "timeout", "truncated",
@@ -72,6 +77,8 @@ class ResultRecord:
     started_at: str
     host: str
     error: str | None = None
+    raw_output: str | None = None
+    finish_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in RESULT_STATUSES:
@@ -95,7 +102,7 @@ class CorruptResultRecord(ValueError):
         self.reason = reason
 
 
-RESULT_RECORD_SCHEMA_VERSION = 1
+RESULT_RECORD_SCHEMA_VERSION = 2
 
 
 class ResultStore:

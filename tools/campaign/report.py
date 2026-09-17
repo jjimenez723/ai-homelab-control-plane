@@ -20,11 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from tools.campaign.manifest import CampaignManifest
-from tools.campaign.runner import DEFAULT_STATE_ROOT, fingerprint_path, result_store_path
+from tools.campaign.runner import DEFAULT_STATE_ROOT, result_store_path
 from tools.campaign.statistics import wilson_interval
 from tools.campaign.store import ResultRecord, ResultStore, TERMINAL_STATUSES
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 
 
 def _git_info() -> dict[str, Any]:
@@ -84,6 +84,7 @@ class CellQuality:
         interval = wilson_interval(self.verified_pass, self.measured) if self.measured else None
         infra_failures = (self.timeout + self.provider_unavailable + self.provider_error
                           + self.sandbox_error + self.verifier_error + self.cancelled)
+        terminal_attempts = self.measured + self.invalid_output + self.truncated + self.unverified
         return {
             "suite_id": self.suite_id, "split": self.split, "candidate": self.candidate_name,
             "attempts": self.attempts, "measured_samples": self.measured,
@@ -98,8 +99,8 @@ class CellQuality:
             },
             "verified_pass_rate": interval.point_estimate if interval else None,
             "verified_pass_rate_wilson_95ci": [interval.lower, interval.upper] if interval else None,
-            "completion_rate": (self.measured + self.invalid_output + self.truncated + self.unverified)
-                                / self.attempts if self.attempts else None,
+            "end_to_end_success_rate": self.verified_pass / self.attempts if self.attempts else None,
+            "completion_rate": terminal_attempts / self.attempts if self.attempts else None,
             "timeout_rate": self.timeout / self.attempts if self.attempts else None,
             "truncation_rate": self.truncated / self.attempts if self.attempts else None,
             "infrastructure_failure_rate": infra_failures / self.attempts if self.attempts else None,
@@ -107,16 +108,79 @@ class CellQuality:
 
 
 def _item_consistency(records: list[ResultRecord]) -> dict[str, Any]:
-    by_item: dict[str, list[bool]] = defaultdict(list)
+    """Measure repeatability inside one candidate/suite cell only.
+
+    The old report grouped all candidates in a suite together, so one model
+    passing an item and another model failing it looked like within-model
+    instability. This function must only receive records for one candidate.
+    It reports measured pass/fail flips separately from broader terminal-status
+    changes such as pass -> truncated.
+    """
+    measured_by_item: dict[str, list[bool]] = defaultdict(list)
+    terminal_by_item: dict[str, list[str]] = defaultdict(list)
     for record in records:
-        if record.passed is not None:
-            by_item[record.item_id].append(record.passed)
-    inconsistent = {item_id: outcomes for item_id, outcomes in by_item.items()
-                    if len(set(outcomes)) > 1 and len(outcomes) > 1}
+        if record.status == "verified_pass":
+            measured_by_item[record.item_id].append(True)
+        elif record.status == "verified_fail":
+            measured_by_item[record.item_id].append(False)
+        if record.status in TERMINAL_STATUSES:
+            terminal_by_item[record.item_id].append(record.status)
+
+    pass_fail_inconsistent = {
+        item_id: outcomes for item_id, outcomes in measured_by_item.items()
+        if len(outcomes) > 1 and len(set(outcomes)) > 1
+    }
+    terminal_inconsistent = {
+        item_id: outcomes for item_id, outcomes in terminal_by_item.items()
+        if len(outcomes) > 1 and len(set(outcomes)) > 1
+    }
     return {
-        "items_with_multiple_samples": sum(1 for o in by_item.values() if len(o) > 1),
-        "items_with_inconsistent_outcomes": len(inconsistent),
-        "inconsistent_item_ids": sorted(inconsistent),
+        "items_with_multiple_measured_samples": sum(1 for outcomes in measured_by_item.values() if len(outcomes) > 1),
+        "items_with_inconsistent_pass_fail": len(pass_fail_inconsistent),
+        "inconsistent_pass_fail_item_ids": sorted(pass_fail_inconsistent),
+        "items_with_multiple_terminal_samples": sum(1 for outcomes in terminal_by_item.values() if len(outcomes) > 1),
+        "items_with_inconsistent_terminal_outcomes": len(terminal_inconsistent),
+        "inconsistent_terminal_item_ids": sorted(terminal_inconsistent),
+    }
+
+
+def _cross_model_disagreement(records: list[ResultRecord]) -> dict[str, Any]:
+    """Report cross-model disagreement as a distinct concept from instability.
+
+    For each item/candidate pair, use the majority of measured pass/fail
+    samples. Ties and candidates with no measured samples are indeterminate and
+    excluded. An item is cross-model-disputed only when at least one candidate
+    has a pass majority and another has a fail majority.
+    """
+    by_item_candidate: dict[str, dict[str, list[bool]]] = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        if record.status == "verified_pass":
+            by_item_candidate[record.item_id][record.candidate_name].append(True)
+        elif record.status == "verified_fail":
+            by_item_candidate[record.item_id][record.candidate_name].append(False)
+
+    disputed: dict[str, dict[str, str]] = {}
+    comparable = 0
+    for item_id, candidate_outcomes in by_item_candidate.items():
+        verdicts: dict[str, str] = {}
+        for candidate, outcomes in candidate_outcomes.items():
+            passes = sum(outcomes)
+            failures = len(outcomes) - passes
+            if passes > failures:
+                verdicts[candidate] = "pass-majority"
+            elif failures > passes:
+                verdicts[candidate] = "fail-majority"
+        if len(verdicts) < 2:
+            continue
+        comparable += 1
+        if len(set(verdicts.values())) > 1:
+            disputed[item_id] = verdicts
+
+    return {
+        "items_comparable_across_models": comparable,
+        "items_with_cross_model_disagreement": len(disputed),
+        "cross_model_disagreement_item_ids": sorted(disputed),
+        "candidate_majority_verdicts_for_disputed_items": disputed,
     }
 
 
@@ -134,9 +198,6 @@ def _performance(records: list[ResultRecord]) -> dict[str, Any]:
 
 
 def _cost_and_resources(records: list[ResultRecord]) -> dict[str, Any]:
-    # Every candidate this campaign machinery targets runs local (Ollama);
-    # metered API cost is genuinely zero, not merely unmeasured -- but that
-    # is a distinct fact from "resource use is free", which it is not.
     return {
         "api_cost_usd": 0.0,
         "cost_basis": "local inference only; no metered provider in this run",
@@ -168,7 +229,8 @@ def _threshold_check(manifest: CampaignManifest, cells: list[CellQuality]) -> li
         if threshold is None or cell.measured == 0:
             continue
         interval = wilson_interval(cell.verified_pass, cell.measured)
-        infra_rate = cell.as_dict()["infrastructure_failure_rate"] or 0.0
+        cell_dict = cell.as_dict()
+        infra_rate = cell_dict["infrastructure_failure_rate"] or 0.0
         meets_rate = interval.point_estimate >= threshold.min_pass_rate
         meets_confidence = interval.lower >= threshold.min_confidence if threshold.min_confidence else True
         meets_infra = infra_rate <= threshold.max_provider_error_rate
@@ -176,6 +238,8 @@ def _threshold_check(manifest: CampaignManifest, cells: list[CellQuality]) -> li
         results.append({
             "suite_id": cell.suite_id, "candidate": cell.candidate_name,
             "measured_pass_rate": interval.point_estimate,
+            "end_to_end_success_rate": cell_dict["end_to_end_success_rate"],
+            "truncation_rate": cell_dict["truncation_rate"],
             "wilson_95ci_lower": interval.lower,
             "threshold": {
                 "min_pass_rate": threshold.min_pass_rate, "min_confidence": threshold.min_confidence,
@@ -192,7 +256,8 @@ class CampaignReport:
     campaign_id: str
     reproducibility: dict[str, Any]
     cells: list[dict[str, Any]]
-    item_consistency: dict[str, dict[str, Any]]
+    item_consistency: dict[str, dict[str, dict[str, Any]]]
+    cross_model_disagreement: dict[str, dict[str, Any]]
     performance: dict[str, dict[str, Any]]
     cost_and_resources: dict[str, Any]
     reliability: dict[str, Any]
@@ -204,7 +269,8 @@ class CampaignReport:
             "schema_version": REPORT_SCHEMA_VERSION, "campaign_id": self.campaign_id,
             "reproducibility": self.reproducibility, "total_records": self.total_records,
             "quality_by_suite_candidate": self.cells,
-            "item_consistency_by_suite": self.item_consistency,
+            "item_consistency_by_suite_candidate": self.item_consistency,
+            "cross_model_disagreement_by_suite": self.cross_model_disagreement,
             "performance_by_suite": self.performance,
             "cost_and_resources": self.cost_and_resources,
             "reliability": self.reliability,
@@ -233,8 +299,19 @@ def generate_report(campaign_id: str, *, root: Path = DEFAULT_STATE_ROOT,
         cells.append(CellQuality(suite_id=suite_id, split=split, candidate_name=candidate_name,
                                  attempts=len(group), **counts))
 
+    by_suite_candidate: dict[str, dict[str, list[ResultRecord]]] = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        by_suite_candidate[record.suite_id][record.candidate_name].append(record)
     item_consistency = {
-        suite_id: _item_consistency([r for r in records if r.suite_id == suite_id])
+        suite_id: {
+            candidate: _item_consistency(candidate_records)
+            for candidate, candidate_records in sorted(candidates.items())
+        }
+        for suite_id, candidates in sorted(by_suite_candidate.items())
+    }
+
+    cross_model_disagreement = {
+        suite_id: _cross_model_disagreement([r for r in records if r.suite_id == suite_id])
         for suite_id in sorted({r.suite_id for r in records})
     }
     performance = {
@@ -249,6 +326,7 @@ def generate_report(campaign_id: str, *, root: Path = DEFAULT_STATE_ROOT,
         reproducibility=_reproducibility_metadata(manifest),
         cells=[c.as_dict() for c in cells],
         item_consistency=item_consistency,
+        cross_model_disagreement=cross_model_disagreement,
         performance=performance,
         cost_and_resources=_cost_and_resources(records),
         reliability=_reliability(cells),
@@ -271,25 +349,28 @@ def to_markdown(report: CampaignReport) -> str:
         f"- Total raw records: {report.total_records}",
         "",
         "## Quality by suite / candidate", "",
-        "| Suite | Split | Candidate | N measured | Verified pass rate | 95% CI | Infra failure rate | Truncation rate |",
-        "|---|---|---|---:|---:|---|---:|---:|",
+        "| Suite | Split | Candidate | Attempts | N measured | Measured pass rate | End-to-end success | 95% CI | Infra failure | Truncation |",
+        "|---|---|---|---:|---:|---:|---:|---|---:|---:|",
     ]
     for cell in report.cells:
         ci = cell["verified_pass_rate_wilson_95ci"]
         ci_text = f"[{ci[0]:.3f}, {ci[1]:.3f}]" if ci else "n/a"
         rate = cell["verified_pass_rate"]
         rate_text = f"{rate:.3f}" if rate is not None else "n/a"
+        e2e = cell["end_to_end_success_rate"]
+        e2e_text = f"{e2e:.3f}" if e2e is not None else "n/a"
         infra_text = f"{cell['infrastructure_failure_rate']:.3f}" if cell["infrastructure_failure_rate"] is not None else "n/a"
         trunc_text = f"{cell['truncation_rate']:.3f}" if cell["truncation_rate"] is not None else "n/a"
-        lines.append(f"| {cell['suite_id']} | {cell['split']} | {cell['candidate']} | "
-                     f"{cell['measured_samples']} | {rate_text} | {ci_text} | {infra_text} | {trunc_text} |")
+        lines.append(f"| {cell['suite_id']} | {cell['split']} | {cell['candidate']} | {cell['attempts']} | "
+                     f"{cell['measured_samples']} | {rate_text} | {e2e_text} | {ci_text} | {infra_text} | {trunc_text} |")
 
     lines += ["", "## Qualification thresholds", ""]
     if report.qualification:
-        lines += ["| Suite | Candidate | Measured | Wilson lower | Threshold | Satisfies? |",
-                  "|---|---|---:|---:|---:|---|"]
+        lines += ["| Suite | Candidate | Measured | End-to-end | Truncation | Wilson lower | Threshold | Satisfies? |",
+                  "|---|---|---:|---:|---:|---:|---:|---|"]
         for q in report.qualification:
             lines.append(f"| {q['suite_id']} | {q['candidate']} | {q['measured_pass_rate']:.3f} | "
+                         f"{q['end_to_end_success_rate']:.3f} | {q['truncation_rate']:.3f} | "
                          f"{q['wilson_95ci_lower']:.3f} | {q['threshold']['min_pass_rate']:.3f} | "
                          f"{'yes' if q['satisfies_threshold'] else 'no'} |")
     else:
@@ -306,11 +387,26 @@ def to_markdown(report: CampaignReport) -> str:
     lines.append(f"- API cost: ${cost['api_cost_usd']:.2f} ({cost['cost_basis']})")
     lines.append(f"- {cost['resource_use_note']}")
 
-    lines += ["", "## Per-item consistency", ""]
-    for suite_id, consistency in report.item_consistency.items():
-        lines.append(f"- {suite_id}: {consistency['items_with_inconsistent_outcomes']} of "
-                     f"{consistency['items_with_multiple_samples']} multiply-sampled items had "
-                     f"inconsistent pass/fail outcomes across samples.")
+    lines += ["", "## Per-item consistency (within each candidate)", ""]
+    for suite_id, candidates in report.item_consistency.items():
+        for candidate, consistency in candidates.items():
+            lines.append(
+                f"- {suite_id} / {candidate}: "
+                f"{consistency['items_with_inconsistent_pass_fail']} of "
+                f"{consistency['items_with_multiple_measured_samples']} multiply-measured items "
+                "flipped between verified pass and verified fail; "
+                f"{consistency['items_with_inconsistent_terminal_outcomes']} of "
+                f"{consistency['items_with_multiple_terminal_samples']} multiply-terminal items "
+                "changed terminal outcome (including truncation/invalid output)."
+            )
+
+    lines += ["", "## Cross-model disagreement (not within-model instability)", ""]
+    for suite_id, disagreement in report.cross_model_disagreement.items():
+        lines.append(
+            f"- {suite_id}: {disagreement['items_with_cross_model_disagreement']} of "
+            f"{disagreement['items_comparable_across_models']} comparable items had different "
+            "candidate-majority pass/fail verdicts."
+        )
 
     return "\n".join(lines) + "\n"
 
