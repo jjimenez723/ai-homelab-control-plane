@@ -93,10 +93,13 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 20-prompt-management.md               # prompt registry, composition layers, eval/production parity
 │   ├── 21-autonomous-routing.md              # the gates and the test matrix for attended-autonomous runs
 │   ├── 22-evaluation-campaign.md             # angel-eval: the unattended Gate-2 campaign runner
+│   ├── 23-naming-lab.md                      # local interactive prompt/naming dev tool (D-054)
+│   ├── 24-v1-completion-matrix.md            # V1 completion state: what is done, what is blocked, and the evidence
 │   ├── 25-angel-volume-layout.md            # THE map of /Volumes/Angel (supersedes 02's tree)
 │   ├── 26-skills-and-knowledge-trust.md     # trusted skills vs untrusted video-derived material
 │   ├── 27-backend-baselines.md               # sourced Firebase/GCP/Supabase backend evaluation
-│   └── 28-application-spec.md                # the canonical app-spec schema, pipeline, and agent-brief contract
+│   ├── 28-application-spec.md                # the canonical app-spec schema, pipeline, and agent-brief contract
+│   └── 29-battery-and-background-work.md     # measured background footprint of Angel on the Mac
 ├── data/
 │   ├── video-learning-queue.yaml
 │   └── ui-library-registry.yaml
