@@ -59,3 +59,6 @@ __pycache__/
 *.mp4
 *.wav
 *.webm
+
+# Agent worktrees created by Claude Code during integration passes; never source.
+.claude/worktrees/
