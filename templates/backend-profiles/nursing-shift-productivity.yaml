@@ -1,0 +1,201 @@
+# Backend profile: offline-first nursing/per-diem shift scheduling and
+# productivity apps (e.g. scheduling across multiple hospitals, per-diem
+# style work -- see docs/06-software-factory.md's "Brazilian nurse
+# scheduling app" example portfolio entry). See docs/27-backend-baselines.md
+# §12 for the sourced HIPAA/BAA posture this profile depends on.
+
+profile_id: nursing-shift-productivity
+version: 1.0.0
+summary: >
+  Offline-first shift scheduling, clock-in/out, and per-diem availability
+  management across multiple hospital/facility relationships, used on
+  hospital-floor devices with unreliable connectivity. THIS PROFILE MAKES A
+  HARD PRIVACY DECISION UP FRONT: if any schedule/shift data is tied to
+  patient assignments, patient names, or clinical content, it is PHI and the
+  product needs a signed Google Cloud BAA plus the covered-product
+  substitutions below. If the app only ever handles the nurse's own
+  employment/scheduling metadata (facility, shift time, role, pay), it is
+  employment data, not PHI, and the standard Firebase posture in
+  social-behavior-change.yaml may be sufficient instead -- decide this
+  explicitly per product, in writing, before implementation, not implicitly.
+
+fit:
+  application_traits:
+    - offline-first is not optional: hospital wifi/cellular is frequently unreliable, and clock-in/out must work offline and sync later
+    - multi-tenant across hospitals/facilities per user (a per-diem nurse works shifts at several employers)
+    - schedule data has real-world time-sensitivity (shift starts, swap deadlines) -- reminders matter
+    - potential PHI adjacency requires an explicit compliance decision, not a default
+    - moderate write frequency (clock-in/out, availability updates), low overall QPS
+  scale_assumptions:
+    initial_maus: "500-20,000 nurses across a handful of facility partners"
+    growth_posture: "B2B2C: growth is per-facility-contract, not purely viral"
+    peak_concurrency: shift-change time windows cluster load (e.g. 6:45am/6:45pm)
+
+services:
+  auth:
+    chosen: >
+      Identity Platform (the paid upgrade of Firebase Authentication) if any
+      PHI-adjacent data is in scope; plain Firebase Authentication only if
+      the product is scoped to employment/scheduling metadata with no
+      clinical content and that scoping is documented in the product brief.
+    alternatives: [Supabase Auth, self-hosted Postgres + auth]
+    rationale: >
+      Identity Platform is on Google Cloud's HIPAA covered-products list;
+      plain Firebase Authentication is NOT (docs/27 §12). This is the single
+      highest-leverage decision in this profile -- get it wrong and every
+      downstream BAA claim is void regardless of which database is used.
+    cost_driver: Identity Platform is priced per-MAU above a free allotment, unlike free-tier Firebase Auth
+    quota_watch_outs:
+      - do not silently fall back to Firebase Auth "for now" on a PHI-adjacent build; there is no clean later migration of MFA/provider-linkage state
+  primary_datastore:
+    chosen: Cloud Firestore (regional; Firestore IS a HIPAA covered product)
+    alternatives: [Data Connect/SQL Connect (Cloud SQL Postgres) for genuinely relational multi-facility scheduling, Supabase]
+    rationale: >
+      Firestore's offline-first mobile SDK is the deciding factor for a
+      floor-nurse device with unreliable connectivity -- this beats Data
+      Connect/SQL Connect's stronger relational model for this specific
+      offline requirement, even though shift-scheduling data is naturally
+      relational (nurse <-> facility <-> shift <-> swap-request). If
+      cross-facility reporting/joins become a first-class product need,
+      re-evaluate Data Connect/SQL Connect (also Cloud-SQL-backed, also
+      relational) and its offline+realtime cache added in 2026, since a pure
+      analytics-reporting need does not require giving up PHI-covered
+      status either way.
+    cost_driver: read volume from schedule-display screens polling/listening across multiple facility relationships
+    quota_watch_outs:
+      - Realtime Database is NOT a covered product -- never use it for PHI-adjacent shift/patient-assignment data, even for "just a quick presence indicator"
+  compute:
+    chosen: Cloud Run (also a covered product per docs/27 §12, and gives full control over PHI-handling code paths for audit purposes)
+    alternatives: [Cloud Functions 2nd gen (also Cloud-Run-based and coverage-equivalent)]
+    rationale: >
+      Cloud Run is chosen over Cloud Functions here specifically because a
+      compliance audit is more legible against an explicit container with a
+      documented image/build history than against Functions' more implicit
+      deploy model, even though both are technically covered; either is
+      acceptable, Cloud Run is the more defensible default for a PHI-adjacent
+      build.
+    cost_driver: always-on min-instances for the shift-change-time load spikes
+    quota_watch_outs:
+      - do not process PHI-adjacent payloads inside a Firebase-branded surface (e.g. a client-side Cloud Function trigger with no server-side re-validation) without confirming the specific trigger type is itself covered
+  storage_relational_option:
+    chosen: Cloud SQL (standalone) or Data Connect/SQL Connect, for cross-facility reporting/analytics if that becomes a first-class requirement
+    alternatives: [BigQuery export from Firestore for read-only analytics without moving the primary store]
+    rationale: multi-facility shift-swap and coverage-gap reporting is a relational query problem Firestore does not serve gracefully
+    cost_driver: Data Connect/SQL Connect has a non-zero cost floor (an always-on Cloud SQL instance, ~$9.37/month minimum) even at low usage
+    quota_watch_outs:
+      - do not adopt Data Connect/SQL Connect purely for its offline/realtime layer if Firestore already satisfies offline; adopt it for the relational query need specifically
+
+data_model_guidance: >
+  Model `facilities/{facilityId}/shifts/{shiftId}` with a denormalized
+  `assignedNurseId` and minimal shift metadata (time, unit/floor, role) --
+  deliberately exclude patient names, diagnoses, or care-plan content from
+  this data model entirely; if the product later needs patient-linked data,
+  that is a distinct, more tightly scoped data model requiring its own
+  compliance review, not an extension of the scheduling collections. Nurse
+  availability lives on `nurses/{nurseId}/availability`, scoped so a nurse
+  can only read/write their own availability and can only read (not write)
+  shifts at facilities where they hold an active assignment.
+
+security_rules_posture: >
+  Firestore Rules gate every facility-scoped read on a denormalized
+  `activeFacilityIds` array on the nurse's own user document (avoid
+  per-request `get()` calls against a separate assignments collection where
+  possible, for both latency and rule-evaluation cost). Facility
+  administrators get a custom claim (`facilityAdmin: [facilityId, ...]`)
+  checked server-side by a Cloud Run endpoint for any write that creates or
+  cancels a shift -- do not allow direct client writes to shift-assignment
+  documents; route assignment changes through a validated server endpoint
+  so a compromised client cannot forge a shift record.
+
+offline: >
+  This is the profile's defining requirement. Clock-in/out events must be
+  captured locally (Firestore's offline write queue, or an explicit local
+  queue if clock-in must work even when the app has been offline long
+  enough to evict Firestore's cache) and reconciled server-side on
+  reconnect, including conflict resolution for overlapping clock-in/out
+  edits from a device clock that may itself be wrong. Never treat a
+  client-reported clock-in timestamp as authoritative without a
+  server-side sanity check against the shift's scheduled window.
+
+realtime: >
+  Moderate: a nurse should see a shift-swap request or facility broadcast
+  update promptly, but this is not a sub-second-latency requirement.
+  Firestore listeners are sufficient; do not add Realtime Database
+  purely for this, especially given RTDB's exclusion from the covered-
+  products list.
+
+notifications: >
+  FCM (HTTP v1) for shift-start reminders, swap-request notifications, and
+  facility broadcast messages. Keep notification payload content free of
+  PHI-adjacent specifics beyond what's operationally necessary (e.g. "Your
+  shift at Facility A starts in 30 minutes" is fine; do not put patient or
+  unit-census details in a push payload, which is delivered through
+  infrastructure outside the BAA-covered boundary).
+
+storage_media: >
+  Cloud Storage for Firebase (covered product) for credential/certification
+  document uploads (nursing license, facility badge photo); enforce
+  App Check and per-nurse path-scoped Security Rules; treat uploaded
+  credential documents as sensitive regardless of the PHI determination
+  above, since they contain personally identifying professional-license data.
+
+privacy_compliance: >
+  Make the PHI-scoping decision explicitly in the product brief before
+  implementation begins, and record it in the app's own SECURITY.md
+  (D-015's six-file contract). If in scope for PHI: sign a Google Cloud BAA,
+  use only covered products (Identity Platform, Firestore, Cloud Storage,
+  Cloud Run) for anything PHI-adjacent, and never use Firebase
+  Authentication or Realtime Database for that data even for a "temporary"
+  feature. If out of scope: document the boundary (what data the app will
+  never collect) so the scoping decision doesn't silently erode over time as
+  features are added. Either way, per-diem employment data across multiple
+  employers is itself sensitive (reveals where someone works and when) and
+  deserves access controls even if it never becomes clinical PHI.
+
+analytics: >
+  If PHI-adjacent: route analytics through BigQuery export from the covered
+  Firestore store with care taken not to export PHI fields into an
+  analytics-only dataset without an equivalent compliance boundary around
+  that dataset too. If out of scope: standard Analytics for Firebase +
+  BigQuery export as in the other profiles.
+
+testing_emulators: >
+  Firebase Local Emulator Suite (Firestore + Auth + Storage) covers most of
+  the local loop; Cloud Run's own container test harness covers the
+  server-side validation endpoints. Explicitly test offline-queue-then-sync
+  clock-in scenarios (airplane-mode-style tests), not just the happy-path
+  online case -- this is the profile's core differentiator and the place a
+  generic Firebase tutorial will not have exercised.
+
+deployment: >
+  Separate Google Cloud projects (not just separate Firebase "environments")
+  for any PHI-adjacent build, since the BAA and covered-product
+  configuration is a project-level/org-level concern. Facility-specific
+  configuration (branding, shift-type taxonomy) should be data-driven, not
+  per-facility code forks.
+
+observability: >
+  Cloud Monitoring + Cloud Logging on the Cloud Run compute layer with
+  audit logging enabled on Firestore/Cloud Storage access if PHI-adjacent
+  (Cloud Audit Logs, part of the compliance posture, not optional
+  ornamentation); alert on offline-sync-queue depth per device as a leading
+  indicator of a nurse whose clock-in data is stuck unsynced.
+
+known_pitfalls:
+  - "Defaulting to plain Firebase Authentication on a PHI-adjacent build because 'it is Firebase, it must be covered' -- it is explicitly NOT on the BAA covered-products list."
+  - "Using Realtime Database for a 'quick' shift-status indicator that turns out to carry PHI-adjacent context -- RTDB is never covered."
+  - "Treating client-reported clock-in/out timestamps as authoritative without server-side reconciliation, both for compliance and for pay-accuracy disputes."
+  - "Letting the PHI-scoping decision happen implicitly feature-by-feature instead of being written down once in the product brief."
+  - "Assuming offline sync 'just works' because Firestore has an offline cache, without testing extended-offline (cache-eviction) and clock-in/out conflict scenarios explicitly."
+
+references:
+  - url: "https://cloud.google.com/security/compliance/hipaa"
+    accessed: "2026-09-17"
+  - url: "https://www.accountablehq.com/post/is-firebase-hipaa-compliant-baa-covered-services-and-how-to-use-it-safely"
+    accessed: "2026-09-17"
+  - url: "https://firebase.blog/posts/2026/04/whats-new-sql-connect/"
+    accessed: "2026-09-17"
+  - url: "https://firebase.blog/posts/2024/11/dataconnect-pricing/"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/firestore/locations"
+    accessed: "2026-09-17"

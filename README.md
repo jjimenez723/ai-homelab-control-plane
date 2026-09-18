@@ -92,7 +92,8 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 19-model-evaluation.md                # ACB-v1 capability suites + the Legacy 20 canary's role
 │   ├── 20-prompt-management.md               # prompt registry, composition layers, eval/production parity
 │   ├── 21-autonomous-routing.md              # the gates and the test matrix for attended-autonomous runs
-│   └── 22-evaluation-campaign.md             # angel-eval: the unattended Gate-2 campaign runner
+│   ├── 22-evaluation-campaign.md             # angel-eval: the unattended Gate-2 campaign runner
+│   └── 27-backend-baselines.md               # sourced Firebase/GCP/Supabase backend evaluation (workstream F)
 ├── data/
 │   ├── video-learning-queue.yaml
 │   └── ui-library-registry.yaml
@@ -108,7 +109,15 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── project-manifest.yaml
 │   ├── client-manifest.yaml
 │   ├── media-sidecar.example.json
-│   └── node-manifest.yaml
+│   ├── node-manifest.yaml
+│   └── backend-profiles/     # machine-readable backend selections per app class (docs/27); index.yaml lists stable ids
+│       ├── index.yaml
+│       ├── social-behavior-change.yaml
+│       ├── nursing-shift-productivity.yaml
+│       ├── single-player-game.yaml
+│       ├── multiplayer-game.yaml
+│       ├── reference-boilerplates.yaml
+│       └── README.md
 ├── tools/
 │   ├── backup.py          # restic/rclone backup engine (locking, preflight, status)
 │   ├── backup_cli.py      # the backup/check/restore/retention entry points
@@ -123,6 +132,7 @@ Version 0 should distribute **jobs**, not model tensors:
 │   │   └── acb_v1/        # routing-classification + semantic-naming suites (dev/validation/holdout)
 │   ├── campaign/          # angel-eval: manifest, fingerprint, runner, report, statistics
 │   ├── fixtures/          # verifier-owned code probes; the verdict lives outside the sandbox
+│   ├── export_angel_knowledge.py  # copies docs/27 + templates/backend-profiles/ onto Angel, UUID-verified
 │   └── ingest/            # the `organize` CLI: ingestion + file intelligence
 │       ├── cli.py         # subcommands; every one defaults to a dry run
 │       ├── config.py      # defaults live in code; ingest.yaml only overrides
@@ -145,7 +155,8 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── test_autonomous_routing.py   # the attended-autonomous decision matrix (docs/21)
 │   ├── test_runner_collection.py    # guards against tests that exist but never run
 │   ├── test_backup.py test_backup_recovery_safety.py
-│   └── test_launchd_portability.py test_file_intelligence_launchd.py
+│   ├── test_launchd_portability.py test_file_intelligence_launchd.py
+│   └── test_backend_profiles.py test_export_angel_knowledge.py   # templates/backend-profiles/ validator + export tests (docs/27)
 ├── launchd/
 │   ├── com.ai-homelab.t7-backup.plist.template          # nightly 02:15, loaded
 │   ├── com.ai-homelab.t7-check.plist.template           # Sunday 03:15, loaded
@@ -167,6 +178,7 @@ Version 0 should distribute **jobs**, not model tensors:
     ├── render-/install-/uninstall-backup-t7-launchd
     ├── render-/install-/uninstall-file-intelligence-launchd
     ├── file-intelligence-scheduled           # one-shot; what launchd runs
+    ├── export-angel-knowledge                # copies docs/27 + templates/backend-profiles/ onto Angel
     └── git-hooks/  install-git-hooks.sh
 ```
 
@@ -311,6 +323,26 @@ The two Gate-2 suites (`tools/bench/acb_v1/`) and the prompt registry
 (`tools/prompts/`, D-041) are the machinery this runs against; nothing in
 this repository has certified a model with it yet (`config/
 certifications.example.yaml` stays empty — Gate 2 is still **RED**).
+
+## Backend baselines and application backend profiles
+
+`docs/27-backend-baselines.md` is a sourced, 2026-dated evaluation of the
+Firebase/GCP building blocks the software factory's app pipeline
+(`docs/06-software-factory.md`, north-star item 5) draws on — Firestore,
+Realtime Database, Cloud Functions/Cloud Run, Cloud Storage, App Check, FCM,
+the Local Emulator Suite, Firebase Data Connect/SQL Connect, and adjacent
+GCP services (Cloud SQL, Memorystore, Pub/Sub, Cloud Tasks/Scheduler,
+BigQuery export) — plus Supabase as the non-Firebase comparison point, so
+that "one backend does not fit every app" is a documented, cited position
+rather than an assumption. `templates/backend-profiles/` turns that
+evaluation into four machine-readable application-class profiles (social
+behavior-change, nursing-shift-productivity, single-player-game,
+multiplayer-game) with stable ids the app-spec pipeline validates against
+`templates/backend-profiles/index.yaml`, plus `reference-boilerplates.yaml`
+naming maintained official starters to read (never to vendor into this
+repo). `./scripts/export-angel-knowledge` copies both onto Angel under
+`50-research/knowledge/backend-baselines/` for research use — the tracked
+copies in `docs/` and `templates/` remain the source of truth.
 
 ## Immediate encrypted off-site backup
 

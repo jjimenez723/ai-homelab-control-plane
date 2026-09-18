@@ -1,0 +1,133 @@
+# Maintained, appropriately-licensed reference starters/boilerplates for the
+# backend building blocks evaluated in docs/27-backend-baselines.md. These
+# are pointers to read and learn from -- NEVER vendor their code into this
+# repository. Each entry records what to reuse (patterns/config, read as
+# reference) versus what not to copy blindly (whole-app boilerplate that
+# encodes decisions this repo's own profiles already made differently).
+#
+# `last_commit_verified` is the date this workstream checked the repo was
+# still maintained, not a promise it stays current -- re-verify before an
+# app-spec workstream actually points a generated app at one of these.
+
+schema_version: 1
+
+boilerplates:
+  - name: firebase/quickstart-android
+    url: "https://github.com/firebase/quickstart-android"
+    license: "Apache-2.0"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      Official per-product sample modules (Auth, Firestore, Storage, FCM,
+      App Check, Functions triggers) -- read the specific product sample
+      that matches the feature being built, not the repo as a whole.
+    do_not_copy_blindly: >
+      The repo's overall app scaffolding/build config is a samples
+      monorepo, not a production app template; do not adopt its Gradle
+      structure wholesale into a real product.
+
+  - name: firebase/quickstart-ios
+    url: "https://github.com/firebase/quickstart-ios"
+    license: "Apache-2.0"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      Per-product Swift/Objective-C sample apps for Auth, Firestore, Storage,
+      Messaging, App Check -- the canonical reference for current SDK call
+      shapes (these get updated as SDKs change, so they're a better source
+      of truth than a blog post).
+    do_not_copy_blindly: >
+      Sample-app UI and project settings (bundle IDs, entitlements) are
+      placeholders; do not ship them as-is.
+
+  - name: firebase/quickstart-js
+    url: "https://github.com/firebase/quickstart-js"
+    license: "Apache-2.0"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      Web SDK usage patterns for Auth, Firestore, RTDB, Storage, FCM
+      (HTTP v1-era client registration code) -- verify against current
+      Firebase Web SDK version before reuse, as modular v9+ SDK syntax
+      differs materially from older namespaced-API samples still findable
+      in search results.
+    do_not_copy_blindly: >
+      Do not reuse any FCM *server-side send* sample without confirming it
+      uses the HTTP v1 API -- the legacy server-key HTTP API was retired in
+      2024 and pre-2024 server-side snippets will not work.
+
+  - name: GoogleCloudPlatform/cloud-run-samples
+    url: "https://github.com/GoogleCloudPlatform/cloud-run-samples"
+    license: "Apache-2.0"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      Official multi-language Cloud Run service samples (container
+      structure, health checks, graceful shutdown, WebSocket/session
+      patterns relevant to multiplayer-game.yaml's Cloud Run game-server
+      option).
+    do_not_copy_blindly: >
+      Samples target minimal single-purpose services; do not assume they
+      demonstrate production concerns like session-affinity configuration
+      or multi-region deployment without checking the specific sample.
+
+  - name: GoogleCloudPlatform/golang-samples
+    url: "https://github.com/GoogleCloudPlatform/golang-samples"
+    license: "Apache-2.0"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      Go-specific Cloud Functions/Firebase trigger samples
+      (`functions/firebase/`) -- useful reference for the Cloud Functions
+      2nd gen trigger shapes used across all four profiles if the
+      implementation language is Go.
+    do_not_copy_blindly: >
+      A large, general-purpose GCP samples monorepo; pull only the specific
+      files relevant to the feature being built, not directory trees.
+
+  - name: sbis04/flutterfire-samples
+    url: "https://github.com/sbis04/flutterfire-samples"
+    license: "check repo LICENSE before use (community-maintained, not an official Firebase/Google repo)"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      Flutter + Firebase integration patterns with accompanying articles --
+      useful as a secondary reference for Flutter-specific FlutterFire
+      wiring alongside the official FlutterFire package docs.
+    do_not_copy_blindly: >
+      Community-maintained, not an official Google/Firebase repository --
+      verify the license explicitly before reuse and treat it as a
+      secondary source behind official FlutterFire documentation and the
+      official quickstart repos above.
+
+  - name: googleforgames/agones (examples/)
+    url: "https://github.com/googleforgames/agones"
+    license: "Apache-2.0"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      The `examples/` directory's simple-udp and xonotic reference game
+      servers demonstrate the Agones SDK integration lifecycle (Ready,
+      Allocate, Health, Shutdown) referenced in multiplayer-game.yaml's
+      Agones/GKE option. Agones moved to CNCF Sandbox governance in March
+      2026 and remains actively maintained.
+    do_not_copy_blindly: >
+      Example game servers are deliberately minimal reference
+      implementations (a UDP echo server, an open-source FPS demo), not a
+      template for a real game's networking/anti-cheat architecture.
+
+  - name: FirebaseExtended (org) — Firebase Data Connect / SQL Connect samples
+    url: "https://github.com/FirebaseExtended"
+    license: "predominantly Apache-2.0 (verify per-repo)"
+    last_commit_verified: "2026-09-17"
+    reuse: >
+      Schema/connector examples for Data Connect/SQL Connect referenced by
+      nursing-shift-productivity.yaml's relational-reporting option; check
+      the specific repo under this org for the current product name
+      (Data Connect vs SQL Connect) since the product was renamed in 2026.
+    do_not_copy_blindly: >
+      This is an umbrella org with repos of varying maintenance status --
+      verify the specific repo's last-commit date and license individually
+      before pointing a generated app at it; do not assume org-wide
+      maintenance quality.
+
+notes: >
+  This file records starters to READ, not code to vendor. Deliverable 4
+  (tests/test_backend_profiles.py) enforces that every entry here (and every
+  reference in every profile YAML) has a URL and an accessed/verified date,
+  but does not and cannot verify license terms or upstream maintenance
+  status automatically -- re-check both by hand before an app-spec
+  workstream actually depends on one of these repos.

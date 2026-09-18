@@ -1,0 +1,22 @@
+# Index of backend application-class profiles. The app-spec workstream
+# validates a generated app's `backend_profile.id` field against this list --
+# these ids are load-bearing and must not be renamed without updating every
+# consumer. Add new profiles here when they're added under
+# templates/backend-profiles/; do not remove an id once another workstream
+# may depend on it without a coordinated migration.
+
+schema_version: 1
+
+profiles:
+  - id: social-behavior-change
+    file: social-behavior-change.yaml
+    title: Social behavior-change apps (e.g. quitting smoking, habit streaks with social accountability)
+  - id: nursing-shift-productivity
+    file: nursing-shift-productivity.yaml
+    title: Offline-first nursing/per-diem shift scheduling and productivity apps
+  - id: single-player-game
+    file: single-player-game.yaml
+    title: Single-player games with local persistence and optional cloud save/leaderboards
+  - id: multiplayer-game
+    file: multiplayer-game.yaml
+    title: Real-time multiplayer games with authoritative server state
