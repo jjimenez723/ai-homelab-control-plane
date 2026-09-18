@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.ingest.config import IngestConfig, NamingConfig, SemanticNamingConfig
+import dataclasses
+
+from tools.ingest.config import IngestConfig, SemanticNamingConfig, load_config
 from tools.ingest.status import semantic_certification_note
 
 MODELS = """
@@ -47,7 +49,9 @@ certifications:
 
 
 def _config(model: str) -> IngestConfig:
-    return IngestConfig(naming=NamingConfig(proposer="semantic", semantic=SemanticNamingConfig(model=model)))
+    base = load_config(None)  # built-in defaults, no machine config read
+    naming = dataclasses.replace(base.naming, proposer="semantic", semantic=SemanticNamingConfig(model=model))
+    return dataclasses.replace(base, naming=naming)
 
 
 class SemanticCertificationNoteTests(unittest.TestCase):
