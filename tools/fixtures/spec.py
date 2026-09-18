@@ -59,6 +59,17 @@ def load_fixture(task_id: str, *, root: Path = FIXTURES_ROOT) -> FixtureSpec:
     missing referenced files). Callers treat a raised exception here as a
     verifier-side error, never as evidence about the candidate submission.
     """
+    # `task_id` becomes a path component under `root`, and the `probes.py`
+    # found there is `exec_module`d by `probes.load_probe_builder`. Every other
+    # name in this manifest was already checked; this one -- which comes from a
+    # corpus/suite JSON a caller may point anywhere with `load_corpus(path)` --
+    # was not, so a task id of `../../..` executed Python from outside the
+    # tracked fixtures tree. Nothing in `tools/` may load code from an
+    # untrusted tree (docs/26), and this was the only path that could.
+    _require_relative(task_id, "task_id")
+    if Path(task_id).parts[:1] != (task_id,):
+        raise ValueError(f"task_id {task_id!r} must be a single path component")
+
     fixture_dir = root / task_id
     manifest_path = fixture_dir / "fixture.json"
     if not manifest_path.is_file():

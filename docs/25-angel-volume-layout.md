@@ -133,6 +133,18 @@ So `10-code/` holds clean, non-working copies:
 - **`archives/<name>.git`** — bare mirrors of repositories no longer worked
   in: stale duplicate checkouts, finished engagements, superseded
   experiments. Kept as real object databases so history stays queryable.
+
+`<name>` in both is **one path component**, validated by
+`tools/angel_sync.py::validate_mirror_name` before it is joined to the
+resolved root: letters, digits, dot, dash and underscore, starting with a
+letter or digit, and never `.`, `..`, `.git`, or a name ending in a dot. The
+allowlist exists because `./scripts/refresh-angel-mirrors` derives the name
+from a repository directory but `angel-sync archive --name` takes it from the
+command line, and before D-063 a name containing `..` had the clone land
+*outside* the UUID-verified volume root entirely. A symlink or a non-git
+directory sitting at the mirror path is likewise refused rather than written
+through — resolving a volume by UUID and then following a link out of it
+would make the resolution decorative.
 - **`generated-apps/<app>/`** — see below.
 - **`products/`, `research/`, `client-systems/`, `internal-tools/`** — the
   original scaffold's domains, for clean exports and per-domain code

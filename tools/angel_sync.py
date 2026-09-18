@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -50,11 +51,41 @@ TRUSTED_SKILLS_RELATIVE = Path("40-ai/skills/trusted")
 # own `skills/README.md`, which is exported like any other file.
 EXPORT_RESERVED_NAMES = frozenset({"MANIFEST.yaml"})
 
+# A mirror name becomes a path component under the verified volume root, so it
+# has to be one component and nothing else. `angel-sync archive --name` takes
+# this straight from the command line: before this check, `--name
+# sub/../../../../tmp/evil` had `git clone` create the bare repository *outside*
+# the UUID-verified root (git creates leading directories), and the `rename`
+# that followed then raised an uncaught `FileNotFoundError` -- so the one
+# invariant this module exists to hold, "nothing is written outside the
+# resolved volume", was decided by a caller-supplied string. Checked in
+# `refresh_mirror` rather than in the two `cmd_*` functions because that is the
+# single point both the mirror and the archive paths pass through.
+_SAFE_MIRROR_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
 GIT_READONLY_FLAGS = ("-c", "core.hooksPath=/dev/null", "--no-optional-locks")
 
 
 class AngelSyncError(RuntimeError):
     """A refusal. Raised before anything is written, never part-way through."""
+
+
+def validate_mirror_name(name: str) -> str:
+    """The name, if it is a single safe path component. Raises otherwise.
+
+    Deliberately an allowlist. A denylist of `..` and `/` would still admit a
+    leading dot (a hidden mirror no listing of the directory would show), a
+    trailing dot (which some filesystems silently strip, so the path written
+    and the path reported would differ), and a name that is itself `.git`.
+    """
+    if not isinstance(name, str) or not _SAFE_MIRROR_NAME_RE.match(name):
+        raise AngelSyncError(
+            f"unsafe mirror name {name!r}: a mirror name must be a single path component of "
+            "letters, digits, dot, dash or underscore, starting with a letter or digit"
+        )
+    if name in {".", "..", ".git"} or name.endswith("."):
+        raise AngelSyncError(f"unsafe mirror name {name!r}")
+    return name
 
 
 @dataclass(frozen=True)
@@ -125,12 +156,34 @@ def _record_provenance(mirror: Path, plan: MirrorPlan) -> None:
 
 
 def refresh_mirror(plan: MirrorPlan, mirrors_dir: Path, *, verify: bool = True) -> MirrorResult:
-    """Create or update one bare mirror. Never deletes, never pushes."""
+    """Create or update one bare mirror. Never deletes, never pushes.
+
+    The name is validated before it is joined to `mirrors_dir`, so no caller
+    can steer a write out of the resolved volume root through it.
+    """
+    validate_mirror_name(plan.mirror_name)
     mirror = mirrors_dir / f"{plan.mirror_name}.git"
     if not plan.source_path.is_dir():
         return MirrorResult(plan.mirror_name, mirror, "skipped", None, f"source is gone: {plan.source_path}")
 
+    if mirror.is_symlink():
+        # A symlink at the mirror path points the fetch wherever it likes,
+        # including off the volume. The UUID gate resolved a *root*; following
+        # a link out of it would make that resolution decorative.
+        return MirrorResult(
+            plan.mirror_name, mirror, "skipped", None,
+            f"{mirror} is a symlink; refusing to fetch through it. Remove or replace it by hand.",
+        )
+
     if mirror.exists():
+        if not (mirror / "HEAD").is_file() and not (mirror / "objects").is_dir():
+            # Something else owns this path. `git` would refuse anyway, but it
+            # would report a git error where the useful answer is "this is not
+            # a mirror and nothing here will touch it".
+            return MirrorResult(
+                plan.mirror_name, mirror, "skipped", None,
+                f"{mirror} exists but is not a git repository; refusing to write into it",
+            )
         # A mirror's fetch refspec is `+refs/*:refs/*`. `remote update`
         # without `--prune` deliberately keeps refs the source has deleted:
         # this is backup coverage, so losing history to an upstream deletion
@@ -215,6 +268,9 @@ def cmd_archive(args: argparse.Namespace, prober: VolumeProber | None = None) ->
     a repository is no longer worked in, and the owner makes it. The source
     working copy is never touched.
     """
+    # Before the volume is even resolved: `--name` is the one argument here
+    # that becomes a path, and a refusal should cost nothing.
+    validate_mirror_name(args.name)
     config = load_config(args.config)
     target = resolve_target(
         config, prober or diskutil_volume_prober, allow_dev_storage_root=bool(args.allow_dev_storage_root)

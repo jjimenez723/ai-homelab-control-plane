@@ -36,6 +36,7 @@ from tools.ingest.catalog import (
 )
 from tools.ingest.config import IngestConfig, load_config
 from tools.ingest.identity import local_file_id_for
+from tools.ingest.naming.evidence import sanitize_perceived_text
 from tools.ingest.ledger import (
     DECISION_PROPOSED,
     DECISION_RENAMED,
@@ -932,15 +933,24 @@ def _print_evidence_payload(record: dict, *, show_text: bool) -> None:
 def _print_excerpt(text: str, *, limit: int = 800) -> None:
     """Print a bounded excerpt of stored text, indented and clearly marked.
 
-    The text is already sanitized at the point it was stored
-    (`evidence/types.py::sanitize_extracted_text` strips the control and bidi
-    characters that let a terminal be driven by file content), so this only
-    has to bound the volume.
+    Text reaching here is normally already sanitized at the point it was
+    stored (`evidence/types.py::sanitize_extracted_text` strips the control
+    and bidi characters that let a terminal be driven by file content). It is
+    re-stripped here anyway, for the same reason
+    `naming/evidence.py::_sanitize_excerpt` re-sanitizes at its own boundary:
+    this is the function that hands attacker-influenced text to a terminal,
+    and it must be safe by construction rather than by the provenance of its
+    caller. The `raw_output` column proved the point -- it was bounded but
+    never sanitized, so rows written before that was fixed still contain
+    whatever a model emitted.
     """
     if not text.strip():
         print("      (no text)")
         return
-    excerpt = text[:limit]
+    excerpt = sanitize_perceived_text(text, max_chars=limit)
+    if not excerpt.strip():
+        print("      (no printable text)")
+        return
     print("      --- extracted text (untrusted file content) ---")
     for line in excerpt.splitlines():
         print(f"      | {line}")

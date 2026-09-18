@@ -112,7 +112,31 @@ _EMPTY_TOKENS = frozenset(
 
 # camelCase / PascalCase boundaries, so `GoogleChrome` reads as two words.
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
-_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
+# Word separators: anything that is not a Unicode word character, plus the
+# underscore (which `\w` includes and a filename uses as a separator).
+#
+# This was `[^A-Za-z0-9]+`, which is the same expression for an ASCII name and
+# a *destructive* one for any other script: it treated every non-ASCII letter
+# as a separator, so `отчет-о-финансовых-результатах.pdf` tokenized to nothing
+# and `café-menu` tokenized to `caf`. An owner-authored Russian, Greek,
+# Japanese or Arabic filename therefore scored POOR with zero meaningful
+# words, which makes it *eligible for automatic renaming* -- invariant 7 ("a
+# useful name is left alone") silently did not hold outside the Latin
+# alphabet. `[\W_]+` is character-for-character equivalent on ASCII input and
+# correct on the rest.
+_SPLIT_RE = re.compile(r"[\W_]+")
+
+# A token of two characters is normally too short to carry a subject, which is
+# true of alphabetic scripts and false of ideographic ones: 報告 ("report") and
+# 契約 ("contract") are whole words in two characters. East Asian width is the
+# property that separates the two cases, and it is a Unicode fact rather than
+# a guess about the language.
+_MIN_TOKEN_CHARS = 3
+_MIN_WIDE_TOKEN_CHARS = 2
+
+
+def _is_wide(character: str) -> bool:
+    return unicodedata.east_asian_width(character) in ("W", "F")
 
 
 def _normalize(stem: str) -> str:
@@ -141,7 +165,8 @@ def meaningful_tokens(stem: str, vocabulary: frozenset[str] | tuple[str, ...] = 
             continue
         if token.isdigit():
             continue
-        if len(token) < 3:
+        minimum = _MIN_WIDE_TOKEN_CHARS if any(_is_wide(character) for character in token) else _MIN_TOKEN_CHARS
+        if len(token) < minimum:
             continue
         if not any(character.isalpha() for character in token):
             continue

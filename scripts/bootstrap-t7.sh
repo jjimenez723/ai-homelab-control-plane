@@ -65,6 +65,15 @@ if [[ ! -d "$ROOT" ]]; then
   exit 2
 fi
 
+# The "a mounted volume needs --expect-uuid" check below is a test on this
+# string, so the string has to be the real path. `/tmp/angel` symlinked to
+# /Volumes/Angel, or `../../Volumes/Angel`, both named the real volume and
+# both failed the `/Volumes/*` prefix test -- which skipped UUID verification
+# entirely on precisely the disk it exists to protect. `pwd -P` resolves every
+# symlink and every `..`, so the check sees what will actually be written to.
+ROOT="$(cd "$ROOT" && pwd -P)"
+ROOT="${ROOT%/}"
+
 RESOLVED_UUID=""
 if [[ -n "$EXPECT_UUID" ]]; then
   if ! command -v diskutil >/dev/null 2>&1; then
