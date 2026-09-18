@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Create or refresh the bare Git mirrors under Angel `10-code/mirrors/`.
+#
+# The volume is resolved by APFS UUID through the same `tools/ingest/t7.py`
+# resolver that ingestion and backup use; a name-matched or absent volume is
+# refused before anything is written. Mirrors are cloned from the local
+# working copy (so local-only branches are covered) and nothing is ever
+# pushed or deleted.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ -x "$ROOT_DIR/.venv/bin/python3" ]]; then
+  PYTHON="$ROOT_DIR/.venv/bin/python3"
+else
+  PYTHON="python3"
+fi
+
+exec "$PYTHON" -m tools.angel_sync mirrors "$@"

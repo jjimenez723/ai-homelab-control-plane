@@ -28,7 +28,14 @@ VTS_COMMIT = "c527aa9b64cdb7e39a9d20dae6218c7cfc513473"
 VTS_VERSION = "0.2.4"
 # Candidate skills are untrusted, video-derived text. They must never live under the
 # trusted `skills/` tree, because agent harnesses load every SKILL.md they find there.
-DEFAULT_CANDIDATES_ROOT = Path("knowledge/skill-candidates")
+# They also should not accumulate inside the repository working tree: `knowledge/`
+# is gitignored, so nothing leaked into Git, but a relative path meant the write
+# target was "wherever this happened to be invoked from". The home is now the
+# UUID-verified volume (docs/25-angel-volume-layout.md), with a Mac-local
+# gitignored fallback so the pipeline still runs with Angel unplugged.
+ANGEL_CANDIDATES_RELATIVE = Path("40-ai/skills/candidates")
+# Gitignored (`.state/`), outside `skills/`, and outside `knowledge/`.
+DEFAULT_CANDIDATES_ROOT = Path(".state/social-video/skill-candidates")
 INSTAGRAM_ID = re.compile(r"(?:instagram\.com)/(?:reel|p)/([A-Za-z0-9_-]+)", re.I)
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
 YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{6,}$")
@@ -445,13 +452,49 @@ def default_vts_bin() -> str:
     return os.environ.get("VTS_EXTRACT_BIN", str(default))
 
 
+def resolve_candidates_root(explicit: Path | None = None) -> Path:
+    """Where untrusted candidate skills are written.
+
+    Order: an explicit `--candidates-root`; then Angel
+    `40-ai/skills/candidates/` if the configured volume UUID is mounted and
+    writable; then the gitignored Mac-local fallback.
+
+    The volume resolution is deliberately best-effort. Unlike model weights
+    (D-037), a candidate skill is small and the pipeline is worth running
+    with the drive unplugged -- and the fallback is still outside `skills/`
+    and outside Git, so the trust boundary holds either way. What is *not*
+    optional is that neither destination is ever the trusted tree.
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        from tools.ingest.config import load_config
+        from tools.ingest.t7 import resolve_t7
+        from tools.ingest.volumes import diskutil_volume_prober
+
+        resolved = resolve_t7(load_config(None), diskutil_volume_prober, for_apply=False)
+        if resolved.volume_uuid:
+            return resolved.root / ANGEL_CANDIDATES_RELATIVE
+    except Exception:
+        # An absent, locked, misconfigured, or unreadable volume is a normal
+        # condition here, not an error: fall back to the Mac-local path.
+        pass
+    return DEFAULT_CANDIDATES_ROOT
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", help="Instagram Reel URL, YouTube URL, or local video file")
     parser.add_argument("--force", action="store_true", help="reprocess even if a completed artifact exists")
     parser.add_argument("--knowledge-root", type=Path, default=Path("knowledge/social-video"))
     parser.add_argument("--work-root", type=Path, default=Path("work/social-video"))
-    parser.add_argument("--candidates-root", type=Path, default=DEFAULT_CANDIDATES_ROOT)
+    parser.add_argument(
+        "--candidates-root",
+        type=Path,
+        default=None,
+        help="Where untrusted candidate skills go. Default: Angel 40-ai/skills/candidates/ "
+             f"when the configured volume is mounted, else {DEFAULT_CANDIDATES_ROOT}.",
+    )
     parser.add_argument("--vts-bin", default=default_vts_bin())
     return parser.parse_args(argv)
 
@@ -462,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         args.input,
         knowledge_root=args.knowledge_root,
         work_root=args.work_root,
-        candidates_root=args.candidates_root,
+        candidates_root=resolve_candidates_root(args.candidates_root),
         vts_bin=args.vts_bin,
         force=args.force,
     )

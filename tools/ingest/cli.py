@@ -52,6 +52,7 @@ from tools.ingest.enrichment import enrich_asset
 from tools.ingest.exclusions import ExclusionReason
 from tools.ingest.git_repos import inspect_git_repo
 from tools.ingest.identity import source_ref_id_for
+from tools.ingest.repos_report import cmd_repos_report as cmd_repos_report_impl
 from tools.ingest.scanner import ScanResult, scan_source
 from tools.ingest.sources import (
     ALL_SOURCE_CLASSES,
@@ -494,6 +495,27 @@ def _print_triage_reports(report: PipelineReport, *, apply: bool) -> None:
         print("\nDry run. No files were renamed, moved, or removed.")
 
 
+def cmd_repos_report(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """Inventory development repositories; write two reports and nothing else.
+
+    The default report directory is on the volume, so it goes through the
+    same UUID resolver every other write does. `--report-dir` writes wherever
+    it points -- useful for a local copy -- and never needs the volume.
+    """
+    config = config if config is not None else load_config(args.config)
+    report_dir: Path | None = getattr(args, "report_dir", None)
+    if report_dir is None:
+        resolved = resolve_t7(
+            config,
+            prober or diskutil_volume_prober,
+            for_apply=False,
+            allow_storage_root_override=bool(getattr(args, "allow_dev_storage_root", False)),
+        )
+        report_dir = resolved.system_dir / "migration-reports"
+    roots = tuple(getattr(args, "roots", None) or ()) or None
+    return cmd_repos_report_impl(report_dir, config=config, roots=roots)
+
+
 def cmd_status(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
     config = config if config is not None else load_config(args.config)
     data = collect_status(
@@ -929,6 +951,27 @@ def build_parser() -> argparse.ArgumentParser:
     correct.add_argument("path", type=Path, help="The file as it is now named on disk.")
     _add_common_arguments(correct)
 
+    repos = subparsers.add_parser(
+        "repos-report",
+        help="Inventory development repositories. Read-only: nothing is moved, fetched, or pushed.",
+    )
+    repos.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+        help="Where to write repos-inventory.yaml and unpushed-repos.md. "
+             "Defaults to 90-system/migration-reports/ on the UUID-verified volume.",
+    )
+    repos.add_argument(
+        "--root",
+        type=Path,
+        action="append",
+        default=None,
+        dest="roots",
+        help="A source root to inventory. Repeatable. Defaults to ~/Documents, ~/Projects, ~/OpenMontage.",
+    )
+    _add_common_arguments(repos)
+
     return parser
 
 
@@ -945,6 +988,7 @@ def main(argv: list[str] | None = None, prober: VolumeProber | None = None) -> i
         "duplicates": cmd_duplicates,
         "evidence": cmd_evidence,
         "correct-name": cmd_correct_name,
+        "repos-report": cmd_repos_report,
         "keep": cmd_decide,
         "ignore": cmd_decide,
     }[args.command]

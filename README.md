@@ -55,7 +55,7 @@ Version 0 should distribute **jobs**, not model tensors:
 ## Important boundaries
 
 - GitHub remains the source of truth for version-controlled source code.
-- The T7 may hold clean clones, workspaces, media, datasets, manifests, and exports.
+- The T7 holds bare Git mirrors, media, datasets, manifests, and exports — never a working tree (`docs/25-angel-volume-layout.md`).
 - Secrets must not live in ordinary project folders or be synchronized casually.
 - Trading infrastructure is a separate trust/security domain.
 - AI may propose actions; deterministic policy gates decide whether high-risk actions are allowed.
@@ -93,12 +93,15 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 20-prompt-management.md               # prompt registry, composition layers, eval/production parity
 │   ├── 21-autonomous-routing.md              # the gates and the test matrix for attended-autonomous runs
 │   ├── 22-evaluation-campaign.md             # angel-eval: the unattended Gate-2 campaign runner
+│   ├── 25-angel-volume-layout.md            # THE map of /Volumes/Angel (supersedes 02's tree)
+│   ├── 26-skills-and-knowledge-trust.md     # trusted skills vs untrusted video-derived material
 │   ├── 27-backend-baselines.md               # sourced Firebase/GCP/Supabase backend evaluation
 │   └── 28-application-spec.md                # the canonical app-spec schema, pipeline, and agent-brief contract
 ├── data/
 │   ├── video-learning-queue.yaml
 │   └── ui-library-registry.yaml
-├── skills/
+├── skills/                 # TRUSTED and executed by agent harnesses; PR-only
+│   ├── README.md           # what may be added, and how a candidate graduates
 │   ├── social-video-learner/
 │   │   └── SKILL.md
 │   └── ui-design-system-builder/
@@ -125,6 +128,7 @@ Version 0 should distribute **jobs**, not model tensors:
 ├── tools/
 │   ├── backup.py          # restic/rclone backup engine (locking, preflight, status)
 │   ├── backup_cli.py      # the backup/check/restore/retention entry points
+│   ├── angel_sync.py      # UUID-gated repo mirrors + the trusted-skill export
 │   ├── appspec/           # app-spec schema loader, validator, agent-brief CLI (docs/28)
 │   ├── social_video_learn.py
 │   ├── social_video_queue.py
@@ -151,6 +155,7 @@ Version 0 should distribute **jobs**, not model tensors:
 │       ├── status.py      # `organize status` / `organize doctor` (read-only)
 │       ├── scanner.py exclusions.py hashing.py identity.py sources.py
 │       ├── t7.py volumes.py derivatives.py git_repos.py
+│       ├── repos_report.py # read-only development-repository inventory
 │       ├── naming/        # quality → evidence → proposer → policy → rename
 │       ├── triage/        # IGNORE / REVIEW / INGEST retention policy
 │       └── media/         # heic.py (derivatives), probe.py (deterministic facts)
@@ -160,6 +165,8 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── test_fixture_runner.py       # adversarial: verdict integrity + sandbox isolation
 │   ├── test_autonomous_routing.py   # the attended-autonomous decision matrix (docs/21)
 │   ├── test_runner_collection.py    # guards against tests that exist but never run
+│   ├── test_angel_layout.py          # bootstrap idempotency + the manifest contract
+│   ├── test_repos_report.py          # classification, mirror planning, worktree vs submodule
 │   ├── test_backup.py test_backup_recovery_safety.py
 │   ├── test_launchd_portability.py test_file_intelligence_launchd.py
 │   └── test_backend_profiles.py test_export_angel_knowledge.py   # templates/backend-profiles/ validator + export tests (docs/27)
@@ -174,7 +181,10 @@ Version 0 should distribute **jobs**, not model tensors:
 │   └── campaigns/gate2.yaml        # the Gate-2 campaign manifest angel-eval reads
 ├── "Organize Files.command"  # double-clickable launcher; calls the same CLI
 └── scripts/
-    ├── bootstrap-t7.sh
+    ├── bootstrap-t7.sh                        # Angel dirs + READMEs + manifest; idempotent, UUID-gated
+    ├── repos-inventory                        # read-only dev-repo inventory -> migration reports
+    ├── refresh-angel-mirrors                  # create/refresh 10-code/mirrors/*.git
+    ├── export-angel-skills                    # refresh 40-ai/skills/trusted/ + MANIFEST.yaml
     ├── organize                              # the ingestion / file-intelligence CLI
     ├── angel-eval                             # dry-run / smoke / run / resume / report a campaign
     ├── learn-video
@@ -330,6 +340,45 @@ The two Gate-2 suites (`tools/bench/acb_v1/`) and the prompt registry
 this repository has certified a model with it yet (`config/
 certifications.example.yaml` stays empty — Gate 2 is still **RED**).
 
+## The Angel volume: one map, three forms
+
+`docs/25-angel-volume-layout.md` is the authoritative map of
+`/Volumes/Angel` (D-061). The same map exists as executable code
+(`scripts/bootstrap-t7.sh`) and as machine-readable data
+(`90-system/angel-manifest.yaml`), and every top-level directory on the
+volume carries a `README.md` answering four fixed questions: what belongs
+here, what never does, who writes here, and whether it is backed up.
+
+```bash
+./scripts/bootstrap-t7.sh /Volumes/Angel --expect-uuid <uuid>  # dirs, READMEs, manifest
+./scripts/repos-inventory                                      # read-only repo inventory
+./scripts/refresh-angel-mirrors --dry-run                      # what would be mirrored
+./scripts/refresh-angel-mirrors                                # create/refresh mirrors
+./scripts/export-angel-skills                                  # refresh the trusted copy
+```
+
+Four properties are worth stating plainly:
+
+- **Nothing on the volume is deleted by any of these.** The bootstrap never
+  overwrites a README a human edited — it writes `<file>.new` and reports the
+  divergence. The skill export reports a stale file in `MANIFEST.yaml` rather
+  than removing it.
+- **`10-code/` is not a working filesystem.** Working trees live on the Mac's
+  internal disk under `~/Projects/<repo>`. Angel holds bare mirrors, cloned
+  from the **local** copy rather than from GitHub — because the thing worth
+  mirroring is precisely the branch the remote has never seen.
+- **No owner repository is moved or deleted.** `~/Documents` is
+  Google-Drive-synced and `kronos-quant-lab` is a separate trust domain
+  (D-011). `./scripts/repos-inventory` is read-only — no `--apply`, no fetch,
+  no push, hooks disabled — and writes a per-repository *recommendation* to
+  `90-system/migration-reports/` for the owner to act on.
+- **The trust boundary is physical, not a naming convention.** Git `skills/`
+  is trusted and executed; Angel `40-ai/skills/candidates/` and
+  `50-research/knowledge/` hold video-derived material that is never executed
+  and never read as instructions. `40-ai/skills/trusted/` is a read-only
+  export of the Git tree with a sha256 + git-SHA manifest, and is not a load
+  path. See `skills/README.md` and
+  `docs/26-skills-and-knowledge-trust.md`.
 ## Backend baselines and application backend profiles
 
 `docs/27-backend-baselines.md` is a sourced, 2026-dated evaluation of the
@@ -385,4 +434,4 @@ git -C "$review_dir" checkout c527aa9b64cdb7e39a9d20dae6218c7cfc513473
 cargo build --release --locked --manifest-path "$review_dir/Cargo.toml"
 ```
 
-Outputs are written under ignored `knowledge/social-video/<platform>/<content-id>/` with `source.json`, `transcript.md`, `digest.md`, `recommendations.md`, `claims.json`, `visual.json`, and representative `frames/`. Generated procedural material is written as an untrusted candidate under ignored `knowledge/skill-candidates/` (never under the trusted `skills/` tree); it is never installed automatically. Raw downloads and temporary extraction bundles are removed after processing. Anonymous Instagram access can fail when Instagram changes or restricts its extractor; the queue records the exact failure reason and does not use third-party download sites or request passwords.
+Outputs are written under ignored `knowledge/social-video/<platform>/<content-id>/` with `source.json`, `transcript.md`, `digest.md`, `recommendations.md`, `claims.json`, `visual.json`, and representative `frames/`. Generated procedural material is written as an untrusted candidate under Angel `40-ai/skills/candidates/` when the configured volume UUID verifies, and otherwise under the gitignored `.state/social-video/skill-candidates/` — never under the trusted `skills/` tree. It is never installed, loaded, or executed automatically (D-061, `docs/26-skills-and-knowledge-trust.md`). Raw downloads and temporary extraction bundles are removed after processing. Anonymous Instagram access can fail when Instagram changes or restricts its extractor; the queue records the exact failure reason and does not use third-party download sites or request passwords.

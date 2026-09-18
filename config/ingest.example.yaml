@@ -305,6 +305,8 @@ backup:
   # owner; without excluding it restic exits 3 on every otherwise-healthy run.
   exclude_patterns:
     - "90-system/staging/**"
+    # Volume-local runtime scratch (docs/25). Regenerable by definition.
+    - "90-system/cache/**"
     # Downloadable model weights are regenerated from recorded provider/tag/digest.
     # Manifests and evaluation records under 40-ai remain backed up.
     - "40-ai/model-cache/**"
