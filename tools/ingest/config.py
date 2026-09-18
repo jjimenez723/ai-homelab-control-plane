@@ -557,6 +557,21 @@ def load_config(path: Path | None = None) -> IngestConfig:
         inbox_relative_path=t7_raw["inbox_relative_path"],
         system_relative_path=t7_raw["system_relative_path"],
     )
+    # Both are joined to the UUID-verified volume root by `t7.resolve_t7`, and
+    # `Path(root) / "/tmp/x"` in pathlib *is* `/tmp/x` -- so an absolute value
+    # here silently relocated the catalog, the staging directory, the sidecars
+    # and the whole organized inbox off the verified volume, and a `..` value
+    # walked out of it. `automation.state_relative_path` has been validated for
+    # exactly this since it was added; these two were the gap. D-026's rule is
+    # that a config file alone must never be able to move a write target
+    # outside the volume the UUID check resolved.
+    for key in ("inbox_relative_path", "system_relative_path"):
+        candidate = Path(str(getattr(t7, key)))
+        if candidate.is_absolute() or ".." in candidate.parts or not str(candidate).strip():
+            raise ValueError(
+                f"t7.{key} must be a relative path inside the volume root, "
+                "without `..` (it is joined to the UUID-verified root)"
+            )
 
     sources_raw = merged["sources"]
     screenshots_raw = sources_raw.get("screenshots") or {}

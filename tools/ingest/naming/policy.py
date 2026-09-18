@@ -35,6 +35,29 @@ _CONTROL_CHARS = {chr(code) for code in range(0x20)} | {chr(0x7F)}
 # classic way to make one name look like another.
 _INVISIBLE_CHARS = {"​", "‌", "‍", "⁠", "﻿", "‪", "‫", "‭", "‮", "⁦", "⁧", "⁨", "⁩"}
 
+# The two sets above name the characters this module has always called out by
+# hand, and they are kept because they document the intent. They are not the
+# test, though: enumerating an attack class by hand leaves the members nobody
+# thought of, and a proposer is untrusted by construction (D-022), so the
+# filter is by Unicode *category* and the hand-written sets are a subset of it.
+#
+# * `Cc` -- C0 controls *and* the C1 block (U+0080-U+009F). A C1 byte is what
+#   makes an 8-bit ANSI/OSC escape sequence work in a terminal that still
+#   honours one, and `organize` prints filenames to a terminal.
+#   `evidence/types.py` already strips C1 from extracted text for exactly this
+#   reason; a filename is the more durable place for it to land.
+# * `Cf` -- every format character, not only the nine bidi/zero-width ones
+#   listed above. U+200E/U+200F (the bidi *marks*), U+202C, U+00AD (soft
+#   hyphen) and U+2062 (invisible times) were all invisible in a filename and
+#   all survived.
+# * `Cs` -- lone surrogates. These cannot be encoded to UTF-8 at all, so one
+#   reaching the length check below raised `UnicodeEncodeError` instead of
+#   `NamePolicyError`: a rejection that left no `naming_history` row, which is
+#   the one outcome D-057 says an audit trail must never have.
+# * `Co` -- private-use characters, which render as whatever the reader's font
+#   decides and therefore cannot be part of a name we claim to have recorded.
+_ILLEGAL_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co"})
+
 # Characters that render as a path separator but are not one. A name carrying
 # one looks like a directory in Finder and in any UI that shows it, and the
 # module already blocks invisible and bidi characters for the same reason:
@@ -111,10 +134,31 @@ def normalized_extension(original_filename: str) -> str:
     return suffixes[-1] if suffixes else ""
 
 
-def sanitize_stem(stem: str, *, max_length: int) -> str:
+def _truncate_to_bytes(text: str, *, max_bytes: int) -> str:
+    """The longest prefix of `text` that fits in `max_bytes` UTF-8 bytes.
+
+    Cuts on a character boundary, never inside one: `bytes[:n]` on a
+    multi-byte string produces an invalid sequence, and a filename the
+    filesystem would reject or alter is a filename the ledger would be lying
+    about.
+    """
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    encoded = text.encode("utf-8")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore")
+
+
+def sanitize_stem(stem: str, *, max_length: int, max_bytes: int = MAX_COMPONENT_BYTES) -> str:
     stem = unicodedata.normalize("NFC", stem)
     stem = "".join(character for character in stem if character not in _CONTROL_CHARS)
     stem = "".join(character for character in stem if character not in _INVISIBLE_CHARS)
+    # The categorical filter behind the two hand-written sets above; see
+    # `_ILLEGAL_UNICODE_CATEGORIES` for what each category buys.
+    stem = "".join(
+        character
+        for character in stem
+        if unicodedata.category(character) not in _ILLEGAL_UNICODE_CATEGORIES
+    )
     stem = "".join("-" if character in _SLASH_HOMOGLYPHS else character for character in stem)
     stem = "".join("-" if character in _FORBIDDEN_CHARS else character for character in stem)
 
@@ -136,6 +180,16 @@ def sanitize_stem(stem: str, *, max_length: int) -> str:
     stem = stem.strip(" .-")
     if len(stem) > max_length:
         stem = stem[:max_length].rsplit("-", 1)[0] or stem[:max_length]
+    # `max_length` counts characters, which is the readability cap. APFS counts
+    # *bytes*, and the two diverge by 3x for CJK and 4x for emoji -- so a
+    # perfectly ordinary Japanese document title cleared the character cap and
+    # then blew the 255-byte ceiling, where `validate_proposal` refused it
+    # outright. The ceiling is a limit to keep a name under, not a reason to
+    # leave a file unnamed, so it is enforced here by trimming.
+    byte_budget = max(1, max_bytes - len(date_prefix.encode("utf-8")))
+    if len(stem.encode("utf-8")) > byte_budget:
+        stem = _truncate_to_bytes(stem, max_bytes=byte_budget)
+        stem = stem.rsplit("-", 1)[0] or stem
     stem = stem.strip(" .-")
     return f"{date_prefix}{stem}" if stem else ""
 
@@ -181,7 +235,11 @@ def validate_proposal(
             candidate = head
 
     stem_budget = max(8, max_filename_length - len(extension))
-    stem = sanitize_stem(candidate, max_length=stem_budget)
+    # `file-` is the longest prefix `_RESERVED_STEMS` can add below, so the
+    # byte budget leaves room for it rather than letting a reserved name be
+    # the one case that overflows the component ceiling.
+    byte_budget = max(8, MAX_COMPONENT_BYTES - len(extension.encode("utf-8")) - len("file-"))
+    stem = sanitize_stem(candidate, max_length=stem_budget, max_bytes=byte_budget)
     if not stem:
         raise NamePolicyError("proposal contains no usable characters")
 
@@ -190,6 +248,10 @@ def validate_proposal(
         stem = f"file-{stem}"
 
     filename = f"{stem}{extension}"
+    # `sanitize_stem` now trims to the byte budget, so reaching this is a bug
+    # in the budget arithmetic rather than a hostile proposal. It stays as a
+    # backstop: a name too long for the filesystem must never be *applied*,
+    # and a `NamePolicyError` is the recorded outcome for that.
     if len(filename.encode("utf-8")) > MAX_COMPONENT_BYTES:
         raise NamePolicyError("proposal exceeds the maximum filename length")
 

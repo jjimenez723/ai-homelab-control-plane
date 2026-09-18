@@ -140,6 +140,25 @@ _LABEL_RE = re.compile(
 
 
 def _bounded_raw(text: str) -> str:
+    """The model's answer, bounded but otherwise **verbatim**, for the ledger.
+
+    Deliberately not sanitized, and that is the one place in this repository
+    where file-derived text is stored as-is. The column exists so a refused
+    answer can be read back exactly as the model produced it: a zero-width
+    character, a BOM or a NUL byte is *why* the answer was refused, and a
+    column that had quietly removed it would show a name that looks perfectly
+    legal next to a rejection reason that makes no sense.
+    `tests/ingest/test_semantic_proposer.py` asserts this fidelity per hostile
+    case.
+
+    What that costs is that the column can hold a terminal escape sequence --
+    the prompt carried attacker-influenced document text, so a payload can
+    persuade a model to echo one. That is defanged at the **print** boundary
+    instead (`cli.py::_print_excerpt`), which is the only place this value
+    reaches a terminal, and which therefore also protects every row written
+    before anyone thought about it. Storage keeps the truth; display is where
+    the truth is made safe to look at.
+    """
     return text[:MAX_RAW_OUTPUT_CHARS]
 
 
