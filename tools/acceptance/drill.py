@@ -199,7 +199,18 @@ def run(root: Path, *, evidence: dict | None, naming_extra: dict | None) -> Dril
     out = step("rerun-idempotent", _organize(root, "triage", "all", "--apply"))
     after_names = _names(downloads) | {f"S/{n}" for n in _names(screenshots)}
     report.check("rerun renames nothing", before_names == after_names, f"{before_names ^ after_names}")
-    report.check("rerun reports cache hits", "cache" in out.lower() or True, "")
+    # The rerun must reuse cached perception rather than re-OCR/re-transcribe:
+    # `status.json` (written atomically by automation.py after every run)
+    # counts cache hits per source, and every evaluated file's evidence was
+    # collected on the earlier apply run.
+    status = json.loads((root / "state" / "status.json").read_text())
+    hits = sum(int(source.get("evidence_cache_hits", 0)) for source in status.get("sources", []))
+    collected = sum(int(source.get("evidence_collected", 0)) for source in status.get("sources", []))
+    report.check(
+        "rerun reuses the content-keyed evidence cache",
+        hits > 0 and hits >= collected,
+        f"cache_hits={hits} evidence_collected={collected}",
+    )
 
     # 5. auto-ingest: verified transaction path
     _write_config(root, auto_ingest=True, evidence=evidence, naming_extra=naming_extra)
