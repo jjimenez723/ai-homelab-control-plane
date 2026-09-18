@@ -47,6 +47,16 @@ from tools.ingest.media.probe import (
 # layer" -- is the same for all of them.
 _OPAQUE_MEDIA_KINDS = frozenset({MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_VIDEO, MEDIA_OTHER})
 
+# Spreadsheet, presentation, and delimited-text extensions that
+# `tools/ingest/evidence/office.py` reads natively (D-029's native-text
+# extractor, extended -- see docs/17). Checked by extension rather than
+# `media_kind` alone, and ahead of the `media_kind` dispatch below, so this
+# fires the same way regardless of exactly how the probe happened to bucket
+# the file (`.xlsm` in particular is a document container the same way
+# `.xlsx` is; `.csv`/`.tsv` are structured text). Macro-enabled `.xlsm` is
+# routed identically to `.xlsx` -- the macro stream is never read either way.
+_OFFICE_NATIVE_TEXT_SUFFIXES = frozenset({".xlsx", ".xlsm", ".pptx", ".csv", ".tsv"})
+
 
 @dataclass(frozen=True)
 class EvidenceRoute:
@@ -103,7 +113,11 @@ def route_for(
     vision = False
     reason = ""
 
-    if media_kind == MEDIA_TEXT:
+    if extension in _OFFICE_NATIVE_TEXT_SUFFIXES:
+        rules.append("r17-office-native-text")
+        native_text = True
+        reason = "spreadsheet/presentation/csv: native text only"
+    elif media_kind == MEDIA_TEXT:
         rules.append("r2-text")
         native_text = True
         reason = "plain/structured text file: native text only"
@@ -119,9 +133,10 @@ def route_for(
             reason = "pdf has no confirmed embedded text: attempt native extraction and OCR"
     elif media_kind == MEDIA_DOCUMENT:
         # Any non-PDF document extension classified as MEDIA_DOCUMENT by the
-        # probe (.docx, .pptx, .xlsx, .pages, .rtf, .epub, and so on) is an
-        # office/e-book container with its own native text layer -- OCR has
-        # nothing to add over a text extractor that understands the format.
+        # probe (.docx, .pages, .rtf, .epub, and so on -- .xlsx/.xlsm/.pptx
+        # are claimed by r17 above) is an office/e-book container with its
+        # own native text layer -- OCR has nothing to add over a text
+        # extractor that understands the format.
         rules.append("r5-office-document")
         native_text = True
         reason = "office/e-book document: native text only"

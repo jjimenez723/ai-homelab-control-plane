@@ -174,6 +174,18 @@ def text_extractors() -> tuple[TextExtractor, ...]:
     exactly how such cycles happen). Order matters: `extract.py` uses the
     first extractor whose `supports()` returns True.
     """
+    from tools.ingest.evidence.office import CsvTextExtractor, PptxTextExtractor, XlsxTextExtractor
     from tools.ingest.evidence.text import DocxTextExtractor, PdfTextExtractor, PlainTextExtractor
 
-    return (PlainTextExtractor(), PdfTextExtractor(), DocxTextExtractor())
+    # CsvTextExtractor precedes PlainTextExtractor deliberately: `.csv`/`.tsv`
+    # already satisfy PlainTextExtractor.supports() (media_kind is text), and
+    # "first extractor whose supports() returns True wins" means order alone
+    # decides which one actually handles a CSV.
+    return (
+        CsvTextExtractor(),
+        PlainTextExtractor(),
+        PdfTextExtractor(),
+        DocxTextExtractor(),
+        XlsxTextExtractor(),
+        PptxTextExtractor(),
+    )
