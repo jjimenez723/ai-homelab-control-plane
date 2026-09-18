@@ -178,6 +178,7 @@ DEFAULTS: dict[str, Any] = {
         # an explicit decision.
         "exclude_patterns": [
             "90-system/staging/**",
+            "90-system/cache/**",
             "40-ai/model-cache/**",
             "**/*.partial",
             ".Spotlight-V100",
@@ -353,6 +354,7 @@ class BackupConfig:
     restore_drill_relative_path: str | None = None
     exclude_patterns: tuple[str, ...] = (
         "90-system/staging/**",
+        "90-system/cache/**",
         "40-ai/model-cache/**",
         "**/*.partial",
         ".Spotlight-V100",

@@ -3,7 +3,7 @@
 ## Role of the T7
 
 The T7 is the first organized storage layer for:
-- clean Git clones/workspaces;
+- clean Git mirrors and archives (never working trees -- see the code-execution rule);
 - client source media;
 - app/project assets;
 - research datasets;
@@ -18,73 +18,45 @@ It is **not**:
 - the database of record for production services;
 - a substitute for Git remotes.
 
-## Recommended logical tree
+## The authoritative layout is docs/25
+
+`docs/25-angel-volume-layout.md` is the authoritative map of the volume
+(D-061). It exists in three synchronised forms -- that prose, the executable
+`scripts/bootstrap-t7.sh`, and the machine-readable
+`/Volumes/Angel/90-system/angel-manifest.yaml` -- plus a `README.md` at the
+volume root and in each top-level directory.
+
+This document keeps what `docs/25` does not repeat: why the volume is shaped
+this way. The filesystem decision, the catalog placement, the derived-view
+primitive, and the code-execution rule below are all still authoritative
+here.
+
+The top level, unchanged since the bootstrap scaffold and deliberately not
+renamed (the names are referenced by config, code, tests, and a live restore
+drill):
 
 ```text
-T7/
-├── 00-inbox/
-│   ├── camera-imports/
-│   ├── client-uploads/
-│   ├── downloads/
-│   └── quarantine/
-│
-├── 10-code/
-│   ├── products/
-│   │   ├── mafi/
-│   │   ├── squad-quit/
-│   │   └── brazil-nurse-scheduler/
-│   ├── research/
-│   │   └── kronos-quant-lab/
-│   ├── client-systems/
-│   └── internal-tools/
-│
-├── 20-clients/
-│   └── <client-slug>/
-│       ├── manifest.yaml
-│       ├── 00-admin/
-│       ├── 10-briefs/
-│       ├── 20-brand/
-│       ├── 30-media/
-│       │   └── YYYY/
-│       │       └── YYYY-MM-DD_<project-slug>/
-│       │           ├── 00-raw/
-│       │           ├── 10-selected/
-│       │           ├── 20-proxies/
-│       │           ├── 30-edits/
-│       │           └── 40-exports/
-│       ├── 40-web/
-│       ├── 50-social/
-│       └── 90-archive/
-│
-├── 30-shared-media/
-│   ├── stock-owned/
-│   ├── audio/
-│   ├── fonts-licenses/
-│   └── reusable-assets/
-│
-├── 40-ai/
-│   ├── model-cache/
-│   ├── datasets/
-│   ├── indexes/
-│   ├── manifests/
-│   └── evaluation/
-│
-├── 50-research/
-│   ├── app-opportunities/
-│   ├── competitor-research/
-│   └── market-research/
-│
-├── 60-exports/
-│   ├── temporary/
-│   └── handoff/
-│
-├── 70-archives/
-│
-└── 90-system/
-    ├── inventories/
-    ├── checksums/
-    ├── logs/
-    └── migration-reports/
+00-inbox/  10-code/  20-clients/  30-shared-media/  40-ai/
+50-research/  60-exports/  70-archives/  90-system/
+```
+
+What v1 of the layout added inside them -- bare repository mirrors and
+archives under `10-code/`, generated application source, derived perception
+evidence, benchmark/campaign/telemetry splits under `40-ai/evaluation/`, the
+trusted and untrusted skill trees, durable knowledge, and volume-local
+runtime cache -- is specified in `docs/25`, not here.
+
+`20-clients/<client-slug>/` retains the per-client shape this document
+introduced, and it is the canonical, irreplaceable data on the volume:
+
+```text
+20-clients/<client-slug>/
+├── manifest.yaml
+├── 00-admin/  10-briefs/  20-brand/
+├── 30-media/YYYY/YYYY-MM-DD_<project-slug>/
+│   └── 00-raw/  10-selected/  20-proxies/  30-edits/  40-exports/
+├── 40-web/  50-social/
+└── 90-archive/
 ```
 
 ## Why numeric prefixes?
@@ -138,11 +110,12 @@ The ingest catalog (`90-system/catalog.sqlite`, single writer) lives **on the T7
 
 Avoid making every Linux node build directly inside a network-mounted T7 repository.
 
-Active development clones live on the Mac's **internal** disk, not on the T7. The T7 may hold exported archives or bare mirrors where tested, but it is not the working filesystem for package-manager-heavy repositories. APFS removes the old exFAT symlink/permission objection; the remaining reason stands on its own — running an editor, watcher, or package manager against removable USB storage risks work when the cable moves.
+Active development clones live on the Mac's **internal** disk under `~/Projects/<repo>`, not on the T7. The T7 holds bare mirrors (`10-code/mirrors/<name>.git`) and archives (`10-code/archives/`) -- this is now implemented, not hypothetical (D-061, `./scripts/refresh-angel-mirrors`) -- but it is not the working filesystem for package-manager-heavy repositories. APFS removes the old exFAT symlink/permission objection; the remaining reason stands on its own — running an editor, watcher, or package manager against removable USB storage risks work when the cable moves.
 
 Preferred pattern:
 1. Git remote is source of truth.
-2. T7 contains a clean local clone/workspace.
+2. T7 contains a clean bare mirror, refreshed from the local working copy so
+   that local-only branches the remote has never seen are covered too.
 3. Worker receives commit/ref/task.
 4. Worker creates or updates its own local clone/worktree on internal storage.
 5. Worker builds/tests locally.

@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -126,10 +127,36 @@ class SocialVideoLearnTests(unittest.TestCase):
         self.assertEqual(pins["version"], social_video_learn.VTS_VERSION)
 
     def test_candidate_skills_default_outside_trusted_skills_tree(self):
-        self.assertEqual(DEFAULT_CANDIDATES_ROOT.parts[0], "knowledge")
+        # The fallback is gitignored (`.state/`) and, crucially, is not under
+        # `skills/` -- an agent harness loads every SKILL.md it finds there.
+        self.assertEqual(DEFAULT_CANDIDATES_ROOT.parts[0], ".state")
+        self.assertNotIn("skills", DEFAULT_CANDIDATES_ROOT.parts[:1])
         self.assertNotEqual(DEFAULT_CANDIDATES_ROOT.parts[0], "skills")
-        self.assertEqual(social_video_learn.parse_args(["x"]).candidates_root, DEFAULT_CANDIDATES_ROOT)
-        self.assertEqual(queue_parse_args(["--queue", "q.yaml"]).candidates_root, DEFAULT_CANDIDATES_ROOT)
+        # Neither CLI hard-codes a destination any more: both defer to
+        # `resolve_candidates_root`, which prefers the UUID-verified volume.
+        self.assertIsNone(social_video_learn.parse_args(["x"]).candidates_root)
+        self.assertIsNone(queue_parse_args(["--queue", "q.yaml"]).candidates_root)
+
+    def test_angel_candidates_relative_path_is_the_untrusted_tree(self):
+        self.assertEqual(
+            social_video_learn.ANGEL_CANDIDATES_RELATIVE, Path("40-ai/skills/candidates")
+        )
+
+    def test_resolve_candidates_root_honours_an_explicit_path(self):
+        explicit = Path("/tmp/somewhere-else")
+        self.assertEqual(social_video_learn.resolve_candidates_root(explicit), explicit)
+
+    def test_resolve_candidates_root_falls_back_when_no_volume_is_configured(self):
+        # Resolution happens relative to the current working directory's
+        # config; with no `config/ingest.yaml` there is no UUID to verify, and
+        # the pipeline must still run rather than refuse.
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = os.getcwd()
+            try:
+                os.chdir(temp)
+                self.assertEqual(social_video_learn.resolve_candidates_root(None), DEFAULT_CANDIDATES_ROOT)
+            finally:
+                os.chdir(cwd)
 
     def test_force_flag_reprocesses_completed_artifact(self):
         with tempfile.TemporaryDirectory() as temp:

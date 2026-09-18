@@ -111,10 +111,11 @@ knowledge/social-video/<platform>/<content-id>/
 Procedural content should be routed to a skill compiler and stored first as a candidate **outside the trusted `skills/` tree**, because agent harnesses load every `SKILL.md` they find there:
 
 ```text
-knowledge/skill-candidates/<skill-name>/
+/Volumes/Angel/40-ai/skills/candidates/<skill-name>/     # when the volume UUID verifies
+.state/social-video/skill-candidates/<skill-name>/       # gitignored Mac-local fallback
 ```
 
-`knowledge/` is ignored by Git. A candidate becomes a real skill only by a human copying it into `skills/` in a reviewed PR.
+Both destinations are outside `skills/` and outside Git (D-061). A candidate becomes a real skill only by a human **rewriting** it into `skills/` in a reviewed PR -- copying a directory is not promotion. See `docs/26-skills-and-knowledge-trust.md` and `skills/README.md`.
 
 Only install/promote it after:
 - source provenance exists;
@@ -178,6 +179,6 @@ This is a strong example of distributing jobs rather than attempting to pool all
 
 The first reusable implementation is `./scripts/learn-video`. It accepts one Instagram Reel URL, YouTube URL, or local video file, and `./scripts/learn-video --queue data/video-learning-queue.yaml` processes the deduplicated queue. It uses `yt-dlp` for anonymous URL acquisition, `ffmpeg` for media/frame work, local `video-to-skill` extraction for `whisper-rs`/Metal transcription, and local `tesseract` for basic on-screen text capture. The reviewed extractor commit and build metadata are pinned in `tools/video-to-skill.lock`.
 
-The command stores derived artifacts in ignored `knowledge/social-video/` directories and removes downloaded media and temporary extraction bundles at the end of a run. A completed artifact is reused on later runs. Queue failures are recorded as `blocked` with a reason. Candidate procedural skills are written to `knowledge/skill-candidates/` for review only; they are not installed or executed automatically. Every `source.json` carries `trust: untrusted-video-derived` and the sha256 of the extractor binary that ran. Video-derived commands are treated as untrusted text and are never run by this pipeline.
+The command stores derived artifacts in ignored `knowledge/social-video/` directories and removes downloaded media and temporary extraction bundles at the end of a run. A completed artifact is reused on later runs. Queue failures are recorded as `blocked` with a reason. Candidate procedural skills are written to Angel `40-ai/skills/candidates/` (or the gitignored `.state/social-video/skill-candidates/` when the volume is absent) for review only; they are not installed or executed automatically. Every `source.json` carries `trust: untrusted-video-derived` and the sha256 of the extractor binary that ran. Video-derived commands are treated as untrusted text and are never run by this pipeline.
 
 The pinned `video-to-skill` source was reviewed before use at the commit in `tools/video-to-skill.lock`, including its README, security notes, installation/dependency bootstrap, URL/media acquisition, environment access, filesystem writes, command execution, sandbox, and skill-install paths. This repository uses its local extractor for media probing, keyframes, and transcription only; it does not run its global skill installer or any video-derived verification command. The extractor's dependency downloads are pinned and checksum-verified, and generated skill installation remains explicit and consent-gated upstream.
