@@ -328,3 +328,32 @@ class BackupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RemoteFailureMessageTests(unittest.TestCase):
+    """The V1 acceptance pass hit an expired Google Drive OAuth grant that the
+    old one-sentence error made look like a network outage."""
+
+    def test_an_expired_grant_names_the_repair_command(self):
+        from tools.backup import remote_failure_message
+
+        stderr = (
+            '2026/09/18 12:29:34 CRITICAL: Failed to create file system for "gdrive-backup:": '
+            "couldn't fetch token: invalid_grant: maybe token expired? - try refreshing"
+        )
+        message = remote_failure_message(stderr)
+        self.assertIn("rclone config reconnect gdrive-backup:", message)
+        self.assertIn("invalid_grant", message)
+        self.assertTrue(message.startswith("Google Drive remote gdrive-backup is unavailable or unauthorized"))
+
+    def test_other_failures_carry_the_last_stderr_line_bounded(self):
+        from tools.backup import remote_failure_message
+
+        message = remote_failure_message("noise\n" + "x" * 1000)
+        self.assertTrue(message.startswith("Google Drive remote gdrive-backup is unavailable or unauthorized: "))
+        self.assertLessEqual(len(message), 400)
+
+    def test_no_stderr_keeps_the_plain_sentence(self):
+        from tools.backup import remote_failure_message
+
+        self.assertEqual(remote_failure_message(""), "Google Drive remote gdrive-backup is unavailable or unauthorized")
