@@ -5,7 +5,7 @@ so a hostile or malformed file cannot turn "should we perceive this" into an
 attack surface of its own (see the AST-enforced purity guard in
 `test_mutation_authority.py`, which lists `router.py` in `PURE_MODULES`). This
 suite is the behavioural half of that claim: every rule id in the spec (r0
-through r13) fires under exactly the documented conditions, `refine_route`
+through r17) fires under exactly the documented conditions, `refine_route`
 and `refine_route_for_native_text` only ever *add* a stage and never remove
 one or override a disabled config, and the same inputs always produce an
 equal `EvidenceRoute` (the router's only claim to purity that actually
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import unittest
 
-from tools.ingest.config import EvidenceConfig, OCRConfig, VisionConfig
+from tools.ingest.config import EvidenceConfig, OCRConfig, TranscriptionConfig, VisionConfig
 from tools.ingest.evidence.router import (
     MIN_ADEQUATE_NATIVE_CHARS,
     refine_route,
@@ -122,11 +122,15 @@ class RuleFiringTests(unittest.TestCase):
         self.assertFalse(route.ocr or route.native_text)
 
     def test_r9_opaque_media_kinds_get_nothing(self):
-        for media_kind in (MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_OTHER):
+        # MEDIA_AUDIO left this list with `r16-audio-transcript` (D-058): a
+        # recording's speech is perceivable evidence, so "opaque" was a
+        # statement about the tooling that shipped, not about the bytes.
+        for media_kind in (MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_OTHER):
             with self.subTest(media_kind=media_kind):
                 route = _route(media_kind=media_kind, extension=".bin")
                 self.assertEqual(route.rules, ("r9-opaque",))
                 self.assertFalse(route.native_text or route.ocr or route.vision)
+                self.assertFalse(route.transcript)
                 self.assertIn(media_kind, route.reason)
 
     def test_r9_covers_an_unrecognised_media_kind_too(self):
@@ -140,6 +144,59 @@ class RuleFiringTests(unittest.TestCase):
         self.assertTrue(route.vision)
         self.assertTrue(route.ocr)
         self.assertFalse(route.native_text)
+
+    def test_r15_video_with_an_audio_stream_adds_transcription(self):
+        route = _route(
+            media_kind=MEDIA_VIDEO, extension=".mp4", facts={"audio_present": True},
+            config=EvidenceConfig(transcription=TranscriptionConfig(enabled=True)),
+        )
+        self.assertEqual(route.rules, ("r14-video-frame", "r15-video-transcript"))
+        self.assertTrue(route.transcript)
+        self.assertTrue(route.vision and route.ocr)
+
+    def test_r15_does_not_fire_for_a_silent_video(self):
+        route = _route(
+            media_kind=MEDIA_VIDEO, extension=".mp4", facts={"audio_present": False},
+            config=EvidenceConfig(transcription=TranscriptionConfig(enabled=True)),
+        )
+        self.assertEqual(route.rules, ("r14-video-frame",))
+        self.assertFalse(route.transcript)
+
+    def test_r15_does_not_fire_when_the_probe_could_not_say(self):
+        """An absent `audio_present` fact is "unknown", and must not read as "yes".
+
+        Spending an ffmpeg run plus a speech engine on a guess is exactly the
+        kind of blind expensive inference this router exists to prevent.
+        """
+        route = _route(
+            media_kind=MEDIA_VIDEO, extension=".mp4", facts={},
+            config=EvidenceConfig(transcription=TranscriptionConfig(enabled=True)),
+        )
+        self.assertEqual(route.rules, ("r14-video-frame",))
+        self.assertFalse(route.transcript)
+
+    def test_r15_does_not_fire_when_transcription_is_disabled(self):
+        route = _route(
+            media_kind=MEDIA_VIDEO, extension=".mp4", facts={"audio_present": True},
+            config=EvidenceConfig(),  # transcription disabled by default
+        )
+        self.assertEqual(route.rules, ("r14-video-frame",))
+        self.assertFalse(route.transcript)
+
+    def test_r16_audio_routes_to_transcription_only(self):
+        route = _route(
+            media_kind=MEDIA_AUDIO, extension=".m4a",
+            config=EvidenceConfig(transcription=TranscriptionConfig(enabled=True)),
+        )
+        self.assertEqual(route.rules, ("r16-audio-transcript",))
+        self.assertTrue(route.transcript)
+        self.assertFalse(route.native_text or route.ocr or route.vision)
+
+    def test_r17_transcription_disabled_is_visible_rather_than_silent(self):
+        """A disabled gate must not be indistinguishable from "opaque kind"."""
+        route = _route(media_kind=MEDIA_AUDIO, extension=".m4a", config=EvidenceConfig())
+        self.assertEqual(route.rules, ("r16-audio-transcript", "r17-transcription-disabled"))
+        self.assertFalse(route.transcript)
 
     def test_r14_video_respects_ocr_disabled_independently_of_vision(self):
         route = _route(

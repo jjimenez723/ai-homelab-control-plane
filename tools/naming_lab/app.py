@@ -20,7 +20,7 @@ import streamlit as st
 
 from tools.campaign.manifest import load_manifest
 from tools.campaign.profiles import manifest_path_for_profile
-from tools.ingest.config import EvidenceConfig, OCRConfig, VisionConfig
+from tools.ingest.config import MAX_VIDEO_FRAME_COUNT, EvidenceConfig, OCRConfig, VisionConfig
 from tools.naming_lab.evidence_bridge import LabEvidence, gather_lab_evidence
 from tools.naming_lab.matrix import build_matrix
 from tools.naming_lab.preview import (
@@ -120,13 +120,16 @@ def main() -> None:
     ocr_backend = st.sidebar.selectbox("OCR backend", ["null", "tesseract"], index=0)
     vision_backend = st.sidebar.selectbox("Vision backend", ["null", "heuristic", "ollama"], index=1)
     video_frame_count = st.sidebar.number_input(
-        "Video frames to sample", min_value=1, max_value=30,
+        "Video frames to sample", min_value=1, max_value=MAX_VIDEO_FRAME_COUNT,
         value=EvidenceConfig().vision.video_frame_count, step=1,
         help=(
             "How many evenly-spaced frames a video gets split into for vision "
             "and OCR. More frames catch a subject that only appears partway "
             "through a clip, at the cost of one backend call (and one OCR pass, "
-            "if enabled) per frame -- tune this for your corpus's ROI."
+            "if enabled) per frame -- tune this for your corpus's ROI. "
+            "Near-identical frames are collapsed to one representative before "
+            "the backends run, so a static clip costs one call however many "
+            "frames are sampled."
         ),
     )
 

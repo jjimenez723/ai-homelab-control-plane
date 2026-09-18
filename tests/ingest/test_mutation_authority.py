@@ -26,12 +26,15 @@ import unittest
 from pathlib import Path
 
 from tools.ingest.evidence.types import (
+    AudioClip,
     EvidenceProvenance,
     EvidenceSource,
     FileEvidence,
     NativeText,
     OCRBlock,
     RasterImage,
+    TranscriptEvidence,
+    TranscriptSegment,
     VisualEvidence,
 )
 from tools.ingest.naming.evidence import NamingEvidence
@@ -87,7 +90,7 @@ PURE_MODULES = (
     "migrations.py",
     "schema_sql.py",
     "status.py",
-    # Evidence layer (§20): these five do zero I/O of any kind -- not merely
+    # Evidence layer (§20): these six do zero I/O of any kind -- not merely
     # zero *mutation*, which is all `_mutations_in` can actually detect. The
     # rest of `evidence/` (text.py, raster.py, preprocess.py, perspective.py,
     # extract.py, backends/__init__.py, backends/tesseract.py,
@@ -98,6 +101,7 @@ PURE_MODULES = (
     "evidence/router.py",
     "evidence/reading_order.py",
     "evidence/cache.py",
+    "evidence/summary.py",
     "evidence/backends/null.py",
     # The interpretation layer turns evidence into hypotheses (D-036). It is
     # squarely on the path a model's output travels, so it belongs on this
@@ -125,6 +129,22 @@ EVIDENCE_SUBPROCESS_JUSTIFICATIONS = {
         "no Python package, only a system binary. Invoked with a fixed argv "
         "and a hard timeout, no shell, no `-y` and no output path -- a "
         "single PNG frame is read back on stdout, never written to disk."
+    ),
+    "backends/ffmpeg_audio.py": (
+        "The audio half of the same binary, split into its own module "
+        "because it carries different guards (a byte-and-seconds budget, a "
+        "silence floor) than the frame sampler. Fixed argv, hard timeout, no "
+        "shell, no `-y` and no output path -- the decoded WAV is read back on "
+        "stdout as bytes, never written to disk."
+    ),
+    "backends/transcription.py": (
+        "The only offline speech-to-text engine this project ships that "
+        "needs no Python package, only a system binary plus a model file "
+        "(whisper.cpp's `whisper-cli`). Fixed argv, hard timeout, no shell; "
+        "the WAV goes in on stdin (`-f -`) and JSON comes back on stdout "
+        "(`-oj -of -`), so no `--output-*` file is ever produced. If a future "
+        "build cannot read stdin, this backend must report itself "
+        "unavailable rather than fall back to a temp file (D-058)."
     ),
 }
 
@@ -371,7 +391,7 @@ class EvidenceLayerImportGuardTests(unittest.TestCase):
                     offenders.append(f"{relative}: imports {imported!r}")
         self.assertEqual(offenders, [], "banned import(s) found: " + ", ".join(offenders))
 
-    def test_subprocess_is_confined_to_the_justified_tesseract_module(self):
+    def test_subprocess_is_confined_to_the_justified_modules(self):
         offenders: list[str] = []
         for path in sorted(EVIDENCE.rglob("*.py")):
             if "__pycache__" in path.parts:
@@ -407,7 +427,21 @@ class EvidenceLayerImportGuardTests(unittest.TestCase):
 class EvidenceValueTypesCarryNoAuthorityTests(unittest.TestCase):
     """Mirrors `EvidenceBoundaryTests` above, for the new evidence value types."""
 
-    _TYPES = (FileEvidence, RasterImage, OCRBlock, VisualEvidence, NativeText, EvidenceProvenance)
+    # `AudioClip` and `TranscriptEvidence` are on this list for the same
+    # reason `RasterImage` is: `AudioClip` is what a speech backend is
+    # handed (bytes, never a path -- D-058), and `TranscriptEvidence` is
+    # what it hands back.
+    _TYPES = (
+        FileEvidence,
+        RasterImage,
+        AudioClip,
+        OCRBlock,
+        VisualEvidence,
+        NativeText,
+        TranscriptEvidence,
+        TranscriptSegment,
+        EvidenceProvenance,
+    )
 
     def test_none_of_the_core_evidence_types_expose_a_path_or_callable(self):
         allowed_fragments = ("Path", "Callable", "IO")

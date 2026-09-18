@@ -8,6 +8,7 @@ an existing ``/Volumes/Angel`` directory as permission to write.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -19,6 +20,76 @@ from tools.ingest.volumes import VolumeError, VolumeProber
 
 AI_ROOT = Path("40-ai")
 CACHE_ROOT = AI_ROOT / "model-cache"
+
+# -- whisper model discovery --------------------------------------------------
+#
+# Speech transcription (`tools/ingest/evidence/backends/transcription.py`,
+# D-058) needs a ggml model file, and the sanctioned home for one is the
+# whisper directory this module already defines. The evidence layer must not
+# carry a machine path in code, and it must not grow a dependency on the
+# volume prober either, so the resolution is expressed here, in two steps a
+# caller can use independently:
+#
+#   * `WHISPER_CACHE_ENV` is the variable `cache_environment()` above already
+#     publishes. Reading it is how a process that has been set up for Angel
+#     finds the cache without re-probing the volume.
+#   * `whisper_model_in(directory)` picks a model out of an already-resolved
+#     directory, preferring the smallest sensible English model, and returns
+#     None rather than raising when the directory holds none.
+#
+# Neither function creates, writes, or deletes anything.
+
+WHISPER_CACHE_ENV = "WHISPER_CACHE_DIR"
+WHISPER_MODEL_GLOB = "ggml-*.bin"
+
+# Preference order, smallest-and-most-specific first: a base.en model is the
+# right default for this corpus (English, CPU/Metal-fast, ~148 MB), and a
+# multilingual or larger model is used only when it is what is actually
+# present.
+WHISPER_MODEL_PREFERENCE = (
+    "ggml-base.en.bin",
+    "ggml-base.bin",
+    "ggml-small.en.bin",
+    "ggml-small.bin",
+    "ggml-medium.en.bin",
+    "ggml-medium.bin",
+)
+
+
+def whisper_model_in(directory: Path) -> Path | None:
+    """The preferred ggml whisper model inside `directory`, or None.
+
+    Deterministic: the preference list wins, and anything else present is
+    chosen by sorted name so two runs on the same cache never disagree.
+    Never raises -- an unreadable or absent directory is simply "no model".
+    """
+    try:
+        if not directory.is_dir():
+            return None
+        present = {path.name: path for path in directory.glob(WHISPER_MODEL_GLOB) if path.is_file()}
+    except OSError:
+        return None
+    for name in WHISPER_MODEL_PREFERENCE:
+        if name in present:
+            return present[name]
+    for name in sorted(present):
+        return present[name]
+    return None
+
+
+def whisper_model_from_environment(env: Mapping[str, str] | None = None) -> Path | None:
+    """The preferred whisper model under `WHISPER_CACHE_DIR`, or None.
+
+    The one path-free way for a subprocess-backed backend to find the Angel
+    whisper cache: the variable is published by `cache_environment()`, so a
+    machine that has been through AI-storage preflight answers and one that
+    has not simply does not.
+    """
+    source = env if env is not None else os.environ
+    raw = (source.get(WHISPER_CACHE_ENV) or "").strip()
+    if not raw:
+        return None
+    return whisper_model_in(Path(raw).expanduser())
 
 
 @dataclass(frozen=True)
@@ -88,5 +159,5 @@ def cache_environment(storage: AIStorage) -> Mapping[str, str]:
         "HF_HOME": str(storage.huggingface),
         "MLX_HOME": str(storage.mlx),
         "XDG_CACHE_HOME": str(storage.mlx),
-        "WHISPER_CACHE_DIR": str(storage.whisper),
+        WHISPER_CACHE_ENV: str(storage.whisper),
     }

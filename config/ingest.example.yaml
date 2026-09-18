@@ -269,6 +269,42 @@ evidence:
     # endpoint: "http://127.0.0.1:11434"
     # max_image_bytes: 8000000
     # max_prompt_chars: 4000
+    #
+    # How many frames a video is sampled into for vision/OCR, evenly spaced
+    # across its duration (1-12; more catches a subject that only appears
+    # partway through a clip, at the cost of one backend call per frame).
+    video_frame_count: 5
+    # Collapse near-identical sampled frames to one representative before
+    # OCR/vision run, so a static screen recording costs one backend call
+    # rather than `video_frame_count` descriptions of the same picture.
+    frame_dedupe: true
+    # Sample fewer frames from a clip too short to hold that many distinct
+    # moments (under 4s -> at most 2 frames; under 1s -> exactly 1).
+    frame_duration_aware: true
+
+  # Speech transcription: the third perception seam (D-058). Off by default --
+  # it needs the optional whisper.cpp binary (`brew install whisper.cpp`,
+  # providing `whisper-cli`) plus a ggml model file this repository does not
+  # ship. Audio is decoded to an in-memory 16 kHz mono WAV and fed to the
+  # engine on stdin; no temporary file is ever written.
+  transcription:
+    enabled: false
+    # "null" performs no transcription at all and records that it did not.
+    backend: "null"
+    # Opt-in real local speech-to-text:
+    # backend: "whisper-cpp"
+    #
+    # Where the ggml model lives. Leave unset to resolve the sanctioned Angel
+    # whisper cache (`40-ai/model-cache/whisper`) through the AI-storage
+    # helper's `WHISPER_CACHE_DIR`; set it explicitly to name one model file.
+    # model_path: "/Volumes/Angel/40-ai/model-cache/whisper/ggml-base.en.bin"
+    #
+    # Spoken language, or "auto" to let the engine detect it.
+    language: "en"
+    # Only the first N seconds of a long recording are transcribed: this is
+    # evidence about a file, not a subtitle track.
+    max_audio_seconds: 600
+    timeout_seconds: 300
 
 media:
   heic_to_jpeg:

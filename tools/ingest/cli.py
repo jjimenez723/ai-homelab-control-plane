@@ -711,6 +711,8 @@ def _print_evidence_summary(ledger: LocalLedger, config: IngestConfig) -> int:
           f"{'' if config.evidence.ocr.enabled else '  (disabled)'}")
     print(f"  Vision backend: {config.evidence.vision.backend}"
           f"{'' if config.evidence.vision.enabled else '  (disabled)'}")
+    print(f"  Transcription:  {config.evidence.transcription.backend}"
+          f"{'' if config.evidence.transcription.enabled else '  (disabled)'}")
     print()
     if not summary["total"]:
         print("No evidence recorded yet.")
@@ -785,6 +787,27 @@ def _print_evidence_payload(record: dict, *, show_text: bool) -> None:
         if show_text:
             ordered = sorted(blocks, key=lambda block: (block.get("page", 1), block.get("reading_order", 0)))
             _print_excerpt("\n".join(str(block.get("text", "")) for block in ordered))
+    transcript = payload.get("transcript")
+    if transcript:
+        # Presence, language, coverage and segment count -- never the words,
+        # unless `--show-text` was asked for. A transcript is the most
+        # sensitive thing this layer produces: it is a verbatim record of
+        # what was said in the owner's own recordings, and a terminal dump of
+        # it piped to a log file would persist that (the same reasoning
+        # `cmd_evidence`'s docstring gives for extracted document text).
+        segments = transcript.get("segments") or []
+        covered = float(transcript.get("duration_covered_seconds", 0.0) or 0.0)
+        print(f"    transcript: present, {len(segments)} segment(s), "
+              f"{len(transcript.get('text') or '')} chars, "
+              f"language {transcript.get('language') or 'unknown'}, "
+              f"{covered:.1f}s of audio covered"
+              f"{', truncated' if transcript.get('truncated') else ''}")
+        print(f"      engine: {transcript.get('engine', '?')} "
+              f"{transcript.get('engine_version', '?')}"
+              f"{'  model=' + str(transcript.get('model')) if transcript.get('model') else ''}"
+              f"   confidence {float(transcript.get('confidence', 0.0) or 0.0):.2f}")
+        if show_text:
+            _print_excerpt(transcript.get("text") or "")
     visual = payload.get("visual")
     if visual:
         print(f"    visual: {visual.get('image_kind')} (confidence {float(visual.get('confidence', 0.0)):.2f})")
