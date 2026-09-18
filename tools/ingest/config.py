@@ -181,6 +181,28 @@ DEFAULTS: dict[str, Any] = {
             "backend": "heuristic",
             "timeout_seconds": 30,
             "video_frame_count": 5,
+            # Collapse near-identical sampled frames to one representative
+            # before OCR/vision run, and sample fewer frames from a very
+            # short clip. Both are deterministic; see
+            # `evidence/backends/ffmpeg_video.py` for the exact algorithm.
+            "frame_dedupe": True,
+            "frame_duration_aware": True,
+        },
+        "transcription": {
+            # Off by default, like every other optional inference seam: it
+            # needs a whisper.cpp binary and a multi-hundred-megabyte model
+            # the repository does not ship (D-058).
+            "enabled": False,
+            "backend": "null",  # "null" | "whisper-cpp"
+            # Unset means "look in the Angel whisper cache", resolved through
+            # `tools/models/storage.py` at call time -- never a machine path
+            # baked into code.
+            "model_path": None,
+            "language": "en",
+            # Only the first N seconds of a long recording are transcribed.
+            # Evidence about a file, not a subtitle track.
+            "max_audio_seconds": 600,
+            "timeout_seconds": 300,
         },
     },
     "backup": {
@@ -342,6 +364,15 @@ class TriageConfig:
 # for -- the same posture as the screenshots-path guard above.
 VALID_OCR_BACKENDS = frozenset({"null", "tesseract"})
 VALID_VISION_BACKENDS = frozenset({"null", "heuristic", "ollama"})
+VALID_TRANSCRIPTION_BACKENDS = frozenset({"null", "whisper-cpp"})
+
+# The hard ceiling on sampled video frames, independent of what an operator
+# asks for. Every frame is a separate `ffmpeg` run plus (up to) one vision
+# call and one OCR pass, so an unbounded count turns one file into an
+# arbitrarily long stall in a batch that has a whole volume left to scan.
+# Deduplication (`evidence.vision.frame_dedupe`) reduces the *backend* calls
+# below this; it does not raise the ceiling on sampling.
+MAX_VIDEO_FRAME_COUNT = 12
 
 
 @dataclass(frozen=True)
@@ -368,6 +399,32 @@ class VisionConfig:
     # only appears partway through a clip, at the cost of one backend call
     # (and, if OCR is enabled, one OCR pass) per frame.
     video_frame_count: int = 5
+    # Collapse near-identical sampled frames (average-hash, see
+    # `evidence/backends/ffmpeg_video.py::deduplicate_frames`) so a static
+    # clip costs one backend call rather than `video_frame_count` calls
+    # describing the same picture.
+    frame_dedupe: bool = True
+    # Sample fewer frames from a clip too short for `video_frame_count`
+    # distinct moments to exist in.
+    frame_duration_aware: bool = True
+
+
+@dataclass(frozen=True)
+class TranscriptionConfig:
+    """Speech-to-text: the third perception seam (D-058).
+
+    Disabled by default. `model_path` unset means "resolve the Angel whisper
+    cache through `tools/models/storage.py`", which only answers on a machine
+    whose UUID-verified T7 is mounted -- so the default is a *policy*, not a
+    path, and no machine-specific location appears in this repository.
+    """
+
+    enabled: bool = False
+    backend: str = "null"  # "null" | "whisper-cpp"
+    model_path: Path | None = None
+    language: str = "en"
+    max_audio_seconds: int = 600
+    timeout_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -387,6 +444,7 @@ class EvidenceConfig:
     max_text_chars: int = 20_000
     ocr: OCRConfig = field(default_factory=OCRConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
+    transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
 
 
 @dataclass(frozen=True)
@@ -591,6 +649,12 @@ def load_config(path: Path | None = None) -> IngestConfig:
             f"evidence.vision.backend must be one of {sorted(VALID_VISION_BACKENDS)}, "
             f"got {vision_raw['backend']!r}"
         )
+    transcription_raw = evidence_raw["transcription"]
+    if transcription_raw["backend"] not in VALID_TRANSCRIPTION_BACKENDS:
+        raise ValueError(
+            f"evidence.transcription.backend must be one of {sorted(VALID_TRANSCRIPTION_BACKENDS)}, "
+            f"got {transcription_raw['backend']!r}"
+        )
     ocr = OCRConfig(
         enabled=bool(ocr_raw["enabled"]),
         backend=str(ocr_raw["backend"]),
@@ -611,6 +675,8 @@ def load_config(path: Path | None = None) -> IngestConfig:
         max_image_bytes=int(vision_raw.get("max_image_bytes", 8_000_000)),
         max_prompt_chars=int(vision_raw.get("max_prompt_chars", 4_000)),
         video_frame_count=int(vision_raw.get("video_frame_count", 5)),
+        frame_dedupe=bool(vision_raw.get("frame_dedupe", True)),
+        frame_duration_aware=bool(vision_raw.get("frame_duration_aware", True)),
     )
     if not 1 <= vision.timeout_seconds <= 600:
         raise ValueError("evidence.vision.timeout_seconds must be between 1 and 600")
@@ -618,8 +684,28 @@ def load_config(path: Path | None = None) -> IngestConfig:
         raise ValueError("evidence.vision.max_image_bytes must be between 1 and 50000000")
     if not 100 <= vision.max_prompt_chars <= 100_000:
         raise ValueError("evidence.vision.max_prompt_chars must be between 100 and 100000")
-    if not 1 <= vision.video_frame_count <= 30:
-        raise ValueError("evidence.vision.video_frame_count must be between 1 and 30")
+    if not 1 <= vision.video_frame_count <= MAX_VIDEO_FRAME_COUNT:
+        raise ValueError(
+            f"evidence.vision.video_frame_count must be between 1 and {MAX_VIDEO_FRAME_COUNT}"
+        )
+
+    model_path_raw = transcription_raw.get("model_path")
+    transcription = TranscriptionConfig(
+        enabled=bool(transcription_raw["enabled"]),
+        backend=str(transcription_raw["backend"]),
+        model_path=_expand(str(model_path_raw)) if model_path_raw else None,
+        language=str(transcription_raw.get("language", "en")),
+        max_audio_seconds=int(transcription_raw.get("max_audio_seconds", 600)),
+        timeout_seconds=int(transcription_raw.get("timeout_seconds", 300)),
+    )
+    if not 1 <= transcription.max_audio_seconds <= 36_000:
+        raise ValueError("evidence.transcription.max_audio_seconds must be between 1 and 36000")
+    if not 1 <= transcription.timeout_seconds <= 3_600:
+        raise ValueError("evidence.transcription.timeout_seconds must be between 1 and 3600")
+    if transcription.model_path is not None and not transcription.model_path.is_absolute():
+        raise ValueError("evidence.transcription.model_path must be an absolute path")
+    if len(transcription.language) > 16:
+        raise ValueError("evidence.transcription.language must be a short language tag")
 
     evidence = EvidenceConfig(
         enabled=bool(evidence_raw["enabled"]),
@@ -630,6 +716,7 @@ def load_config(path: Path | None = None) -> IngestConfig:
         max_text_chars=int(evidence_raw["max_text_chars"]),
         ocr=ocr,
         vision=vision,
+        transcription=transcription,
     )
     if evidence.max_bytes <= 0:
         raise ValueError("evidence.max_bytes must be a positive integer")

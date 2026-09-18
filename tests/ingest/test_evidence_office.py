@@ -245,7 +245,7 @@ class XlsxExtractionTests(unittest.TestCase):
                 now="2026-01-01T00:00:00+00:00", ocr_backend=ocr,
             )
 
-        self.assertEqual(evidence.route.rules, ("r17-office-native-text",))
+        self.assertEqual(evidence.route.rules, ("r18-office-native-text",))
         self.assertTrue(evidence.route.native_text)
         self.assertFalse(evidence.route.ocr)
         self.assertEqual(ocr.calls, [])
@@ -326,7 +326,7 @@ class PptxExtractionTests(unittest.TestCase):
                 now="2026-01-01T00:00:00+00:00", ocr_backend=ocr,
             )
 
-        self.assertEqual(evidence.route.rules, ("r17-office-native-text",))
+        self.assertEqual(evidence.route.rules, ("r18-office-native-text",))
         self.assertEqual(ocr.calls, [])
         self.assertIn("Project Kickoff", evidence.native_text.text)
 
@@ -370,7 +370,7 @@ class CsvExtractionTests(unittest.TestCase):
                 now="2026-01-01T00:00:00+00:00", ocr_backend=ocr,
             )
 
-        self.assertEqual(evidence.route.rules, ("r17-office-native-text",))
+        self.assertEqual(evidence.route.rules, ("r18-office-native-text",))
         self.assertEqual(ocr.calls, [])
         self.assertEqual(evidence.native_text.extractor, "csv-text")
 

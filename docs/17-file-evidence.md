@@ -4,7 +4,7 @@
 
 Read this before changing anything under `tools/ingest/evidence/`. As with the naming layer, several things that look like incidental structure are load-bearing safety properties.
 
-Decisions of record: D-029 (evidence is perception, never authority), D-030 (extracted text stays on the Mac), D-031 (evidence is cached by content, never by path), D-032 (Tesseract is a validated machine-local option, not a global default), **D-057 (evidence reaches naming through a plain-data bridge; the semantic proposer is opt-in and policy-gated)**.
+Decisions of record: D-029 (evidence is perception, never authority), D-030 (extracted text stays on the Mac), D-031 (evidence is cached by content, never by path), D-032 (Tesseract is a validated machine-local option, not a global default), **D-057 (evidence reaches naming through a plain-data bridge; the semantic proposer is opt-in and policy-gated)**, D-055/D-056 (video is perceived from sampled frames), D-058 (speech is a third seam, and video evidence is fused with provenance).
 
 ## The one thing to understand first
 
@@ -47,16 +47,17 @@ that says “rename this” or “delete this” remains evidence text, not a co
 
 That was not timidity, and the sequencing was the point: perception had to be trustworthy before it was authoritative, and the way to find that out was to run it over a real Downloads folder and look at what it produced. That happened (the Phase 1C validation below, then the Naming Lab's interactive loop over real files, D-054), so D-057 granted it the *smallest* decision available — a filename, the one whose wrong answer costs a confusing name rather than a file. Retention, whose wrong answer is a step toward losing something, still waits.
 
-## OCR is not vision, and both are seams
+## OCR is not vision is not speech, and all three are seams
 
-Two genuinely different questions, deliberately given two different interfaces rather than one "understand this file" call:
+Three genuinely different questions, deliberately given three different interfaces rather than one "understand this file" call:
 
-| | asks | answers for `IMG_6909.JPG` |
-|---|---|---|
-| **OCR** | what text is *visibly present*? | probably nothing |
-| **Vision** | what am I *looking at*? | an interior rendering: a kitchen, white cabinetry, an island, pendant lighting |
+| | asks | answers for `IMG_6909.JPG` | answers for `walkthrough.mp4` |
+|---|---|---|---|
+| **OCR** | what text is *visibly present*? | probably nothing | "KITCHEN LAYOUT REV 3" burned into a title card |
+| **Vision** | what am I *looking at*? | an interior rendering: a kitchen, white cabinetry, an island, pendant lighting | the same, once per sampled frame |
+| **Transcription** | what is being *said*? | nothing; a JPEG has no audio | "This is the Fine Line Group kitchen layout walkthrough, revision three." |
 
-A single god-model interface would have collapsed them, and then swapping the OCR engine would have meant touching the vision path. `tools/ingest/evidence/backends/__init__.py` defines three separate `Protocol`s:
+A single god-model interface would have collapsed them, and then swapping the OCR engine would have meant touching the vision path. Keeping speech separate also keeps a distinction a reader genuinely needs: a file that **says** "invoice" is not the same evidence as a file that **shows** the word "invoice", and a fused summary has to be able to tell you which (see *Fusion* below). `tools/ingest/evidence/backends/__init__.py` defines four separate `Protocol`s:
 
 ```python
 class TextExtractor(Protocol):   # a file format's own text. Trusted repo code.
@@ -70,6 +71,10 @@ class OCRBackend(Protocol):      # pixels -> words + geometry + confidence
 class VisionBackend(Protocol):   # pixels -> what this depicts
     def available(self) -> bool: ...
     def describe(self, image: RasterImage, *, timeout_seconds: int) -> VisionResult: ...
+
+class TranscriptionBackend(Protocol):  # audio samples -> what is being said
+    def available(self) -> bool: ...
+    def transcribe(self, audio: AudioClip, *, timeout_seconds: int) -> TranscriptionResult: ...
 ```
 
 ### What each seam is handed, and why it differs
@@ -77,7 +82,7 @@ class VisionBackend(Protocol):   # pixels -> what this depicts
 This is the structural safety property, and it is the same argument that makes `NamingEvidence.thumbnail_png` a `bytes` rather than a path:
 
 - A **`TextExtractor`** receives an `EvidenceSource`, which carries a real `Path`. It is deterministic in-repo code that parses a file format, and it must be able to stream a 2 GB PDF rather than hold it in memory. It is trusted because it is ours and it is tested.
-- An **`OCRBackend`** or **`VisionBackend`** receives a `RasterImage`: in-memory PNG bytes, a width, a height, a page number, and the SHA-256 of the original so a crop can always be traced back. **No path, no file handle.** One of these may one day be a model, or a subprocess, or someone else's plugin. It is not trusted and then constrained; it is simply not given the means.
+- An **`OCRBackend`** or **`VisionBackend`** receives a `RasterImage`: in-memory PNG bytes, a width, a height, a page number, and the SHA-256 of the original so a crop can always be traced back. A **`TranscriptionBackend`** receives an `AudioClip`: in-memory 16 kHz mono PCM WAV bytes, a duration, and the same source SHA-256. **No path, no file handle, in either case.** One of these may one day be a model, or a subprocess, or someone else's plugin. It is not trusted and then constrained; it is simply not given the means.
 
 ### What ships today
 
@@ -85,7 +90,8 @@ This is the structural safety property, and it is the same argument that makes `
 |---|---|---|
 | `TextExtractor` | `PlainTextExtractor`, `PdfTextExtractor`, `DocxTextExtractor`, `XlsxTextExtractor`, `PptxTextExtractor`, `CsvTextExtractor` | text/Markdown/code, PDF embedded text via pypdf, DOCX via `zipfile` + `ElementTree`, XLSX/XLSM (`tools/ingest/evidence/office.py`) via `zipfile` + `ElementTree`, PPTX via the same, CSV/TSV via `csv.Sniffer` |
 | `OCRBackend` | `NullOCRBackend` (**default**), `TesseractOCRBackend` | the default performs no OCR and records that it did not; tesseract is optional, offline, and detected rather than required |
-| `VisionBackend` | `NullVisionBackend`, `HeuristicVisionBackend` (**default**) | the heuristic backend measures pixels and says only what it can measure |
+| `VisionBackend` | `NullVisionBackend`, `HeuristicVisionBackend` (**default**), `OllamaVisionBackend` | the heuristic backend measures pixels and says only what it can measure; Ollama is opt-in and loopback-only |
+| `TranscriptionBackend` | `NullTranscriptionBackend` (**default**), `WhisperCppBackend` | the default performs no transcription and records that it did not; whisper.cpp is optional, offline, and detected rather than required |
 
 `HeuristicVisionBackend` is written in exactly the spirit of `DeterministicProposer`: it will call an image a `screenshot`, a `scanned_document`, an `ordinary_photo`, or `unknown`, at honestly low confidence, from colour distribution and flatness. **It will never claim `rendering`, `diagram`, `chart` or `meme`** — it cannot tell, and asserting one would be inventing certainty the pixels do not support. A real vision model implements the same protocol and nothing downstream changes.
 
@@ -125,7 +131,7 @@ part this module cannot honestly resolve is skipped with a warning, never
 guessed at -- "omit, don't default" applies here exactly as it does to a
 PDF's un-inferred headings.
 
-The router's `r17-office-native-text` rule sends `.xlsx`, `.xlsm`, `.pptx`,
+The router's `r18-office-native-text` rule sends `.xlsx`, `.xlsm`, `.pptx`,
 `.csv`, and `.tsv` to native text only, the same "native text, no OCR"
 shape as `r5-office-document` and `r2-text` -- see the router table below.
 
@@ -143,7 +149,7 @@ Every rule that fires appends a stable, named id to `EvidenceRoute.rules`. The i
 |---|---|---|---|---|
 | `r0-evidence-disabled` | `evidence.enabled` false | — | — | — |
 | `r1-too-large` | over `evidence.max_bytes` | — | — | — |
-| `r17-office-native-text` | .xlsx/.xlsm/.pptx/.csv/.tsv (checked by extension, ahead of the rest) | yes | — | — |
+| `r18-office-native-text` | .xlsx/.xlsm/.pptx/.csv/.tsv (checked by extension, ahead of the rest) | yes | — | — |
 | `r2-text` | text/Markdown/code | yes | — | — |
 | `r3-pdf-embedded-text` | PDF, probe says text is there | yes | **no** | — |
 | `r4-pdf-no-embedded-text` | PDF, no text layer | try | yes | — |
@@ -151,8 +157,13 @@ Every rule that fires appends a stable, named id to `EvidenceRoute.rules`. The i
 | `r6-screenshot` | image, screenshot by name or pixel hint | — | yes | yes |
 | `r7-camera-photo` | image with camera EXIF | — | — | yes |
 | `r8-image-other` | any other image | — | — | yes |
-| `r9-opaque` | archive/installer/audio/video/unknown | — | — | — |
-| `r10-ocr-disabled` / `r11-vision-disabled` | config gate | clears that stage | | |
+| `r9-opaque` | archive/installer/unknown | — | — | — |
+| `r14-video-frame` | video | — | yes | yes |
+| `r15-video-transcript` | video **with an audio stream**, transcription enabled | — | — | — (adds transcript) |
+| `r16-audio-transcript` | audio | — | — | — (adds transcript) |
+| `r10-ocr-disabled` / `r11-vision-disabled` / `r17-transcription-disabled` | config gate | clears that stage | | |
+
+`EvidenceRoute` carries a fourth stage flag, `transcript`, alongside `native_text`/`ocr`/`vision`. `r15` checks `facts["audio_present"] is True` rather than truthiness: a probe that could not run leaves the fact absent, and "unknown" must not read as "yes" — spending an ffmpeg run plus a speech engine on a guess is exactly what this router exists to prevent.
 
 Two rules reopen the decision **after** something has actually been perceived, which is what makes the routing evidence-driven rather than a guess frozen at the start:
 
@@ -160,6 +171,92 @@ Two rules reopen the decision **after** something has actually been perceived, w
 - `r13-native-text-inadequate` — a scanned document carrying a one-line OCR watermark answers `text_available: True` on the probe's first-page boolean. Once the extractor has run, the real character count is allowed to reopen the question: under 60 characters and the document is routed to OCR after all. This is "no OCR unless the embedded evidence is insufficient", made measurable.
 
 Both can only ever **add** a stage. Neither can clear one, and neither can override a config gate that says OCR or vision is off.
+
+## Video and audio
+
+A video is not one thing to perceive; it is a container holding several. The pipeline treats it as exactly that, and every arrow below is a stage that can fail on its own without costing the others:
+
+```text
+                       ffprobe facts (media/probe.py)
+                       duration, codecs, audio_present?
+                                  |
+                    +-------------+--------------+
+                    |                            |
+              frame selection               audio extraction
+         (backends/ffmpeg_video.py)   (backends/ffmpeg_audio.py)
+          how many -> where -> which        first N seconds,
+              survive dedupe                16 kHz mono WAV bytes
+                    |                            |
+          +---------+---------+                  |
+          |                   |                  |
+       vision               OCR            transcription
+   (per frame)          (per frame)   (backends/transcription.py)
+          |                   |                  |
+          +---------+---------+------------------+
+                              |
+                    perception_summary()
+                  (evidence/summary.py -- fused,
+                   bounded, attributed)
+                              |
+                    a future naming input
+              (nothing reads it for a decision today)
+```
+
+Nothing in that diagram is a decision. The right-hand end is an input a later stage *may* read; `naming/` and `triage/` still import nothing from `evidence/`, and there is still a test asserting it.
+
+### Frame selection, exactly
+
+`extract_frames`'s three steps are documented in the module's own docstring and repeated here because the algorithm is a contract that cached evidence depends on — the same bytes must always produce the same frames, or a cache hit answers a question that changed between runs.
+
+1. **How many.** `frame_count_for(duration, requested)`. The requested count (`evidence.vision.video_frame_count`, default 5) is clamped to `1..MAX_VIDEO_FRAME_COUNT` (**12**, in `tools/ingest/config.py`) because every frame is an `ffmpeg` run plus up to one vision call and one OCR pass, and an unbounded count turns one file into an arbitrarily long stall in a scan with a whole volume left to go. With `evidence.vision.frame_duration_aware` on (the default), a clip too short to *contain* that many distinct moments is sampled less: under **4 s** at most 2 frames, under **1 s** exactly 1. An unknown duration is treated as long — refusing to sample is worse than sampling a three-second clip five times.
+2. **Where.** Evenly spaced strictly *inside* the duration: `duration * (i+1) / (count+1)`. Never the exact start (disproportionately likely to be a fade-in or a title card) and never the exact end (may already be past the container's last decodable frame). With an unknown duration, fixed one-second-apart offsets.
+3. **Which survive.** `deduplicate_frames` collapses near-identical frames using a tiny perceptual hash (`average_hash`): greyscale, resized to **8×8** with `Image.BILINEAR`, one bit per pixel — set when the pixel is at or above the mean of those 64. Two frames are "the same picture" when their hashes differ in at most **4 of 64 bits** (`DEDUPE_HAMMING_THRESHOLD`). Each frame is compared against every *kept* frame, not merely its predecessor, so a clip alternating between two shots keeps two representatives rather than all five. The earliest frame of a group wins and **keeps its original 1-based sampling index** in `RasterImage.page`, so the surviving pages may be non-contiguous (`1, 2, 4`) — deliberately, because the index records *when in the clip* the frame came from and renumbering would destroy that. How many were dropped is recorded as a `deduplicated` warning, not silently absorbed.
+
+Average hash rather than a DCT-based pHash: the question is only "is this the same picture again", the frames are already downscaled by ffmpeg, and it needs no NumPy — a banned import in this package. It is written in plain Pillow and adapts no third-party code.
+
+A frame whose pixels cannot be hashed at all is **kept**, never dropped: "we could not compare this" must not become "this was a duplicate".
+
+### Audio, and why silence is an answer
+
+`ffmpeg_audio.extract_audio_clip` asks ffmpeg for the first `evidence.transcription.max_audio_seconds` (default 600) of the first audio stream as `-f wav -ac 1 -ar 16000 pipe:1` — decoded audio on **stdout**, no `-y`, no output path, no temp file. Three bounds apply before an engine sees anything: ffmpeg's own `-t` caps the decode, `MAX_AUDIO_WAV_BYTES` is a hard ceiling that does not depend on `-t` being honoured, and a track with no measurable signal produces **no clip at all**.
+
+That last one is the interesting case. A speech engine run over silence does not return silence; it returns a confident hallucination. So a clip whose loudest sample is below `SILENCE_PEAK_THRESHOLD` (64 of 32767, roughly −54 dBFS) is refused with a named `no_audio` warning and transcription is skipped. Two codes stay deliberately distinct:
+
+| | means | code |
+|---|---|---|
+| no audio stream, or a silent one | a fact about **the file** | `no_audio` |
+| ffmpeg or whisper is not installed | a fact about **this machine** | `backend_unavailable` |
+
+Written to a pipe, ffmpeg cannot seek back to fill in the RIFF and `data` chunk sizes, so it emits the placeholder `0xffffffff`. That is a valid streaming WAV, whisper.cpp reads it correctly, and this code computes the clip's real duration from the PCM payload it locates itself rather than trusting the header's size fields.
+
+### Transcription writes no file, ever
+
+`WhisperCppBackend` invokes `whisper-cli` with a fixed argv, no shell, and a hard timeout. The WAV goes in on **stdin** (`-f -`) and the result comes back as JSON on **stdout** (`-ojf -of -`); no `--output-txt`, no output directory, nothing landing in a temp path. One non-obvious detail is load-bearing: with `-f -` and no `--output-*` flag, whisper-cli prints *nothing at all* to stdout — it derives `--output-file -` from the input name and then waits for a format to be requested. `-ojf -of -` is what makes stdout the output.
+
+If a future whisper build stops accepting stdin, this backend must report itself **unavailable** rather than fall back to a temp file. Zero filesystem writes is an invariant of the whole evidence layer, not a preference, and `backends/tesseract.py` carries the identical instruction.
+
+Everything whisper returns is untrusted, in exactly the sense OCR text is untrusted: it is a transcription of words a stranger recorded. Text is sanitized (`sanitize_extracted_text`) and capped at `evidence.max_text_chars`; segments are bounded at `MAX_TRANSCRIPT_SEGMENTS` (500); timestamps are coerced to finite, non-negative, ordered seconds and **clamped to the clip's measured duration** — whisper reports the end of its 30-second decoding window for the last segment of a short clip, and a four-second recording must not claim a thirty-second segment; `engine`/`engine_version` fall back to the backend's own identity rather than being trusted from the payload.
+
+`duration_covered_seconds` is how much audio was actually listened to, measured by this layer when it decoded the clip — not self-reported by the engine. With `truncated`, that is the difference between "this file is about X" and "the first ten minutes of this file are about X".
+
+### Fusion: `perception_summary`
+
+`tools/ingest/evidence/summary.py::perception_summary(FileEvidence) -> PerceptionSummary` is the one place that knows how to read all of this at once. Frozen plain data, no `Path`, no callable, every text field hard-capped, every collection count-capped, and **every field attributed**: `container_source`, `transcript_source`, `ocr_source`, and a `source` on each frame description. An empty excerpt with a named source means "the producer ran and found nothing"; an empty excerpt with `SOURCE_NONE` means "nothing ran". It imports nothing but `dataclasses` and this package's own `types`, so adopting it cannot become the path by which perception reaches a decision.
+
+It has one genuinely opinionated rule: **no single frame may dominate the OCR excerpt.** A clip's frames usually share their text (the same lower-third caption, the same watermark) and occasionally one frame of dense credits carries more characters than the rest of the clip combined. So the excerpt takes each frame's blocks in reading order, caps that frame's contribution at `MAX_OCR_CHARS_PER_FRAME` (400), drops a frame whose text repeats text already taken from an earlier frame (case-insensitively, per frame rather than per line, so a recurring caption collapses to one mention while two frames that genuinely differ both survive), and only then caps the joined result. `ocr_frames_seen` and `ocr_frames_used` report what that cost.
+
+### What ships today
+
+```text
+organize evidence PATH
+  content sha256: ...
+  [visual] heuristic-vision v1        status: ok
+  [ocr] tesseract-ocr v1+5.5.3        status: ok
+  [transcript] whisper-cpp v1+1.9.4  model=ggml-base.en.bin/147964211  status: ok
+    transcript: present, 1 segment(s), 67 chars, language en, 3.9s of audio covered
+```
+
+**Presence, not words.** `organize evidence` prints that a transcript exists, its language, its segment count, its coverage and its engine — and no transcript text at all unless `--show-text` is passed. A transcript is the most sensitive thing this layer produces: a verbatim record of what was said in the owner's own recordings. It follows exactly the rule already in force for extracted document text (D-030).
 
 ## Content-aware caching
 
@@ -174,7 +271,9 @@ evidence_id = uuid5(ns, "evidence:<content sha256>:<kind>:<producer>:<producer v
 
 1. **A rename reuses the work.** Same bytes at a new path hits the cache.
 2. **Different bytes at the same path can never inherit a stale answer.** The SHA is part of the key, so there is no row to find. This is the same reasoning as D-027/D-028 one layer out: a pathname is an observation, not an identity.
-3. **A version bump invalidates exactly what it should.** Upgrading the OCR engine misses the `ocr` rows and leaves `native_text` and `visual` rows hitting. Upgrading a vision model does the inverse.
+3. **A version bump invalidates exactly what it should.** Upgrading the OCR engine misses the `ocr` rows and leaves `native_text`, `visual` and `transcript` rows hitting. Upgrading a vision model, or swapping the whisper model, does the equivalent for its own kind.
+
+The kinds are `native_text`, `ocr`, `visual`, `transcript` and `structure`. A `transcript` row's key carries the model's **file name and its size in bytes** as `model`/`model_version` — a stable, cheap identity, because re-hashing a 148 MB model for every file would cost more than the transcription it protects, while size alone already distinguishes every published ggml model from every other one. A machine path never enters a cache key: a key is published in the ledger, and a directory layout is not evidence.
 
 `pipeline_version` is `EVIDENCE_PIPELINE_VERSION` plus a short digest of the configuration that changes *what a producer sees* — `raster_dpi`, `max_pages`, `raster_max_pixels`, `max_text_chars`, `ocr.max_blocks`. Halving the raster DPI means the cached OCR was an answer to a different question, and folding those settings into the version makes that automatic. Timeouts and `enabled` flags are deliberately excluded: they decide whether a stage runs, not what it would perceive if it did.
 
@@ -182,7 +281,7 @@ evidence_id = uuid5(ns, "evidence:<content sha256>:<kind>:<producer>:<producer v
 
 ### What is deliberately *not* cached
 
-A backend reporting itself unavailable. Availability is a property of the machine, not of the bytes — caching "absent" would mean that installing tesseract never re-asks about any file already scanned. The absence is still recorded as a warning on the evidence, so it is visible; it just is not treated as an answer.
+A backend reporting itself unavailable, and a file whose audio could not be found or was silent -- the same reasoning in both cases (an answer that cost nothing to reach, about the machine or about a decoder, not about the bytes). Availability is a property of the machine, not of the bytes — caching "absent" would mean that installing tesseract never re-asks about any file already scanned. The absence is still recorded as a warning on the evidence, so it is visible; it just is not treated as an answer.
 
 ## Privacy: extracted text stays on the Mac
 
@@ -221,7 +320,7 @@ Since D-057 there is one honest addition to that list: those words **can** end u
 
 - evidence is frozen plain data carrying no `Path` and no callable, so there is nothing in it to act *with*; what crosses into naming is narrower still — bounded strings and tuples, re-sanitized at the boundary, with the geometry and confidences left behind;
 - the evidence package performs zero filesystem writes — no `mkstemp`, no `open(mode='w')`, no `unlink` — enforced by an AST test over the whole tree, with no justification entries permitted;
-- the package imports no network library, no `pickle`, no `ctypes`, and calls neither `eval` nor `exec`; `subprocess` appears in exactly two modules (`backends/tesseract.py`, `backends/ffmpeg_video.py`) with stated justifications, and both argument lists are fixed and contain no file-derived data;
+- the package imports no network library, no `pickle`, no `ctypes`, and calls neither `eval` nor `exec`; `subprocess` appears only in the four modules named in `EVIDENCE_SUBPROCESS_JUSTIFICATIONS` (`backends/tesseract.py`, `backends/ffmpeg_video.py`, `backends/ffmpeg_audio.py`, `backends/transcription.py`), each with a reviewed justification, and every argument list is fixed and contains no file-derived data;
 - no module under `naming/` or `triage/` imports anything from `evidence/`, and exactly one module in `tools/ingest/` imports both sides (`perception_bridge.py`, plus the orchestrator that calls it), so there is one reviewable path by which perceived text reaches a *name* and none by which it reaches anything else;
 - a model asked to name a file is asked through a prompt whose policy layer states that its Task section is untrusted data, and whose answer is refused — not repaired — if it is path-shaped. The prompt is not the defense; it is the courtesy. `validate_proposal` is the defense.
 
@@ -241,6 +340,11 @@ Every public entry point in this package inherits `probe_file`'s contract: **it 
 | a page too large to raster at the requested DPI | scale reduced to fit `raster_max_pixels`, that page named in a warning |
 | file over `evidence.max_bytes` | skipped outright with `too_large`, rather than truncated mid-page |
 | every block below the confidence floor | `low_confidence` warning; the blocks are **kept**, not discarded |
+| a video frame fails to extract | that frame is skipped with its own warning; every other frame still runs |
+| every sampled frame is the same picture | collapsed to one, `deduplicated` warning, one backend call instead of five |
+| no audio stream, or a silent track | `no_audio` warning, transcription skipped, **not** an error and not cached |
+| whisper or its model is absent | `backend_unavailable` warning, `status: unavailable`, not cached, no audio decoded |
+| whisper returns nothing for real audio | an empty transcript at `status: ok` -- a legitimate observation, not an engine fault |
 | the ledger is locked | `cache` warning; the measurement is returned, just not stored |
 
 Never: inference failed, so guess harder.
@@ -278,12 +382,24 @@ One deliberate divergence: degenerate geometry (fewer than four points, negative
 | `pypdfium2` | renders PDF pages to pixels so a scanned document can be OCRed at all | `pdfium_available()` is False, rasterization returns empty plus `backend_unavailable`, nothing raises |
 | `pypdf` (already present) | PDF embedded text | PDFs route to OCR or produce nothing |
 | `fonttools` | lets pypdf fully parse CFF/Type1 font encodings encountered in the real corpus | affected embedded text may be incomplete and pypdf warns |
-| `pillow` (already present) | image decode, preprocessing, PNG encode | the image path is inert |
+| `pillow` (already present) | image decode, preprocessing, PNG encode, the 8x8 average hash used for frame deduplication | the image path is inert |
 | *(stdlib only)* | XLSX/XLSM/PPTX via `zipfile` + `xml.etree.ElementTree`, CSV/TSV via `csv` | N/A — `office.py` adds zero new dependencies, same as `DocxTextExtractor` |
+
+Optional **system binaries**, each detected rather than required, each degrading to a `backend_unavailable` warning:
+
+| Binary | Install | Why | Without it |
+|---|---|---|---|
+| `ffmpeg` / `ffprobe` | `brew install ffmpeg` | container facts, frame sampling, audio decoding | video and audio carry only size/kind; no frames, no transcript |
+| `tesseract` | `brew install tesseract` | offline OCR, including on sampled video frames | `NullOCRBackend` records that no OCR ran |
+| `whisper-cli` | `brew install whisper.cpp` | offline speech-to-text | `NullTranscriptionBackend` records that nothing listened |
+
+The whisper **model** is a separate, larger artifact and is not shipped, downloaded automatically, or committed. Its sanctioned home is the Angel AI cache, `40-ai/model-cache/whisper/` (`tools/models/storage.py::AIStorage.whisper`) — a UUID-verified volume, never a name-matched `/Volumes/Angel`. `evidence.transcription.model_path` names one explicitly; left unset, `transcription.resolve_model_path` consults `WHISPER_CACHE_DIR`, the variable `storage.cache_environment()` already publishes, and picks the preferred model from `WHISPER_MODEL_PREFERENCE` (`ggml-base.en.bin` first). **No machine-specific path appears anywhere in code** — the default is a policy, and a machine that has not been through AI-storage preflight simply answers "no model" and the backend reports itself unavailable.
 
 `pypdfium2` was chosen over PyMuPDF deliberately: PyMuPDF renders PDF pages just as well but is AGPL-licensed, while pypdfium2 wraps Google's PDFium under Apache-2.0/BSD-3-Clause with prebuilt wheels and no system library dependency.
 
-CI needs no network, no model download, no GPU, no tesseract and no large fixtures. Every deterministic test runs against fake backends.
+CI needs no network, no model download, no GPU, no tesseract, no whisper and no large fixtures. Every deterministic test runs against fake backends, and the video/audio fixtures are synthesized on the machine by `tests/ingest/media_fixtures.py` (ffmpeg's `lavfi` sources, Pillow-drawn PNG sequences for frames that must genuinely differ, and macOS `say` for speech). Tests that need an optional binary skip cleanly; one real integration test runs the actual `whisper-cli` against the actual model when both are present.
+
+Two fixture notes worth knowing before adding a test here: this machine's ffmpeg is built **without libfreetype**, so `drawtext` is unavailable and on-screen text is rendered into a PNG with Pillow and encoded as a still video; and ffmpeg's own `testsrc` pattern is *near-static* to an 8x8 average hash, so a test about sampling must pass `dedupe=False` or it will silently measure deduplication instead.
 
 ## Observability
 
@@ -316,8 +432,18 @@ evidence:
     max_blocks: 2000
   vision:
     enabled: true
-    backend: "heuristic"     # "null" | "heuristic"
+    backend: "heuristic"     # "null" | "heuristic" | "ollama"
     timeout_seconds: 30
+    video_frame_count: 5     # 1-12; frames sampled per video
+    frame_dedupe: true       # collapse near-identical frames
+    frame_duration_aware: true   # sample fewer frames from a very short clip
+  transcription:
+    enabled: false           # off by default; needs an optional binary + model
+    backend: "null"          # "null" | "whisper-cpp"
+    model_path: null         # unset -> the Angel whisper cache
+    language: "en"
+    max_audio_seconds: 600
+    timeout_seconds: 300
 ```
 
 `triage.auto_ingest` and `automation.enabled` are untouched by this feature and both remain `false` by default. Turning evidence on does not turn anything else on.
@@ -348,7 +474,7 @@ The existing `2026-08-11_notice.pdf` rename proposal for that file predated Tess
 
 This section used to say "the evidence corpus exists so that a later `NameProposer` can read it and propose `modern-kitchen-interior-rendering.jpg` where today it proposes `2026-09-12_photo-4032x3024.jpg`. That is the next phase and it is deliberately not this one." **That phase has landed.** What it required, and how each condition was met:
 
-1. *a real OCR and a real vision backend have run over a real Downloads folder long enough to characterize their failure modes* — the Phase 1C validation above, plus the Naming Lab's interactive loop over real files (D-054), plus video frame sampling (D-055/D-056);
+1. *a real OCR and a real vision backend have run over a real Downloads folder long enough to characterize their failure modes* — the Phase 1C validation above, plus the Naming Lab's interactive loop over real files (D-054), plus video frame sampling (D-055/D-056) and, for video and audio, a real transcription backend (D-058);
 2. *the interpretation layer exists as a separate, testable stage rather than being folded into the namer* — `tools/ingest/interpretation/` (D-036), still not imported by naming, triage, pipeline, or transaction;
 3. *a wrong interpretation still costs a review rather than a file, which means the naming gate's ordering in `docs/16` stays exactly as it is* — it does, unchanged: human lock → already named → good name → propose → validate → dry-run stop → `safe_rename`.
 

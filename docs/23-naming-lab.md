@@ -269,15 +269,18 @@ records its `content_fingerprint` in `LOCKED_FINGERPRINTS`, and only then
 does a real evaluation run (a fresh validation corpus, not this Lab's
 development seeds) certify it.
 
-## Video: several sampled frames through vision *and* OCR (D-055, D-056)
+## Video: several sampled frames through vision *and* OCR (D-055, D-056, D-058)
 
 A `.mp4`/`.mov`/etc. routes to both vision and OCR (`router.py`'s
 `r14-video-frame` rule): `evidence.vision.video_frame_count` frames (5 by
 default), evenly spaced across the video's duration, are sampled via
-`tools/ingest/evidence/backends/ffmpeg_video.py::extract_frames` (the
-second module, alongside `backends/tesseract.py`, allowed to use
-`subprocess` in the evidence package; see D-055/D-056) and handed to both
-the vision backend and the OCR backend, one frame at a time. OCR-on-video
+`tools/ingest/evidence/backends/ffmpeg_video.py::extract_frames` (one of
+the four modules allowed to use `subprocess` in the evidence package; see
+D-055/D-056/D-058) and handed to both the vision backend and the OCR
+backend, one frame at a time -- after near-identical frames have been
+collapsed to one representative each (D-058; see `docs/17-file-evidence.md`
+for the exact hash and threshold), so a static screen recording costs one
+backend call rather than five descriptions of the same picture. OCR-on-video
 is a deliberate fallback for text a vision model reads poorly or misses
 entirely — a slide, a title card, an on-screen caption — the same reasoning
 `r6-screenshot` already applies to a single screenshot image. `FileEvidence
@@ -290,7 +293,8 @@ each frame's 1-based sampling order.
 **Frame count is the ROI knob** (spec: "the amount of frames taken should
 be a variable that can be edited to optimize the output"). It is
 `evidence.vision.video_frame_count` in `config/ingest.yaml` (default 5,
-valid range 1–30) for production callers, and a live "Video frames to
+valid range 1–12 since D-058, which also added `frame_dedupe` and
+`frame_duration_aware`) for production callers, and a live "Video frames to
 sample" number input in the Lab's sidebar — changing it immediately
 re-samples and re-describes the currently displayed video. More frames
 catch a subject that only appears partway through a clip, at the cost of
@@ -312,7 +316,23 @@ first (e.g. `ollama pull qwen3-vl:8b`, the default in
 `tools/ingest/config.py::VisionConfig.model`) — still loopback-only, still
 no cloud call.
 
-Audio remains unperceived (no speech-to-text ships).
+Audio is no longer unperceived -- see the transcript section above (D-058); it is simply off unless whisper.cpp and a model are present.
+
+### Audio: a transcript, when there is one (D-058)
+
+A video with an audio stream, or a bare audio file, also routes to the
+transcription seam when `evidence.transcription.enabled` is true and a
+whisper model is reachable (`r15-video-transcript` / `r16-audio-transcript`).
+`FileEvidence.transcript` then carries a `TranscriptEvidence` with `.text`,
+`.language`, `.engine` and bounded time-stamped segments. It is deliberately
+*not* merged into `ocr_text`: a file that **says** "invoice" is different
+evidence from a file that **shows** the word "invoice", and a reviewer (and
+any future prompt) has to be able to tell which. A silent or audio-less file
+gets no transcript and a named `no_audio` warning -- never a fabricated one.
+
+Transcription is off by default and needs an optional binary
+(`brew install whisper.cpp`) plus a ggml model in the Angel whisper cache;
+`docs/17-file-evidence.md` has the dependency and configuration detail.
 
 ## Limitations, stated explicitly
 

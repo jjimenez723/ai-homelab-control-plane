@@ -22,6 +22,47 @@ no second decompression-bomb guard is needed the way `preprocess.py`'s
 `open_image_safely` is needed for a file decoded straight off disk: ffmpeg
 itself is the trust boundary here, exactly as pypdfium2's `page.render(scale=)`
 already is for `raster.py::rasterize_pdf_pages`.
+
+Frame selection, exactly
+------------------------
+
+`extract_frames` is the whole algorithm, and every step of it is
+deterministic -- the same file and the same configuration always produce the
+same frames, because cached evidence keyed by content hash would otherwise
+be an answer to a question that changed between runs.
+
+1. **How many.** `frame_count_for(duration, requested, duration_aware=...)`.
+   The requested count is clamped to `1..MAX_VIDEO_FRAME_COUNT` (12; see
+   `config.MAX_VIDEO_FRAME_COUNT` for why a ceiling exists at all). With
+   `duration_aware` on (the default) a clip too short to *contain*
+   `requested` distinct moments is sampled less: under
+   `SHORT_VIDEO_SECONDS` (4.0 s) at most `SHORT_VIDEO_FRAMES` (2), and under
+   `VERY_SHORT_VIDEO_SECONDS` (1.0 s) exactly one. An unknown duration is
+   treated as long, because refusing to sample is worse than sampling a
+   three-second clip five times.
+2. **Where.** `_sample_timestamps` spaces them evenly *strictly inside* the
+   duration -- `duration * (i+1) / (count+1)` -- never the exact start (a
+   fade-in or title card) and never the exact end (possibly past the
+   container's last decodable frame). Unknown duration falls back to fixed
+   one-second-apart offsets.
+3. **Which survive.** `deduplicate_frames` collapses near-identical frames
+   with an 8x8 average hash (`average_hash`): each frame is converted to
+   greyscale, resized to 8x8 with `Image.BILINEAR`, and every pixel becomes
+   one bit -- set when it is at or above the mean of those 64 pixels. Two
+   frames are "the same picture" when their hashes differ in at most
+   `DEDUPE_HAMMING_THRESHOLD` (4) of 64 bits. A frame is compared against
+   every *kept* frame, not merely its predecessor, so a clip that alternates
+   between two shots keeps two frames rather than all of them. The earliest
+   frame of a group is the representative, and it keeps its original 1-based
+   sampling index in `RasterImage.page` -- so the surviving pages may be
+   non-contiguous (`1, 2, 4`), which is deliberate: the index says *when* in
+   the clip the frame came from, and renumbering would destroy that.
+
+Average hash is used rather than a DCT-based pHash because the question here
+is only "is this the same picture again", the frames are already downscaled
+by ffmpeg, and it needs no NumPy -- a banned import in this package
+(`EVIDENCE_BANNED_IMPORTS`). It is implemented in plain Pillow, in
+`average_hash` below, with no adapted third-party code.
 """
 
 from __future__ import annotations
@@ -32,11 +73,14 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
+from tools.ingest.config import MAX_VIDEO_FRAME_COUNT
 from tools.ingest.evidence.types import (
     EvidenceWarning,
     RasterImage,
     WARN_BACKEND_UNAVAILABLE,
+    WARN_DEDUPLICATED,
     WARN_MALFORMED,
+    WARN_SKIPPED_BY_POLICY,
     WARN_TIMEOUT,
     WARN_TOO_LARGE,
 )
@@ -60,6 +104,23 @@ MAX_FRAME_BYTES = 20_000_000
 # frame. Used only when duration is unknown or too short to have a midpoint
 # past this offset.
 _DEFAULT_TIMESTAMP_SECONDS = 1.0
+
+# Duration-aware frame counts. A two-second clip has nowhere to put five
+# distinct moments, so asking for five buys four redundant backend calls.
+VERY_SHORT_VIDEO_SECONDS = 1.0
+SHORT_VIDEO_SECONDS = 4.0
+SHORT_VIDEO_FRAMES = 2
+
+# The average-hash grid. 8x8 is the classical size: small enough that a
+# re-encode, a compression artifact, or a slow pan does not change the hash,
+# large enough that two genuinely different shots do.
+HASH_EDGE = 8
+HASH_BITS = HASH_EDGE * HASH_EDGE
+
+# Out of `HASH_BITS`, how many may differ before two frames are still "the
+# same picture". Four of sixty-four is a little over six percent: it absorbs
+# encoder noise and a ticking on-screen clock, and does not absorb a cut.
+DEDUPE_HAMMING_THRESHOLD = 4
 
 
 @lru_cache(maxsize=1)
@@ -202,6 +263,91 @@ def extract_frame(
     )
 
 
+def frame_count_for(
+    duration_seconds: float | None, requested: int, *, duration_aware: bool = True
+) -> int:
+    """How many frames to sample, clamped and (optionally) duration-aware.
+
+    Step 1 of the algorithm documented in this module's docstring. Pure, so
+    the decision can be tested without ffmpeg installed at all.
+    """
+    count = max(1, min(int(requested), MAX_VIDEO_FRAME_COUNT))
+    if not duration_aware:
+        return count
+    if not duration_seconds or duration_seconds <= 0:
+        # Unknown duration: treat it as long. Sampling a short clip several
+        # times costs a few redundant calls; refusing to sample costs the
+        # only evidence this file was ever going to produce.
+        return count
+    if duration_seconds < VERY_SHORT_VIDEO_SECONDS:
+        return 1
+    if duration_seconds < SHORT_VIDEO_SECONDS:
+        return min(count, SHORT_VIDEO_FRAMES)
+    return count
+
+
+def average_hash(png_bytes: bytes) -> int | None:
+    """A 64-bit average hash of a PNG, or None if it cannot be decoded.
+
+    Greyscale, resized to 8x8, one bit per pixel: set when the pixel is at or
+    above the mean of the 64. Plain Pillow, no NumPy (a banned import here),
+    no adapted third-party code. Deterministic for identical bytes, and
+    stable under the small changes a video encoder makes between adjacent
+    frames -- which is the entire point.
+    """
+    try:
+        from PIL import Image  # deferred: keeps this module importable without Pillow
+
+        with Image.open(io.BytesIO(png_bytes)) as decoded:
+            small = decoded.convert("L").resize((HASH_EDGE, HASH_EDGE), Image.BILINEAR)
+            # `tobytes()` rather than `getdata()`: one byte per pixel for
+            # mode "L", in row order, and not deprecated in Pillow 14.
+            pixels = list(small.tobytes())
+    except Exception:  # noqa: BLE001 - an undecodable frame simply has no hash
+        return None
+    if len(pixels) != HASH_BITS:
+        return None
+    mean = sum(pixels) / float(HASH_BITS)
+    value = 0
+    for index, pixel in enumerate(pixels):
+        if pixel >= mean:
+            value |= 1 << index
+    return value
+
+
+def _hamming(left: int, right: int) -> int:
+    return bin(left ^ right).count("1")
+
+
+def deduplicate_frames(
+    frames: list[RasterImage], *, threshold: int = DEDUPE_HAMMING_THRESHOLD
+) -> tuple[list[RasterImage], int]:
+    """Collapse near-identical frames to one representative each.
+
+    Step 3 of the algorithm in this module's docstring. Returns the kept
+    frames in sampling order plus how many were dropped, so the caller can
+    record the count as evidence rather than silently perceiving less than it
+    was asked to.
+
+    A frame whose pixels cannot be hashed at all is **kept**, not dropped:
+    "we could not compare this" must never become "this was a duplicate".
+    """
+    kept: list[RasterImage] = []
+    kept_hashes: list[int] = []
+    dropped = 0
+    for frame in frames:
+        digest = average_hash(frame.png_bytes)
+        if digest is None:
+            kept.append(frame)
+            continue
+        if any(_hamming(digest, existing) <= threshold for existing in kept_hashes):
+            dropped += 1
+            continue
+        kept.append(frame)
+        kept_hashes.append(digest)
+    return kept, dropped
+
+
 def extract_frames(
     path: Path,
     *,
@@ -210,24 +356,40 @@ def extract_frames(
     duration_seconds: float | None,
     timeout_seconds: int,
     max_edge: int = MAX_FRAME_EDGE_PIXELS,
+    dedupe: bool = True,
+    duration_aware: bool = True,
 ) -> tuple[list[RasterImage], tuple[EvidenceWarning, ...]]:
-    """`count` frames, evenly spaced across the video's duration, as `RasterImage`s.
+    """The frames a video is perceived from, evenly spaced and de-duplicated.
 
-    `page` on each is its 1-based frame index in sampling order -- the same
-    field a multi-page PDF's pages carry, which is what lets this reuse
-    `extract.py`'s existing per-page OCR loop unchanged. One frame that
-    fails to extract is skipped, with its own warning, rather than aborting
-    every other frame -- the same degrade-per-page posture
-    `raster.py::rasterize_pdf_pages` already uses.
+    See this module's docstring for the exact three-step algorithm (how many,
+    where, which survive). `page` on each returned frame is its 1-based index
+    in the *original* sampling order, which is what lets `extract.py`'s
+    existing per-page OCR loop handle a video with zero changes -- and what
+    keeps "this frame came from a third of the way in" recoverable after
+    deduplication has removed its neighbours.
+
+    One frame that fails to extract is skipped, with its own warning, rather
+    than aborting every other frame -- the same degrade-per-page posture
+    `raster.py::rasterize_pdf_pages` already uses. Never raises.
     """
     if not available():
         return [], (
             EvidenceWarning(code=WARN_BACKEND_UNAVAILABLE, stage=_STAGE, detail="ffmpeg binary not found on PATH"),
         )
 
+    resolved_count = frame_count_for(duration_seconds, count, duration_aware=duration_aware)
     frames: list[RasterImage] = []
     warnings: list[EvidenceWarning] = []
-    for index, timestamp in enumerate(_sample_timestamps(duration_seconds, count)):
+    if resolved_count < max(1, min(int(count), MAX_VIDEO_FRAME_COUNT)):
+        warnings.append(
+            EvidenceWarning(
+                code=WARN_SKIPPED_BY_POLICY,
+                stage=_STAGE,
+                detail=f"clip is {duration_seconds:.1f}s long: sampled {resolved_count} frame(s) "
+                       f"instead of the requested {count}",
+            )
+        )
+    for index, timestamp in enumerate(_sample_timestamps(duration_seconds, resolved_count)):
         frame, frame_warnings = _extract_one_frame(
             path, timestamp_seconds=timestamp, source_sha256=source_sha256,
             page=index + 1, timeout_seconds=timeout_seconds, max_edge=max_edge,
@@ -235,5 +397,17 @@ def extract_frames(
         warnings.extend(frame_warnings)
         if frame is not None:
             frames.append(frame)
+
+    if dedupe and len(frames) > 1:
+        frames, dropped = deduplicate_frames(frames)
+        if dropped:
+            warnings.append(
+                EvidenceWarning(
+                    code=WARN_DEDUPLICATED,
+                    stage=_STAGE,
+                    detail=f"{dropped} near-identical sampled frame(s) collapsed into an earlier one; "
+                           f"{len(frames)} distinct frame(s) perceived",
+                )
+            )
 
     return frames, tuple(warnings)

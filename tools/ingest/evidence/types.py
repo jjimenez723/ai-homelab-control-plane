@@ -58,6 +58,15 @@ WARN_PARTIAL = "partial_extraction"
 WARN_TIMEOUT = "timeout"
 WARN_TOO_LARGE = "too_large"
 WARN_SKIPPED_BY_POLICY = "skipped_by_policy"
+# A video/audio file whose audio track is absent or carries no measurable
+# signal. Named separately from `WARN_UNSUPPORTED` because "there is nothing
+# to transcribe" is a fact about the file, not a gap in this machine's
+# tooling -- a reader must be able to tell those two apart.
+WARN_NO_AUDIO = "no_audio"
+# Near-identical sampled frames collapsed to one representative before OCR
+# and vision ran over them. Not a failure: it records that the file was
+# perceived from fewer frames than were requested, and why.
+WARN_DEDUPLICATED = "deduplicated"
 
 
 @dataclass(frozen=True)
@@ -65,7 +74,7 @@ class EvidenceWarning:
     """One reason a piece of evidence is missing, partial, or suspect."""
 
     code: str  # one of WARN_*
-    stage: str  # "route" | "native_text" | "raster" | "ocr" | "vision" | "structure" | "cache"
+    stage: str  # "route" | "native_text" | "raster" | "ocr" | "vision" | "audio" | "transcript" | "structure" | "cache"
     detail: str = ""
 
 
@@ -238,6 +247,59 @@ class VisualEvidence:
     model_version: str
 
 
+# -- transcript (speech) --------------------------------------------------
+#
+# Speech is the third perception seam, alongside OCR ("what text is visibly
+# present?") and vision ("what am I looking at?"): "what is being said?".
+# It is deliberately its own seam and its own evidence type rather than
+# being folded into OCR text -- a transcript has time structure, a language,
+# and an engine whose failure modes are nothing like an OCR engine's, and a
+# reader has to be able to tell "this file *says* invoice" from "this file
+# *shows* the word invoice" (D-058).
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
+    """One contiguous span of recognized speech, in seconds from the start."""
+
+    start_seconds: float
+    end_seconds: float
+    text: str  # sanitized
+
+
+# A transcript is evidence about a file, not a subtitle track: past this many
+# segments the extra rows add storage and no perceptual information a naming
+# or interpretation stage can use. The concatenated `text` is bounded
+# separately by `evidence.max_text_chars`.
+MAX_TRANSCRIPT_SEGMENTS = 500
+
+
+@dataclass(frozen=True)
+class TranscriptEvidence:
+    """What a file's audio says. Plain data, no authority -- as untrusted as OCR text.
+
+    `duration_covered_seconds` is how much audio was actually transcribed,
+    which is not the file's duration whenever `truncated` is True (the clip
+    was capped at `evidence.transcription.max_audio_seconds`). Recording both
+    is the difference between "this file is about X" and "the first ten
+    minutes of this file are about X".
+
+    The attribute names `text`, `language` and `engine` are a deliberate
+    public contract: a consumer reaching this through
+    `getattr(file_evidence, "transcript", None)` reads exactly those three.
+    """
+
+    text: str  # sanitized, capped, the concatenation of `segments`
+    language: str  # BCP-47-ish as reported by the engine, e.g. "en"; "" if unknown
+    segments: tuple[TranscriptSegment, ...]  # bounded by MAX_TRANSCRIPT_SEGMENTS
+    engine: str  # backend name, e.g. "whisper-cpp"
+    engine_version: str
+    model: str  # model file name, never a path
+    duration_covered_seconds: float
+    truncated: bool
+    confidence: float  # 0.0-1.0; 0.0 when the engine reports none
+
+
 # -- structure ------------------------------------------------------------
 
 
@@ -281,7 +343,7 @@ class StructureEvidence:
 class EvidenceProvenance:
     """Who produced one slice of evidence, from which bytes, under what version."""
 
-    kind: str  # "native_text" | "ocr" | "visual" | "structure"
+    kind: str  # "native_text" | "ocr" | "visual" | "transcript" | "structure"
     content_sha256: str
     producer: str  # extractor or backend name
     producer_version: str
@@ -326,6 +388,11 @@ class FileEvidence:
     # separate field rather than being derived, so existing code reading
     # only `.visual` keeps working unchanged.
     visual_frames: tuple[VisualEvidence, ...] = ()
+    # What the file's audio says, when it has audio and a transcription
+    # backend was configured and available. `None` means "not perceived" --
+    # the reason (no audio stream, silent track, backend absent, disabled by
+    # config) is in `warnings`, never inferred from the absence itself.
+    transcript: TranscriptEvidence | None = None
     structure: StructureEvidence | None = None
     provenance: tuple[EvidenceProvenance, ...] = ()
     warnings: tuple[EvidenceWarning, ...] = ()
@@ -376,6 +443,39 @@ class RasterImage:
 
 
 RasterPage = RasterImage  # alias; a page is a raster image with page > 0
+
+
+@dataclass(frozen=True)
+class AudioClip:
+    """Audio handed to a transcription backend. Bytes, deliberately not a path.
+
+    The same argument as `RasterImage`, one seam further out: a speech engine
+    may be a subprocess today and a model server tomorrow, and one that is
+    only ever handed an in-memory WAV has nothing to mutate the filesystem
+    with, whatever else it does with the samples. It is also why
+    `ffmpeg_audio.extract_audio_clip` streams the decoded audio back on
+    ffmpeg's stdout instead of asking ffmpeg for an output file: a temp file
+    would be a filesystem write in a package whose invariant is that it
+    performs none.
+
+    `wav_bytes` is a complete RIFF/WAVE container holding 16 kHz mono signed
+    16-bit PCM -- the format every whisper-family engine wants, normalized
+    once here rather than at each backend, so a backend never has to resample
+    and can never disagree with another about what it was given.
+    """
+
+    wav_bytes: bytes
+    duration_seconds: float
+    source_sha256: str = ""  # identifies the ORIGINAL file's bytes
+    sample_rate: int = 16_000
+    channels: int = 1
+    # The loudest sample in the clip, 0-32767. A measured fact rather than a
+    # judgment: a caller decides what counts as "silent", this only reports
+    # what was there (see `ffmpeg_audio.SILENCE_PEAK_THRESHOLD`).
+    peak_amplitude: int = 0
+    # True when the source's audio ran longer than the extraction cap and the
+    # clip is only its first `duration_seconds`.
+    truncated: bool = False
 
 
 # -- text sanitization --------------------------------------------------------
@@ -627,6 +727,49 @@ def structure_evidence_from_json(data: dict[str, Any]) -> StructureEvidence:
     )
 
 
+def transcript_evidence_to_json(transcript: TranscriptEvidence) -> dict[str, Any]:
+    return {
+        "text": transcript.text,
+        "language": transcript.language,
+        "segments": [
+            {
+                "start_seconds": segment.start_seconds,
+                "end_seconds": segment.end_seconds,
+                "text": segment.text,
+            }
+            for segment in transcript.segments
+        ],
+        "engine": transcript.engine,
+        "engine_version": transcript.engine_version,
+        "model": transcript.model,
+        "duration_covered_seconds": transcript.duration_covered_seconds,
+        "truncated": transcript.truncated,
+        "confidence": transcript.confidence,
+    }
+
+
+def transcript_evidence_from_json(data: dict[str, Any]) -> TranscriptEvidence:
+    segments = tuple(
+        TranscriptSegment(
+            start_seconds=float(segment["start_seconds"]),
+            end_seconds=float(segment["end_seconds"]),
+            text=str(segment["text"]),
+        )
+        for segment in data.get("segments", [])
+    )
+    return TranscriptEvidence(
+        text=str(data["text"]),
+        language=str(data.get("language", "")),
+        segments=segments,
+        engine=str(data["engine"]),
+        engine_version=str(data["engine_version"]),
+        model=str(data.get("model", "")),
+        duration_covered_seconds=float(data.get("duration_covered_seconds", 0.0)),
+        truncated=bool(data.get("truncated", False)),
+        confidence=float(data.get("confidence", 0.0)),
+    )
+
+
 def evidence_section_to_json(section: Any) -> dict[str, Any]:
     """Serialize one evidence section to a plain dict, dispatching on type.
 
@@ -642,6 +785,8 @@ def evidence_section_to_json(section: Any) -> dict[str, Any]:
         return native_text_to_json(section)
     if isinstance(section, VisualEvidence):
         return visual_evidence_to_json(section)
+    if isinstance(section, TranscriptEvidence):
+        return transcript_evidence_to_json(section)
     if isinstance(section, StructureEvidence):
         return structure_evidence_to_json(section)
     if isinstance(section, EvidenceProvenance):

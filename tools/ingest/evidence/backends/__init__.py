@@ -1,10 +1,11 @@
 """Protocol seams for perception backends, and the registries that build them.
 
-Three separate `Protocol`s, deliberately not one god-model interface:
-`TextExtractor` (native document text), `OCRBackend` (pixels to words), and
-`VisionBackend` (pixels to a scene description). A real system eventually
-plugs in three quite different kinds of engine here -- a library that parses
-a file format, a CLI OCR engine, a vision model -- and giving them separate,
+Four separate `Protocol`s, deliberately not one god-model interface:
+`TextExtractor` (native document text), `OCRBackend` (pixels to words),
+`VisionBackend` (pixels to a scene description), and `TranscriptionBackend`
+(audio samples to speech). A real system eventually plugs in four quite
+different kinds of engine here -- a library that parses a file format, a CLI
+OCR engine, a vision model, a speech model -- and giving them separate,
 narrow contracts means swapping one never has to touch the others' callers.
 
 The structural distinction that matters is *what each seam is handed*:
@@ -13,13 +14,15 @@ The structural distinction that matters is *what each seam is handed*:
   text parser), not a model. It receives an `EvidenceSource`, which carries a
   real filesystem `Path`, because it must be able to stream a large file
   rather than hold the whole thing in memory.
-* An `OCRBackend` or `VisionBackend` may one day be a model -- today a CLI
-  tool or a hand-written heuristic, but the seam has to be safe for whatever
-  fills it next. It receives only a `RasterImage`: in-memory PNG bytes, width,
-  height, page number. No `Path`, no file handle, nothing to mutate the
-  filesystem with. This is exactly the reasoning that makes
-  `NamingEvidence.thumbnail_png` (`tools/ingest/naming/evidence.py`) bytes
-  rather than a path, applied one layer further out.
+* An `OCRBackend`, `VisionBackend`, or `TranscriptionBackend` may one day be
+  a model -- today a CLI tool or a hand-written heuristic, but the seam has
+  to be safe for whatever fills it next. It receives only a `RasterImage`
+  (in-memory PNG bytes, width, height, page number) or an `AudioClip`
+  (in-memory 16 kHz mono PCM WAV bytes, a duration). No `Path`, no file
+  handle, nothing to mutate the filesystem with. This is exactly the
+  reasoning that makes `NamingEvidence.thumbnail_png`
+  (`tools/ingest/naming/evidence.py`) bytes rather than a path, applied one
+  layer further out.
 
 A backend must never raise. Every method here, including `available()`,
 returns a plain result carrying warnings and a status instead of propagating
@@ -33,14 +36,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from tools.ingest.config import OCRConfig, VisionConfig
+from tools.ingest.config import OCRConfig, TranscriptionConfig, VisionConfig
 from tools.ingest.evidence.types import (
+    AudioClip,
     EvidenceSource,
     EvidenceWarning,
     NativeText,
     OCRBlock,
     RasterImage,
     StructureEvidence,
+    TranscriptEvidence,
     VisualEvidence,
 )
 
@@ -98,6 +103,26 @@ class VisionBackend(Protocol):
         ...
 
 
+class TranscriptionBackend(Protocol):
+    """Recognises speech within audio. Receives samples, never a path.
+
+    `transcribe` is handed an `AudioClip` -- in-memory WAV bytes at a fixed
+    16 kHz mono, normalized by `backends/ffmpeg_audio.py` so an engine never
+    has to resample and two engines can never disagree about what they were
+    shown.
+    """
+
+    name: str
+    version: str
+
+    def available(self) -> bool:
+        """Whether this backend can currently run (binary and model present)."""
+        ...
+
+    def transcribe(self, audio: AudioClip, *, timeout_seconds: int) -> "TranscriptionResult":
+        ...
+
+
 @dataclass(frozen=True)
 class ExtractionResult:
     native_text: NativeText | None
@@ -119,6 +144,13 @@ class OCRResult:
 @dataclass(frozen=True)
 class VisionResult:
     visual: VisualEvidence | None = None
+    warnings: tuple[EvidenceWarning, ...] = ()
+    status: str = "ok"
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    transcript: TranscriptEvidence | None = None
     warnings: tuple[EvidenceWarning, ...] = ()
     status: str = "ok"
 
@@ -163,6 +195,24 @@ def build_vision_backend(config: VisionConfig) -> VisionBackend:
 
         return OllamaVisionBackend(config)
     raise ValueError(f"unknown vision backend {config.backend!r}")
+
+
+def build_transcription_backend(config: TranscriptionConfig) -> TranscriptionBackend:
+    """Construct the configured `TranscriptionBackend`. See `build_ocr_backend`.
+
+    `"null"` is the default and stays the repository-safe one: whisper.cpp is
+    an optional system binary plus a model file the repository does not ship
+    (D-058), detected rather than required.
+    """
+    if config.backend == "null":
+        from tools.ingest.evidence.backends.transcription import NullTranscriptionBackend
+
+        return NullTranscriptionBackend()
+    if config.backend == "whisper-cpp":
+        from tools.ingest.evidence.backends.transcription import WhisperCppBackend
+
+        return WhisperCppBackend(config)
+    raise ValueError(f"unknown transcription backend {config.backend!r}")
 
 
 def text_extractors() -> tuple[TextExtractor, ...]:
