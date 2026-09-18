@@ -120,7 +120,7 @@ AUDIO_SUFFIXES = frozenset(
 
 DOCUMENT_SUFFIXES = frozenset(
     {
-        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".pages",
+        ".pdf", ".docx", ".doc", ".xlsx", ".xlsm", ".xls", ".pptx", ".ppt", ".pages",
         ".numbers", ".key", ".rtf", ".odt", ".ods", ".odp", ".epub", ".mobi",
         ".djvu", ".rtfd",
     }

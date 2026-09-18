@@ -72,11 +72,51 @@ This is the structural safety property, and it is the same argument that makes `
 
 | Seam | Implementations | Notes |
 |---|---|---|
-| `TextExtractor` | `PlainTextExtractor`, `PdfTextExtractor`, `DocxTextExtractor` | text/Markdown/code, PDF embedded text via pypdf, DOCX via `zipfile` + `ElementTree` |
+| `TextExtractor` | `PlainTextExtractor`, `PdfTextExtractor`, `DocxTextExtractor`, `XlsxTextExtractor`, `PptxTextExtractor`, `CsvTextExtractor` | text/Markdown/code, PDF embedded text via pypdf, DOCX via `zipfile` + `ElementTree`, XLSX/XLSM (`tools/ingest/evidence/office.py`) via `zipfile` + `ElementTree`, PPTX via the same, CSV/TSV via `csv.Sniffer` |
 | `OCRBackend` | `NullOCRBackend` (**default**), `TesseractOCRBackend` | the default performs no OCR and records that it did not; tesseract is optional, offline, and detected rather than required |
 | `VisionBackend` | `NullVisionBackend`, `HeuristicVisionBackend` (**default**) | the heuristic backend measures pixels and says only what it can measure |
 
 `HeuristicVisionBackend` is written in exactly the spirit of `DeterministicProposer`: it will call an image a `screenshot`, a `scanned_document`, an `ordinary_photo`, or `unknown`, at honestly low confidence, from colour distribution and flatness. **It will never claim `rendering`, `diagram`, `chart` or `meme`** — it cannot tell, and asserting one would be inventing certainty the pixels do not support. A real vision model implements the same protocol and nothing downstream changes.
+
+### XLSX/XLSM, PPTX, and CSV/TSV are read, never executed
+
+`tools/ingest/evidence/office.py` extends the same native-text seam to
+spreadsheets, presentations, and delimited text. This is not a new decision
+-- D-029 ("evidence is perception, never authority") already covers native
+text extraction from office documents; this is that same extractor gaining
+three more formats, not a new kind of thing. No new dependency is added:
+`zipfile`, `xml.etree.ElementTree`, and `csv` are all stdlib, exactly as for
+`DocxTextExtractor` below.
+
+`XlsxTextExtractor` reads `xl/workbook.xml`, `xl/_rels/workbook.xml.rels`,
+`xl/sharedStrings.xml`, and each `xl/worksheets/sheetN.xml` it resolves,
+bounded to the first 50 sheets and the first 200 rows of each. Cell
+**formulas** (`<f>`) are never read, only the cached `<v>` value or shared/
+inline string the file's own author last computed -- there is no formula
+evaluator here. `.xlsm` (macro-enabled) is read identically to `.xlsx`;
+`xl/vbaProject.bin` is never opened, so a macro is never executed, inspected,
+or referenced. `PptxTextExtractor` reads `ppt/presentation.xml`,
+`ppt/_rels/presentation.xml.rels`, and each `ppt/slides/slideN.xml` in
+presentation order, bounded to the first 200 slides; `ppt/notesSlides/*`
+(speaker notes) is never opened, so notes are structurally excluded rather
+than merely unread by accident. `CsvTextExtractor` sniffs the delimiter with
+`csv.Sniffer` and reads the header plus the first 500 rows; it is bounded
+read plus a parser, not a zip container, so it inherits `PlainTextExtractor`'s
+guards (byte cap, NUL-byte and replacement-character malformed-binary checks)
+rather than the zip-specific ones below.
+
+Both zip formats reuse the same two caps `DocxTextExtractor` uses, at the
+same values: `MAX_OFFICE_ZIP_ENTRIES` (5000) bounds the central directory
+before it is iterated, and `MAX_OFFICE_XML_BYTES` (25 MB) bounds every part
+read, checked against the *declared* uncompressed size before decompression
+and again against the actual bytes read. A sheet, slide, or relationship
+part this module cannot honestly resolve is skipped with a warning, never
+guessed at -- "omit, don't default" applies here exactly as it does to a
+PDF's un-inferred headings.
+
+The router's `r17-office-native-text` rule sends `.xlsx`, `.xlsm`, `.pptx`,
+`.csv`, and `.tsv` to native text only, the same "native text, no OCR"
+shape as `r5-office-document` and `r2-text` -- see the router table below.
 
 ### DOCX is read, never executed
 
@@ -92,10 +132,11 @@ Every rule that fires appends a stable, named id to `EvidenceRoute.rules`. The i
 |---|---|---|---|---|
 | `r0-evidence-disabled` | `evidence.enabled` false | — | — | — |
 | `r1-too-large` | over `evidence.max_bytes` | — | — | — |
+| `r17-office-native-text` | .xlsx/.xlsm/.pptx/.csv/.tsv (checked by extension, ahead of the rest) | yes | — | — |
 | `r2-text` | text/Markdown/code | yes | — | — |
 | `r3-pdf-embedded-text` | PDF, probe says text is there | yes | **no** | — |
 | `r4-pdf-no-embedded-text` | PDF, no text layer | try | yes | — |
-| `r5-office-document` | .docx/.pptx/.xlsx/… | yes | — | — |
+| `r5-office-document` | .docx/.pages/.rtf/.epub/… (`.xlsx`/`.xlsm`/`.pptx` are claimed by r17 above) | yes | — | — |
 | `r6-screenshot` | image, screenshot by name or pixel hint | — | yes | yes |
 | `r7-camera-photo` | image with camera EXIF | — | — | yes |
 | `r8-image-other` | any other image | — | — | yes |
@@ -217,6 +258,7 @@ One deliberate divergence: degenerate geometry (fewer than four points, negative
 | `pypdf` (already present) | PDF embedded text | PDFs route to OCR or produce nothing |
 | `fonttools` | lets pypdf fully parse CFF/Type1 font encodings encountered in the real corpus | affected embedded text may be incomplete and pypdf warns |
 | `pillow` (already present) | image decode, preprocessing, PNG encode | the image path is inert |
+| *(stdlib only)* | XLSX/XLSM/PPTX via `zipfile` + `xml.etree.ElementTree`, CSV/TSV via `csv` | N/A — `office.py` adds zero new dependencies, same as `DocxTextExtractor` |
 
 `pypdfium2` was chosen over PyMuPDF deliberately: PyMuPDF renders PDF pages just as well but is AGPL-licensed, while pypdfium2 wraps Google's PDFium under Apache-2.0/BSD-3-Clause with prebuilt wheels and no system library dependency.
 

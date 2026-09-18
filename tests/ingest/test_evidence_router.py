@@ -5,7 +5,7 @@ so a hostile or malformed file cannot turn "should we perceive this" into an
 attack surface of its own (see the AST-enforced purity guard in
 `test_mutation_authority.py`, which lists `router.py` in `PURE_MODULES`). This
 suite is the behavioural half of that claim: every rule id in the spec (r0
-through r13) fires under exactly the documented conditions, `refine_route`
+through r13, plus r17) fires under exactly the documented conditions, `refine_route`
 and `refine_route_for_native_text` only ever *add* a stage and never remove
 one or override a disabled config, and the same inputs always produce an
 equal `EvidenceRoute` (the router's only claim to purity that actually
@@ -91,12 +91,47 @@ class RuleFiringTests(unittest.TestCase):
                 self.assertFalse(route.vision)
 
     def test_r5_office_document_is_native_only(self):
-        for extension in (".docx", ".pptx", ".xlsx", ".rtf", ".epub"):
+        # .pptx/.xlsx are claimed by r17 (below) before this branch is ever
+        # reached -- see RuleFiringTests.test_r17_office_native_text_...
+        for extension in (".docx", ".rtf", ".epub"):
             with self.subTest(extension=extension):
                 route = _route(media_kind=MEDIA_DOCUMENT, extension=extension, facts={})
                 self.assertEqual(route.rules, ("r5-office-document",))
                 self.assertTrue(route.native_text)
                 self.assertFalse(route.ocr or route.vision)
+
+    def test_r17_office_native_text_covers_spreadsheets_presentations_and_csv(self):
+        """`.xlsx`/`.xlsm`/`.pptx`/`.csv`/`.tsv`: `tools/ingest/evidence/office.py`'s
+        native-text extractors (an extension of D-029, not a new decision --
+        see docs/17). Fires by extension, ahead of the `media_kind` dispatch,
+        so it applies the same way regardless of exactly how the extension
+        happened to be bucketed."""
+        for extension, media_kind in (
+            (".xlsx", MEDIA_DOCUMENT),
+            (".xlsm", MEDIA_DOCUMENT),
+            (".pptx", MEDIA_DOCUMENT),
+            (".csv", MEDIA_TEXT),
+            (".tsv", MEDIA_TEXT),
+        ):
+            with self.subTest(extension=extension):
+                route = _route(media_kind=media_kind, extension=extension, facts={})
+                self.assertEqual(route.rules, ("r17-office-native-text",))
+                self.assertTrue(route.native_text)
+                self.assertFalse(route.ocr or route.vision)
+
+    def test_r17_fires_by_extension_even_if_media_kind_classification_disagrees(self):
+        """Belt and suspenders: this rule does not depend on `media_kind`
+        having bucketed the extension correctly, unlike every other rule."""
+        route = _route(media_kind=MEDIA_OTHER, extension=".xlsm", facts={})
+        self.assertEqual(route.rules, ("r17-office-native-text",))
+        self.assertTrue(route.native_text)
+
+    def test_r17_still_respects_evidence_disabled_and_too_large(self):
+        disabled = _route(config=EvidenceConfig(enabled=False), media_kind=MEDIA_DOCUMENT, extension=".xlsx")
+        self.assertEqual(disabled.rules, ("r0-evidence-disabled",))
+
+        too_large = _route(config=EvidenceConfig(max_bytes=100), size=101, media_kind=MEDIA_DOCUMENT, extension=".xlsx")
+        self.assertEqual(too_large.rules, ("r1-too-large",))
 
     def test_r6_screenshot_by_filename_gets_ocr_and_vision(self):
         route = _route(media_kind=MEDIA_IMAGE, screenshot_by_name=True, extension=".png")
