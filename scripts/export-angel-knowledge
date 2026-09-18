@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Copy docs/27-backend-baselines.md and templates/backend-profiles/ onto the
+# Angel T7 under 50-research/knowledge/backend-baselines/. `knowledge/` is
+# gitignored -- this is a read-only export of the tracked canonical copy in
+# docs/ and templates/, never the other way around. Volume identity is
+# verified by UUID the same way tools/backup.py and tools/ingest/t7.py do;
+# see tools/export_angel_knowledge.py for the implementation.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ -x "$ROOT_DIR/.venv/bin/python3" ]]; then
+  PYTHON="$ROOT_DIR/.venv/bin/python3"
+else
+  PYTHON="python3"
+fi
+
+exec "$PYTHON" -m tools.export_angel_knowledge "$@"

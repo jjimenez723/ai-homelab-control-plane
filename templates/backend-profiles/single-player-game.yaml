@@ -1,0 +1,173 @@
+# Backend profile: single-player games with local-first persistence, optional
+# cloud save, and asynchronous leaderboards (e.g. Mafi -- see the example
+# portfolio in docs/06-software-factory.md). See docs/27-backend-baselines.md
+# for the sourced evaluation behind every product choice below.
+
+profile_id: single-player-game
+version: 1.0.0
+summary: >
+  Local-first game state (progress, inventory, settings) with optional
+  account-linked cloud save/cross-device sync and asynchronous, non-
+  authoritative-server leaderboards. No real-time multiplayer -- see
+  multiplayer-game.yaml for that shape. The backend is a thin, low-cost
+  layer around a game that is fully playable offline.
+
+fit:
+  application_traits:
+    - the game must be fully playable with zero network connectivity; the backend is additive, not load-bearing for core gameplay
+    - cloud save is optional and account-gated, not the default persistence layer
+    - leaderboards are asynchronous score submissions, not live competitive state
+    - anti-cheat is a soft/plausibility concern, not a hard security requirement (no real economy/money at stake in the base case)
+    - low write frequency (save-on-checkpoint, score-submit-on-completion), read-heavy for leaderboard display
+  scale_assumptions:
+    initial_maus: "1,000-500,000+ (single-player games can spike hard on release/virality with near-zero marginal backend cost if designed right)"
+    growth_posture: "backend cost must scale sublinearly with player count -- this is the primary architectural constraint"
+    peak_concurrency: leaderboard-read bursts around release/update events
+
+services:
+  local_persistence:
+    chosen: on-device storage (platform-native -- SQLite/Core Data/Room/local file, NOT a backend product)
+    alternatives: []
+    rationale: >
+      Core gameplay state must never depend on network reachability. This is
+      not a "service" from the Firebase/GCP catalog at all -- it's the
+      architectural precondition that makes everything else in this profile
+      optional and cheap.
+    cost_driver: none (on-device)
+    quota_watch_outs:
+      - do not accidentally make cloud save load-bearing by having gameplay code read from Firestore on the hot path
+  auth:
+    chosen: Firebase Authentication, anonymous-first with optional upgrade to a real account for cloud save
+    alternatives: [platform-native (Game Center / Google Play Games) identity, linked to Firebase Auth via custom token]
+    rationale: >
+      Most single-player games should let a player play immediately without
+      any sign-in friction; anonymous auth plus an optional "link an account
+      to enable cloud save" upsell is the standard pattern.
+    cost_driver: negligible (no SMS/paid providers needed by default)
+    quota_watch_outs:
+      - anonymous UID churn on app reinstall/device change is real; cloud-save linking is the only fix, and it must be offered, not assumed
+  cloud_save:
+    chosen: Cloud Firestore (single small document per player, or Cloud Storage for a serialized save-blob)
+    alternatives: [Cloud Storage-only for opaque save blobs, Supabase]
+    rationale: >
+      A Firestore document per player (`saves/{uid}`) works well for
+      structured save data queryable/mergeable across devices; a raw
+      Cloud-Storage-object save blob is simpler and cheaper when the game
+      engine already serializes save state as an opaque file and no
+      server-side inspection of save content is needed.
+    cost_driver: per-write pricing if the game saves too frequently (e.g. every few seconds) instead of at checkpoints
+    quota_watch_outs:
+      - autosave-to-cloud on every state change is a classic cost/quota mistake; batch/debounce to checkpoint-only saves
+  leaderboards:
+    chosen: Cloud Firestore (a `leaderboards/{leaderboardId}/scores/{uid}` collection, one doc per player per leaderboard, server-validated write path)
+    alternatives: [Memorystore-backed leaderboard (sorted sets) behind a Cloud Run/Functions endpoint, for very high-frequency global leaderboards]
+    rationale: >
+      Firestore is sufficient for typical single-player leaderboard scale
+      (periodic top-N queries, per-player rank lookups via a Cloud Function
+      that counts higher scores). Move to a Memorystore sorted-set-backed
+      leaderboard only if the game needs sub-second global rank updates at
+      very high submission volume that Firestore's query model makes
+      expensive.
+    cost_driver: rank-lookup queries (counting scores above a player's own) can be read-expensive at scale; consider periodic materialized rank snapshots instead of live counts
+    quota_watch_outs:
+      - never accept a client-submitted rank or a client-submitted score without server-side plausibility validation (see anti-cheat below)
+  score_validation:
+    chosen: Cloud Functions (2nd gen) HTTPS callable that validates a submitted score against plausibility bounds before writing to the leaderboard collection
+    alternatives: [Cloud Run, if validation logic needs a heavier runtime/custom anti-cheat library]
+    rationale: >
+      Client never writes directly to the leaderboard collection; Security
+      Rules deny direct client writes to `leaderboards/**`, and only the
+      validating function (running with elevated/Admin SDK privilege) can
+      write a score, giving a single enforcement point for anti-cheat checks.
+    cost_driver: invocation volume scales with score submissions, generally cheap at this profile's traffic
+    quota_watch_outs: []
+
+data_model_guidance: >
+  Keep the local save format authoritative for gameplay and the cloud copy
+  a synced mirror, not the reverse -- a network hiccup must never block
+  progress. Version the save-data schema explicitly (a `schemaVersion`
+  field) from day one so a future save-format change has a defined
+  migration path instead of breaking old cloud saves silently.
+
+security_rules_posture: >
+  Firestore Rules: a player may read/write only their own `saves/{uid}`
+  document (`request.auth.uid == uid`). The `leaderboards/**` collection is
+  read-open (public leaderboard display) but write-denied to all direct
+  client writes -- every leaderboard write must go through the validating
+  Cloud Function, which uses Admin SDK privileges that bypass client-facing
+  Security Rules by design.
+
+offline: >
+  Gameplay itself has no offline dependency by construction (local
+  persistence). Cloud save sync should be fire-and-forget with retry (queue
+  the save, sync when connectivity returns) and must never block gameplay
+  or show a blocking "syncing..." UI on the critical path.
+
+realtime: >
+  Not applicable -- no live state to synchronize between players. If a
+  future feature needs "friend just beat your score" notifications, that's
+  a Cloud Function on leaderboard write fanning out to FCM, not a realtime
+  listener requirement.
+
+notifications: >
+  FCM (HTTP v1) for optional re-engagement nudges (daily challenge
+  available, a friend passed your score) -- treat as fully optional/
+  opt-in; a single-player game has weaker retention-nudge justification
+  than the behavior-change profile and should not over-notify.
+
+storage_media: >
+  Cloud Storage for Firebase only if save data includes large binary blobs
+  (e.g. a screenshot/replay file) that don't belong in a Firestore document
+  (1 MiB document size limit is the practical ceiling). Most save data fits
+  comfortably in Firestore documents.
+
+privacy_compliance: >
+  Minimal by default -- anonymous play collects no PII. Once a player links
+  an account for cloud save, standard account-data handling (export/delete)
+  applies. If the game targets children (COPPA-relevant), gate any account
+  linking, analytics, and leaderboard display-name features behind
+  age-appropriate design review; this profile does not assume COPPA
+  applicability and it must be evaluated per product.
+
+analytics: >
+  Google Analytics for Firebase for retention/funnel/monetization analysis
+  (level completion, session length, IAP events if applicable), exported to
+  BigQuery for cohort analysis. Avoid conflating analytics identity with
+  the leaderboard display identity unless the player has explicitly
+  consented to public display.
+
+testing_emulators: >
+  Firebase Local Emulator Suite (Firestore + Auth + Functions) covers save/
+  load and leaderboard-submission logic locally, including Security Rules
+  unit tests proving direct client writes to `leaderboards/**` are denied.
+  Score-validation plausibility logic should have its own deterministic
+  unit tests independent of the emulator.
+
+deployment: >
+  Separate Firebase projects per environment (dev/staging/prod) with
+  distinct leaderboard collections so playtesting never pollutes the
+  production leaderboard; App Check enforced in production to prevent
+  scripted mass score submission.
+
+observability: >
+  Cloud Monitoring alert on the score-validation function's rejection rate
+  (a sudden spike suggests either a cheat attempt wave or a legitimate
+  gameplay-balance bug producing implausible-but-real scores -- both worth
+  a human look); Crashlytics for client-side crash/ANR tracking.
+
+known_pitfalls:
+  - "Making cloud save load-bearing for gameplay (reading from Firestore on the hot path) defeats the entire point of local-first design."
+  - "Autosaving to the cloud on every state tick instead of at checkpoints causes an avoidable Firestore write-cost spike."
+  - "Accepting a client-submitted score or rank without server-side plausibility validation makes the leaderboard trivially cheatable."
+  - "Anonymous-auth UID churn on reinstall silently loses a player's cloud save if account-linking is never offered/prompted."
+  - "Treating this profile's 'soft' anti-cheat posture as sufficient for a game with real-money stakes -- if IAP/real economy enters scope, anti-cheat requirements escalate substantially and this profile's defaults are no longer sufficient."
+
+references:
+  - url: "https://firebase.google.com/pricing"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/firestore/locations"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/app-check/web/recaptcha-enterprise-provider"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/emulator-suite"
+    accessed: "2026-09-17"
