@@ -121,6 +121,16 @@ def sanitize_perceived_text(value: Any, *, max_chars: int = MAX_PERCEIVED_EXCERP
     return normalized
 
 
+def _clamp_confidence(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number != number:  # NaN
+        return 0.0
+    return max(0.0, min(1.0, number))
+
+
 def _sanitize_items(values: Any, *, limit: int = MAX_PERCEIVED_ITEMS) -> tuple[str, ...]:
     """A bounded tuple of short, sanitized strings. Empty entries are dropped."""
     if values is None:
@@ -169,6 +179,10 @@ class PerceivedEvidence:
     visual_entities: tuple[str, ...] = ()
     # `tools.ingest.evidence.types.IMAGE_KINDS` vocabulary, as a bare string.
     visual_image_kind: str = ""
+    # The vision backend's own confidence in the descriptions above (the
+    # highest across frames, 0.0-1.0). `HeuristicVisionBackend` is honestly
+    # low-confidence; a proposer must not treat its guess as a fact.
+    visual_confidence: float = 0.0
     # Document headings, in document order.
     headings: tuple[str, ...] = ()
     # Which kinds were actually present, e.g. ("native_text", "structure").
@@ -215,6 +229,7 @@ class PerceivedEvidence:
             visual_descriptions=_sanitize_items(data.get("visual_descriptions")),
             visual_entities=_sanitize_items(data.get("visual_entities")),
             visual_image_kind=sanitize_perceived_text(data.get("visual_image_kind"), max_chars=64).strip(),
+            visual_confidence=_clamp_confidence(data.get("visual_confidence")),
             headings=_sanitize_items(data.get("headings")),
             sources=tuple(seen),
             warnings=_sanitize_items(data.get("warnings"), limit=32),
@@ -230,6 +245,7 @@ class PerceivedEvidence:
             "visual_descriptions": list(self.visual_descriptions),
             "visual_entities": list(self.visual_entities),
             "visual_image_kind": self.visual_image_kind,
+            "visual_confidence": self.visual_confidence,
             "headings": list(self.headings),
             "sources": list(self.sources),
             "warnings": list(self.warnings),

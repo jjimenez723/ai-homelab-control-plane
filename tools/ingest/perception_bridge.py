@@ -71,6 +71,20 @@ def _transcript_text(file_evidence: FileEvidence) -> str:
     return str(getattr(transcript, "text", "") or "")
 
 
+def _visual_confidence(file_evidence: FileEvidence) -> float:
+    """The highest backend confidence across every frame that was seen."""
+    frames = file_evidence.visual_frames or (
+        (file_evidence.visual,) if file_evidence.visual is not None else ()
+    )
+    best = 0.0
+    for visual in frames:
+        try:
+            best = max(best, float(getattr(visual, "confidence", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            continue
+    return best
+
+
 def _visual_descriptions(file_evidence: FileEvidence) -> tuple[tuple[str, ...], tuple[str, ...], str]:
     """(descriptions, entities, image_kind) across every frame that was seen.
 
@@ -136,6 +150,7 @@ def perceived_from_file_evidence(
         ocr_text = file_evidence.ocr_text
         transcript = _transcript_text(file_evidence)
         descriptions, entities, image_kind = _visual_descriptions(file_evidence)
+        visual_confidence = _visual_confidence(file_evidence)
         structure = file_evidence.structure
         headings = tuple(
             str(heading.text) for heading in (structure.headings if structure is not None else ())
@@ -164,6 +179,7 @@ def perceived_from_file_evidence(
             "visual_descriptions": descriptions,
             "visual_entities": entities,
             "visual_image_kind": image_kind,
+            "visual_confidence": visual_confidence,
             "headings": headings,
             "sources": sources,
             "warnings": file_evidence.warning_codes(),

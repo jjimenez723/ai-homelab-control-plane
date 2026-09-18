@@ -113,7 +113,17 @@ GENERIC_STEM_WORDS = frozenset({
     "audio", "screenshot", "screen", "capture", "file", "files", "scan",
     "scanned", "copy", "final", "draft", "new", "untitled", "download",
     "downloads", "page", "pages", "attachment", "export", "output", "misc",
+    # The vision vocabulary (`IMAGE_KINDS`) and media kinds: a model that
+    # echoes `ui_capture` or `ordinary_photo` has named the *kind* of file,
+    # which the deterministic fallback already does better and more honestly.
+    "ui", "ordinary", "rendering", "unknown", "diagram", "chart", "meme",
+    "clip", "recording", "archive", "picture", "frame", "frames",
 })
+
+# Below this, a vision description is a guess (the heuristic backend reports
+# 0.2-0.45): it is shown to the model as a labelled guess, and it does not
+# count as evidence a filename can be grounded in.
+LOW_VISUAL_CONFIDENCE = 0.5
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9']+")
 
@@ -167,25 +177,40 @@ def build_task_text(evidence: NamingEvidence, *, max_chars: int = MAX_TASK_TEXT_
     ]
     if evidence.capture_date:
         lines.append(f"capture_date: {evidence.capture_date}")
+    elif evidence.filename_date:
+        lines.append(f"date_in_original_filename: {evidence.filename_date}")
     elif evidence.modified_date:
         lines.append(f"modified_date: {evidence.modified_date}")
     if evidence.screenshot_by_name:
         lines.append("known_screen_capture: yes")
-    for key in ("metadata_title", "metadata_author", "image_description", "camera_make", "camera_model", "page_count"):
+    for key in (
+        "metadata_title", "metadata_author", "image_description", "camera_make", "camera_model",
+        "page_count", "duration_seconds", "width", "height", "entry_count", "dominant_extension",
+    ):
         value = evidence.fact(key)
         if value:
             lines.append(f"{key}: {value}")
+    entries = evidence.fact("top_level_entries") or ()
+    if entries:
+        lines.append(f"archive_top_level_entries: {', '.join(str(entry) for entry in list(entries)[:12])}")
     if evidence.vocabulary:
         lines.append(f"owner_vocabulary: {', '.join(evidence.vocabulary[:20])}")
 
     if perceived.headings:
         lines.append(f"document_headings: {' | '.join(perceived.headings)}")
+    visual_label = "visual_description"
+    if perceived.visual_descriptions and perceived.visual_confidence < LOW_VISUAL_CONFIDENCE:
+        visual_label = "visual_guess_low_confidence"
+        lines.append(
+            f"visual_note: the vision backend is a low-confidence heuristic (confidence "
+            f"{perceived.visual_confidence:.2f}); do not name the file after its kind guess"
+        )
     if perceived.visual_image_kind:
         lines.append(f"visual_image_kind: {perceived.visual_image_kind}")
     if len(perceived.visual_descriptions) == 1:
-        lines.append(f"visual_description: {perceived.visual_descriptions[0]}")
+        lines.append(f"{visual_label}: {perceived.visual_descriptions[0]}")
     elif perceived.visual_descriptions:
-        lines.append(f"visual_description ({len(perceived.visual_descriptions)} sampled frames):")
+        lines.append(f"{visual_label} ({len(perceived.visual_descriptions)} sampled frames):")
         for index, description in enumerate(perceived.visual_descriptions, start=1):
             lines.append(f"  frame {index}: {description}")
     if perceived.visual_entities:
@@ -311,17 +336,23 @@ def derive_confidence(
         return MIN_DERIVED_CONFIDENCE, ("no-words",)
 
     perceived = evidence.perceived or PerceivedEvidence()
+    # A low-confidence vision guess is shown to the model but is not ground a
+    # filename can stand on: words that appear only there do not count.
+    visual_grounds = perceived.visual_confidence >= LOW_VISUAL_CONFIDENCE
     evidence_text = " ".join(
         part.lower()
         for part in (
             perceived.combined_text,
             perceived.transcript_excerpt,
-            " ".join(perceived.visual_descriptions),
-            " ".join(perceived.visual_entities),
+            " ".join(perceived.visual_descriptions) if visual_grounds else "",
+            " ".join(perceived.visual_entities) if visual_grounds else "",
             " ".join(perceived.headings),
             str(evidence.fact("metadata_title") or ""),
             str(evidence.fact("metadata_author") or ""),
             str(evidence.fact("image_description") or ""),
+            str(evidence.fact("camera_make") or ""),
+            str(evidence.fact("camera_model") or ""),
+            " ".join(str(entry) for entry in (evidence.fact("top_level_entries") or ())),
         )
         if part
     )

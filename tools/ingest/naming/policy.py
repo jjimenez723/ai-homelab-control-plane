@@ -54,7 +54,11 @@ _SEPARATOR_RUN_RE = re.compile(r"[-_\s]+")
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 _MULTI_DASH_RE = re.compile(r"-{2,}")
 # A leading ISO date plus one underscore, as every proposal is built.
-_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
+# The canonical grammar is `YYYY-MM-DD_`; a model (or a person) that wrote
+# `2026-05-04-kitchen` or `2026-05-04 kitchen` meant the same thing, so the
+# separator after the date is normalized to the underscore rather than
+# letting two spellings of one grammar coexist on disk.
+_DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[_\-. ]+")
 _MULTI_UNDERSCORE_RE = re.compile(r"_{2,}")
 
 # APFS allows 255 *bytes* per component; the configured cap is a readability
@@ -125,8 +129,8 @@ def sanitize_stem(stem: str, *, max_length: int) -> str:
     date_prefix = ""
     match = _DATE_PREFIX_RE.match(stem)
     if match:
-        date_prefix = match.group(0)
-        stem = stem[len(date_prefix):]
+        date_prefix = f"{match.group(1)}_"
+        stem = stem[len(match.group(0)):]
         max_length = max(1, max_length - len(date_prefix))
 
     stem = _SEPARATOR_RUN_RE.sub("-", stem.strip())
