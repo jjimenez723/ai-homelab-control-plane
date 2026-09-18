@@ -5,8 +5,16 @@ measurably" and nothing else. It performs zero filesystem writes, opens owner
 files read-only, never raises out of a public entry point, and hands
 model-facing backends bytes rather than paths. See the binding evidence-layer
 spec for the full set of invariants this package must not break, chief among
-them: FACTS != INTERPRETATIONS != DECISIONS. Nothing here changes a naming,
-retention, or ingestion decision.
+them: FACTS != INTERPRETATIONS != DECISIONS. Nothing here interprets, and
+nothing here decides.
+
+What reads the output of this package is deliberately narrow (D-057): a
+*filename proposal* may, via the one-way conversion in
+`tools/ingest/perception_bridge.py` into bounded plain data. Retention and
+ingestion read nothing produced here, and no module under
+`tools/ingest/naming/` or `tools/ingest/triage/` may import this package at
+all -- `tests/ingest/test_evidence_security.py` enforces both with AST guards
+that have no exception list.
 
 The public surface, in the order a file travels through it:
 

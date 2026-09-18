@@ -34,7 +34,7 @@ from tools.ingest.evidence.types import (
     RasterImage,
     VisualEvidence,
 )
-from tools.ingest.naming.evidence import NamingEvidence
+from tools.ingest.naming.evidence import NamingEvidence, PerceivedEvidence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INGEST = REPO_ROOT / "tools" / "ingest"
@@ -77,6 +77,17 @@ PURE_MODULES = (
     "naming/quality.py",
     "naming/evidence.py",
     "naming/proposer.py",
+    # The model-backed proposer (D-057). It reaches a loopback HTTP endpoint,
+    # which is a capability the deterministic proposer does not have -- so it
+    # belongs on this list more than any other module here, not less: the
+    # claim being enforced is that the one place in the pipeline a model
+    # speaks still cannot touch a file.
+    "naming/semantic.py",
+    # The FileEvidence -> PerceivedEvidence conversion (D-057). It is the one
+    # module allowed to import both the perception package and the naming
+    # package, which makes it the single point where a mistake could turn
+    # perceived content into something with reach. Zero mutation, asserted.
+    "perception_bridge.py",
     "triage/policy.py",
     "exclusions.py",
     "scanner.py",
@@ -225,6 +236,42 @@ class EvidenceBoundaryTests(unittest.TestCase):
     def test_evidence_is_frozen(self):
         """A proposer must not be able to edit the facts it was given."""
         self.assertTrue(NamingEvidence.__dataclass_params__.frozen)
+
+    def test_perceived_evidence_is_frozen_plain_data(self):
+        """D-057: perception reaches the proposer as strings and tuples only.
+
+        This is the same argument as the two tests above, applied to the
+        field that carries OCR text, a vision description and a transcript
+        into naming. Every annotation must be a `str`, a `tuple[str, ...]`,
+        or a number -- not a `Path`, not a callable, and not one of the
+        perception layer's own richer value types (`OCRBlock`, `Polygon`,
+        `VisualEvidence`), which would drag geometry, per-block confidences
+        and provenance into the naming boundary and give a future consumer a
+        second, unvalidated way to reason about a file.
+        """
+        allowed_annotations = {"str", "tuple[str, ...]", "int", "float", "bool"}
+        for field in dataclasses.fields(PerceivedEvidence):
+            with self.subTest(field=field.name):
+                annotation = str(field.type)
+                self.assertIn(
+                    annotation, allowed_annotations,
+                    f"PerceivedEvidence.{field.name} is {annotation!r}; only bounded plain "
+                    "strings/tuples/numbers may cross into the naming boundary",
+                )
+        self.assertTrue(PerceivedEvidence.__dataclass_params__.frozen)
+
+    def test_naming_evidence_carries_perceived_evidence_and_nothing_richer(self):
+        """The `perceived` field exists and is the only perception channel."""
+        annotations = {field.name: str(field.type) for field in dataclasses.fields(NamingEvidence)}
+        self.assertEqual(annotations.get("perceived"), "PerceivedEvidence | None")
+        for name, annotation in annotations.items():
+            with self.subTest(field=name):
+                for forbidden in ("FileEvidence", "OCRBlock", "VisualEvidence", "NativeText", "Polygon"):
+                    self.assertNotIn(
+                        forbidden, annotation,
+                        f"NamingEvidence.{name} exposes the perception layer's own "
+                        f"{forbidden} to a proposer; use PerceivedEvidence",
+                    )
 
 
 class SourceDeletionAuthorityTests(unittest.TestCase):
