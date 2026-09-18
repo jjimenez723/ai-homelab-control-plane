@@ -250,6 +250,8 @@ class NamingEvidence:
     name_quality: str
     name_quality_reason: str
     modified_date: str | None = None
+    # A date written into the original filename (see `date_from_filename`).
+    filename_date: str | None = None
     # True when *anything* suggests a screen capture, including the probe's
     # weak pixel heuristic. Good enough to route a file to review; not good
     # enough to assert an origin in a filename.
@@ -306,6 +308,30 @@ def looks_like_screenshot(filename: str, media_kind: str, facts: dict[str, Any])
     return bool(facts.get("is_probably_screenshot"))
 
 
+# Dates a person or a tool wrote into the filename itself: `Screenshot 2026-09-11
+# at 9.21.48 PM.png`, `IMG_20260911_212148.jpg`, `report_2026_09_11.pdf`. This is
+# a fact the file carries about itself (weaker than EXIF capture time, stronger
+# than this filesystem's mtime, which is merely when the bytes last landed
+# here -- a Drive sync or a copy resets it). Bounded to plausible years and
+# validated as a real calendar date; anything else is not a date.
+_FILENAME_DATE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})[-_. ]?(0[1-9]|1[0-2])[-_. ]?(0[1-9]|[12]\d|3[01])(?!\d)")
+
+
+def date_from_filename(filename: str) -> str | None:
+    """The first plausible ISO date written into a filename, or None."""
+    import datetime as dt
+
+    for match in _FILENAME_DATE_RE.finditer(filename):
+        year, month, day = (int(part) for part in match.groups())
+        try:
+            found = dt.date(year, month, day)
+        except ValueError:
+            continue
+        if 1990 <= found.year <= dt.date.today().year + 1:
+            return found.isoformat()
+    return None
+
+
 def modified_date(path: Path) -> str | None:
     import datetime as dt
 
@@ -353,6 +379,7 @@ def gather_evidence(
         name_quality=quality,
         name_quality_reason=reason,
         modified_date=modified_date(path),
+        filename_date=date_from_filename(path.name),
         is_screenshot=looks_like_screenshot(path.name, facts.media_kind, facts.facts),
         screenshot_by_name=name_looks_like_screenshot(path.name) or source_class == "screenshots",
         facts=dict(facts.facts),

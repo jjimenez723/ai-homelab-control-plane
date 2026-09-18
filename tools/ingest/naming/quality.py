@@ -96,6 +96,10 @@ _EMPTY_TOKENS = frozenset(
     {
         "a", "an", "and", "the", "of", "for", "to", "in", "on", "at", "by", "with", "from",
         "img", "image", "images", "photo", "photos", "picture", "pictures", "pic", "pics",
+        # macOS writes EXIF UserComment "Screenshot" into every capture; it names a
+        # kind, not a subject. (`screen-capture` stays meaningful on purpose: it is
+        # the generic fallback's own vocabulary and must not churn.)
+        "screenshot", "screenshots",
         "video", "videos", "movie", "clip", "scan", "scanned",
         "file", "files", "doc", "docs", "document", "documents", "pdf",
         "download", "downloads", "downloaded", "export", "exported", "output",

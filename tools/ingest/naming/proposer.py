@@ -59,7 +59,7 @@ from tools.ingest.media.probe import (
 )
 from tools.ingest.naming.evidence import NamingEvidence
 from tools.ingest.naming.policy import slugify
-from tools.ingest.naming.quality import looks_like_instruction
+from tools.ingest.naming.quality import looks_like_instruction, meaningful_tokens
 
 # Confidence bands. These are honest self-assessments of a *deterministic*
 # proposer: high where the file told us its own title, low where all we can say
@@ -83,7 +83,10 @@ CONFIDENCE_DEVICE_FACTS = 0.62
 CONFIDENCE_GENERIC = 0.58
 
 _STOP_WORDS = frozenset({"the", "a", "an", "of", "and", "for", "to", "in", "on", "with", "this", "that", "is", "are", "by", "from", "at", "as", "it"})
-_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'&-]+")
+# A word, or an identifier a document calls itself by (`CP_575_G`, `NURS380`,
+# `PHY-294`): a token that mixes letters and digits, or joins them with
+# underscores, is kept whole rather than shredded into stop-word-length bits.
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'&_-]*[A-Za-z0-9]|[A-Za-z]{2,}")
 
 # A line has to look like a heading rather than like prose or a page artifact
 # before it is allowed to become a filename. Bounds, not cleverness: long
@@ -156,11 +159,14 @@ class DisabledProposer:
 def _date_prefix(evidence: NamingEvidence) -> str:
     """The date the file is about: capture date if known, else last modified.
 
-    A capture timestamp is a fact the file carries; mtime is a fact about this
-    filesystem. Preferring the former means a photo copied off a card is named
-    for when it was taken, not for when it was copied.
+    A capture timestamp is a fact the file carries; a date written into the
+    original filename is one the file's author or capture tool asserted; mtime
+    is only a fact about this filesystem. Preferring them in that order means
+    a photo copied off a card is named for when it was taken, and a screenshot
+    synced through Drive is named for the day on its own filename rather than
+    the day it landed here.
     """
-    return evidence.capture_date or evidence.modified_date or ""
+    return evidence.capture_date or evidence.filename_date or evidence.modified_date or ""
 
 
 def _compose(prefix: str, slug: str, extension: str) -> str:
@@ -186,13 +192,24 @@ def _keywords(text: str, *, limit: int = 6, vocabulary: tuple[str, ...] = ()) ->
             if word not in words:
                 words.append(word)
             continue
-        if word in _STOP_WORDS or len(word) < 3:
+        if word in _STOP_WORDS or (len(word) < 3 and not any(ch.isdigit() for ch in word)):
             continue
         if word not in words:
             words.append(word)
         if len(words) >= limit:
             break
     return slugify(" ".join(words))
+
+
+def _subject_words(slug: str, vocabulary: tuple[str, ...]) -> list[str]:
+    return meaningful_tokens(slug, vocabulary=vocabulary)
+
+
+def _says_something(slug: str, vocabulary: tuple[str, ...]) -> bool:
+    """False when a slug is made only of kind-words (`screenshot`, `image`,
+    `untitled-document`): the same judgement `quality.assess` applies to a
+    filename, applied to a proposal before it can become one."""
+    return bool(_subject_words(slug, vocabulary))
 
 
 def _dimension_tag(evidence: NamingEvidence) -> str:
@@ -288,8 +305,16 @@ class DeterministicProposer:
         if not title:
             return None
         slug = _keywords(str(title), limit=8, vocabulary=evidence.vocabulary)
-        if not slug:
+        if not slug or not _says_something(slug, evidence.vocabulary):
             return None
+        # A thin title (`CP_575_G Notice`) plus a known author (`IRS`) reads as
+        # what a person would call it; the author is prepended only when the
+        # title alone carries fewer than two subject words.
+        author = evidence.fact("metadata_author")
+        if author and len(_subject_words(slug, evidence.vocabulary)) < 2:
+            author_slug = _keywords(str(author), limit=3, vocabulary=evidence.vocabulary)
+            if author_slug and author_slug not in slug:
+                slug = f"{author_slug}-{slug}"
         return slug, CONFIDENCE_EMBEDDED_TITLE, "document/container title metadata"
 
     def _from_embedded_description(self, evidence: NamingEvidence):
@@ -300,7 +325,10 @@ class DeterministicProposer:
         if not description:
             return None
         slug = _keywords(str(description), limit=8, vocabulary=evidence.vocabulary)
-        if not slug:
+        # macOS writes `UserComment: Screenshot` into every capture. A description
+        # made only of kind-words names nothing, so it declines here and lets the
+        # OCR title line or the generic fallback speak instead.
+        if not slug or not _says_something(slug, evidence.vocabulary):
             return None
         return slug, CONFIDENCE_EMBEDDED_DESCRIPTION, "embedded EXIF/document description"
 
