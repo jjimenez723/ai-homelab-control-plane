@@ -4,6 +4,10 @@ Control plane for a private, scalable AI automation environment built around exi
 
 This repository holds both the control-plane design documents **and the working software that implements them** — the `organize` ingestion and file-intelligence CLI, the restic backup tooling, the LaunchAgent templates, and their test suite. What it must never contain: client media, model weights, production secrets, trading credentials, private datasets, copies of unrelated source repositories, or machine-specific configuration. The one machine-specific file, `config/ingest.yaml`, is gitignored and holds the T7 volume UUID; `config/ingest.example.yaml` is the committed template with a placeholder.
 
+## State of the system (V1, 2026-09-18)
+
+Angel V1 is operational on the owner's Mac with the T7 (`/Volumes/Angel`) attached: files in Downloads and the screenshots folder are discovered, settled, perceived (native text, OCR, vision, speech), named, triaged, and — only on explicit `--apply` with `triage.auto_ingest` — ingested transactionally. Video and audio are ordinary files: sampled frames, on-screen text, and transcripts become naming evidence with provenance. Gate 2 is green: `qwen3.5:9b` + prompt 1.1.0 is a certified configuration for classification and semantic naming, and the router selects it. The full before/after matrix, the evidence behind each row, and the short list of owner-only actions (reconnect the Google Drive OAuth grant for backups; move the T7 off its USB 2.0 link; free the internal disk; disable Spotlight on Angel) are in `docs/24-v1-completion-matrix.md`; `PLAN.md` is reconciled against the live machine as of that date.
+
 ## North-star objective
 
 Build a system that can:
