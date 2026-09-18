@@ -1,0 +1,406 @@
+# Squad Quit — social nicotine-cessation app.
+# Fictional product used only as a representative example spec for
+# docs/28-application-spec.md and tools/appspec. Validate with:
+#   python -m tools.appspec validate templates/app-spec/examples/squad-quit.yaml
+
+spec_version: "1.0"
+app_id: squad-quit
+name: Squad Quit
+product_intent:
+  problem: >
+    People trying to quit nicotine relapse most often in the first three
+    weeks, and mostly alone -- existing quit apps track streaks but do not
+    give a quitter anyone to answer to in the moment a craving hits.
+  value_proposition: >
+    Small accountability squads (4-6 people) who set quit dates together,
+    log cravings in real time, and get peer encouragement within minutes
+    instead of tracking a private streak nobody else sees.
+  non_goals:
+    - Not a nicotine-replacement-therapy dosing or medical advice product.
+    - Not a general habit tracker; scope stays quit-smoking/vaping specific.
+    - No public/global leaderboard in v1 -- squads only, to avoid shame dynamics.
+
+target_users:
+  - id: quitter
+    name: Quitter
+    description: A person actively trying to quit nicotine, in a squad with peers doing the same.
+    needs:
+      - Somewhere to log a craving in under 10 seconds while it is happening.
+      - Visible evidence that people are paying attention to their progress.
+      - A quit date and milestone streak that survives a single slip without resetting to zero.
+  - id: squad-leader
+    name: Squad Leader
+    description: A squad member who created the squad and can invite/remove members.
+    needs:
+      - Ability to invite new members and remove inactive ones.
+      - Visibility into squad-wide check-in health, not just their own.
+platforms:
+  - ios
+  - android
+
+workflows:
+  - id: join-squad
+    name: Join a squad
+    actor: quitter
+    goal: Find or create a small squad and commit to a shared quit date.
+    steps:
+      - id: browse-squads
+        description: Browse open squads filtered by quit-date proximity.
+        screen_ref: squad-browser
+      - id: request-join
+        description: Request to join a squad or create a new one.
+        screen_ref: squad-detail
+      - id: set-quit-date
+        description: Confirm or align personal quit date with the squad's target date.
+        screen_ref: onboarding
+  - id: log-craving
+    name: Log a craving
+    actor: quitter
+    goal: Record a craving in the moment and receive squad encouragement quickly.
+    steps:
+      - id: open-craving-log
+        description: Open the one-tap craving logger from the home screen.
+        screen_ref: home
+      - id: record-craving
+        description: Record intensity and an optional note for the craving.
+        screen_ref: log-craving-screen
+      - id: notify-squad
+        description: Squad members are notified and can send encouragement.
+        screen_ref: squad-detail
+  - id: daily-checkin
+    name: Daily check-in
+    actor: quitter
+    goal: Confirm smoke-free status for the day and extend the streak.
+    steps:
+      - id: open-checkin
+        description: Open the daily check-in prompt.
+        screen_ref: checkin-screen
+      - id: confirm-status
+        description: Confirm smoke-free status, or log a slip honestly without losing all history.
+        screen_ref: checkin-screen
+      - id: view-milestone
+        description: View updated streak and any milestone reached.
+        screen_ref: milestone-screen
+entities:
+  - id: user
+    name: User
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: display_name, type: string, required: true, pii: false, phi: false }
+      - { name: email, type: string, required: true, pii: true, phi: false, description: "Account/auth email." }
+      - { name: quit_date, type: date, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: squad
+    name: Squad
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: squad_name, type: string, required: true, pii: false, phi: false }
+      - { name: target_quit_date, type: date, required: true, pii: false, phi: false }
+      - { name: leader_id, type: reference, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: craving_log
+    name: Craving Log Entry
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: user_id, type: reference, required: true, pii: false, phi: false }
+      - { name: intensity, type: integer, required: true, pii: false, phi: false }
+      - { name: note, type: string, required: false, pii: true, phi: false, description: "Free-text; may contain health context." }
+      - { name: logged_at, type: datetime, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: checkin
+    name: Daily Check-in
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: user_id, type: reference, required: true, pii: false, phi: false }
+      - { name: smoke_free, type: boolean, required: true, pii: false, phi: false }
+      - { name: checkin_date, type: date, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: milestone
+    name: Milestone
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: user_id, type: reference, required: true, pii: false, phi: false }
+      - { name: kind, type: enum, required: true, pii: false, phi: false, description: "e.g. 24h, 1w, 1m, 3m." }
+      - { name: reached_at, type: datetime, required: true, pii: false, phi: false }
+    identifiers: [id]
+
+relationships:
+  - id: rel-squad-members
+    from_entity: squad
+    to_entity: user
+    type: one_to_many
+    description: A squad has many member users.
+  - id: rel-user-cravings
+    from_entity: user
+    to_entity: craving_log
+    type: one_to_many
+    description: A user logs many craving entries.
+  - id: rel-user-checkins
+    from_entity: user
+    to_entity: checkin
+    type: one_to_many
+    description: A user has many daily check-ins.
+  - id: rel-user-milestones
+    from_entity: user
+    to_entity: milestone
+    type: one_to_many
+    description: A user reaches many milestones over time.
+permissions:
+  - id: perm-member-own-cravings
+    role: member
+    entity: craving_log
+    actions: [create, read, list]
+  - id: perm-member-own-checkins
+    role: member
+    entity: checkin
+    actions: [create, read, list]
+  - id: perm-member-squad-read
+    role: member
+    entity: squad
+    actions: [read]
+  - id: perm-leader-squad-manage
+    role: squad_leader
+    entity: squad
+    actions: [read, update]
+  - id: perm-admin-user-manage
+    role: admin
+    entity: user
+    actions: [read, update, delete, list]
+
+authentication:
+  methods: [oauth, magic_link]
+  mfa_required: false
+  session:
+    strategy: jwt
+    expiry: "30d"
+authorization:
+  model: rbac
+  roles:
+    - { id: member, name: Member, description: A standard squad member. }
+    - { id: squad_leader, name: Squad Leader, description: Created their squad; can invite/remove members. }
+    - { id: admin, name: Admin, description: Platform operator with cross-squad visibility for moderation. }
+
+backend_profile:
+  id: social-behavior-change
+  overrides:
+    cohort_model: small_squad
+    encouragement_latency_budget_seconds: 300
+persistence:
+  datastore: postgres
+  entities: [user, squad, craving_log, checkin, milestone]
+
+realtime:
+  enabled: true
+  channels:
+    - { id: squad-feed, name: Squad activity feed, kind: broadcast }
+offline:
+  supported: true
+  strategy: queued_writes
+
+notifications:
+  channels: [push, in_app]
+  triggers:
+    - id: nt-craving-logged
+      event: craving_log.created
+      channel: push
+      description: Notify squad members within 5 minutes of a craving being logged.
+    - id: nt-milestone-reached
+      event: milestone.created
+      channel: in_app
+      description: Celebrate a milestone in the squad feed.
+storage_media:
+  providers: [platform_native]
+  types: [image]
+
+privacy:
+  data_classes:
+    - id: pd-user-email
+      entity: user
+      field: email
+      classification: confidential
+      pii: true
+      phi: false
+      retention: "Retained while account is active; deleted 30 days after account deletion."
+    - id: pd-craving-note
+      entity: craving_log
+      field: note
+      classification: confidential
+      pii: true
+      phi: false
+      retention: "Retained 12 months, then anonymized; user may delete on demand."
+analytics:
+  events:
+    - id: ev-quit-date-set
+      name: Quit Date Set
+      trigger: User confirms a quit date during onboarding.
+      properties: [user_id, quit_date]
+    - id: ev-craving-logged
+      name: Craving Logged
+      trigger: A craving_log entry is created.
+      properties: [user_id, intensity]
+    - id: ev-milestone-reached
+      name: Milestone Reached
+      trigger: A milestone entry is created.
+      properties: [user_id, kind]
+
+integrations: []
+screens:
+  - id: onboarding
+    name: Onboarding
+    workflow_refs: [join-squad]
+    entities_shown: [user, squad]
+  - id: squad-browser
+    name: Squad Browser
+    workflow_refs: [join-squad]
+    entities_shown: [squad]
+  - id: squad-detail
+    name: Squad Detail
+    workflow_refs: [join-squad, log-craving]
+    entities_shown: [squad, user, craving_log]
+  - id: home
+    name: Home
+    workflow_refs: [log-craving]
+    entities_shown: [user, milestone]
+  - id: log-craving-screen
+    name: Log a Craving
+    workflow_refs: [log-craving]
+    entities_shown: [craving_log]
+  - id: checkin-screen
+    name: Daily Check-in
+    workflow_refs: [daily-checkin]
+    entities_shown: [checkin]
+  - id: milestone-screen
+    name: Milestones
+    workflow_refs: [daily-checkin]
+    entities_shown: [milestone]
+
+navigation:
+  entry_screen: onboarding
+  edges:
+    - { from: onboarding, to: squad-browser, trigger: "tap Find a Squad" }
+    - { from: squad-browser, to: squad-detail, trigger: "tap a squad" }
+    - { from: squad-detail, to: home, trigger: "join confirmed" }
+    - { from: home, to: log-craving-screen, trigger: "tap craving button" }
+    - { from: log-craving-screen, to: squad-detail, trigger: "craving submitted" }
+    - { from: home, to: checkin-screen, trigger: "daily check-in prompt" }
+    - { from: checkin-screen, to: milestone-screen, trigger: "check-in submitted" }
+    - { from: milestone-screen, to: home, trigger: "tap Done" }
+design_system:
+  stack: react-native-expo
+  library_ref: tamagui
+  tokens:
+    - color.role.encouragement
+    - color.role.craving-alert
+    - spacing.scale
+    - type.scale
+    - motion.spring.interruptible
+
+apis:
+  - id: api-create-craving-log
+    name: Create craving log entry
+    kind: rest_endpoint
+    method: POST
+    path: /v1/craving-logs
+    request_shape:
+      - { name: intensity, type: integer }
+      - { name: note, type: string }
+    response_shape:
+      - { name: id, type: uuid }
+      - { name: logged_at, type: datetime }
+  - id: api-create-checkin
+    name: Create daily check-in
+    kind: rest_endpoint
+    method: POST
+    path: /v1/checkins
+    request_shape:
+      - { name: smoke_free, type: boolean }
+    response_shape:
+      - { name: id, type: uuid }
+      - { name: streak_days, type: integer }
+  - id: api-list-squad-feed
+    name: List squad feed
+    kind: rest_endpoint
+    method: GET
+    path: /v1/squads/{squad_id}/feed
+    request_shape:
+      - { name: squad_id, type: uuid }
+    response_shape:
+      - { name: items, type: array }
+  - id: api-compute-streak
+    name: Compute current streak
+    kind: callable_function
+    request_shape:
+      - { name: user_id, type: uuid }
+    response_shape:
+      - { name: streak_days, type: integer }
+      - { name: next_milestone, type: string }
+acceptance_criteria:
+  - id: ac-join-squad-sets-quit-date
+    workflow_ref: join-squad
+    given: A quitter has selected an open squad with a target quit date
+    when: They confirm joining the squad
+    then: Their personal quit_date is set to the squad's target_quit_date and they appear in the squad's member list
+  - id: ac-log-craving-notifies-squad
+    workflow_ref: log-craving
+    given: A quitter is an active member of a squad
+    when: They submit a craving log entry
+    then: A craving_log row is created and squad members receive a push notification within 5 minutes
+  - id: ac-checkin-extends-streak
+    workflow_ref: daily-checkin
+    given: A quitter confirmed smoke_free on the previous calendar day
+    when: They submit today's check-in as smoke_free
+    then: Their streak_days increases by one and any newly reached milestone is recorded
+
+tests:
+  - id: test-join-squad-unit
+    type: unit
+    acceptance_criteria_refs: [ac-join-squad-sets-quit-date]
+    description: Unit test that joining a squad copies target_quit_date onto the user record.
+  - id: test-craving-notification-integration
+    type: integration
+    acceptance_criteria_refs: [ac-log-craving-notifies-squad]
+    description: Integration test asserting a notification job is enqueued when a craving_log is created.
+  - id: test-checkin-streak-unit
+    type: unit
+    acceptance_criteria_refs: [ac-checkin-extends-streak]
+    description: Unit test for streak-increment and milestone-boundary logic.
+  - id: test-onboarding-to-home-e2e
+    type: e2e
+    acceptance_criteria_refs: [ac-join-squad-sets-quit-date, ac-checkin-extends-streak]
+    description: End-to-end walk from onboarding through joining a squad to a completed first check-in.
+deployment:
+  environments:
+    - { id: dev, name: Development, purpose: development }
+    - { id: staging, name: Staging, purpose: staging }
+    - { id: prod, name: Production, purpose: production }
+  ci: GitHub Actions; lint, unit, integration, and one smoke e2e run per PR; deploy on tag.
+  secrets_policy: >
+    Secrets live only in the platform's managed secret store (never in the
+    repository or client bundle); this spec records no literal secret values.
+
+observability:
+  logging: Structured JSON logs shipped to the backend profile's default log sink.
+  metrics: [craving_logs_per_day, checkin_completion_rate, notification_delivery_latency_p95]
+  alerts: [notification_delivery_latency_p95_over_budget, checkin_completion_rate_drop]
+migrations:
+  - id: mig-0001-initial-schema
+    description: Create user, squad, craving_log, checkin, and milestone tables.
+  - id: mig-0002-squad-leader-index
+    description: Add an index on squad.leader_id for leader-scoped queries.
+
+implementation_constraints:
+  stack_pins:
+    - "expo >= 51"
+    - "react-native >= 0.74"
+  forbidden_dependencies:
+    - "moment (use date-fns; smaller, tree-shakable)"
+  budgets:
+    max_app_size_mb: 80
+    max_p95_latency_ms: 400
+open_questions:
+  - id: oq-relapse-language
+    question: What language avoids shaming a member who logs a slip, while still being honest in squad feed copy?
+    owner: product
+  - id: oq-squad-size-cap
+    question: Is 6 members the right upper bound, or should larger squads be allowed with sub-groups?
+    owner: product

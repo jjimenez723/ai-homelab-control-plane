@@ -1,0 +1,387 @@
+# Skyline Duels — real-time 1v1 multiplayer arena game.
+# Fictional product used only as a representative example spec for
+# docs/28-application-spec.md and tools/appspec. Validate with:
+#   python -m tools.appspec validate templates/app-spec/examples/multiplayer-game.yaml
+
+spec_version: "1.0"
+app_id: skyline-duels
+name: Skyline Duels
+product_intent:
+  problem: >
+    Short-session mobile PvP games often have matchmaking queues longer
+    than the match itself, and ranking systems that punish a single bad
+    match disproportionately, which drives away casual players.
+  value_proposition: >
+    A 90-second, skill-based 1v1 real-time arena duel with sub-10-second
+    matchmaking for the common rank bands and a rolling-average rank that
+    smooths out single-match variance.
+  non_goals:
+    - No team modes (2v2+) in v1 -- 1v1 only.
+    - No real-money wagering or loot-box monetization.
+    - No cross-play spectator mode in v1; spectating is a later decision.
+
+target_users:
+  - id: duelist
+    name: Duelist
+    description: A competitive player queuing for ranked or casual 1v1 duels.
+    needs:
+      - Enter a match within 10 seconds during normal population hours.
+      - Trust that a disconnect mid-match does not tank their rank unfairly.
+      - See a clear post-match breakdown of what decided the duel.
+platforms:
+  - ios
+  - android
+
+workflows:
+  - id: find-match
+    name: Find a match
+    actor: duelist
+    goal: Enter matchmaking and be paired with a skill-appropriate opponent.
+    steps:
+      - id: enter-queue
+        description: Enter the ranked or casual matchmaking queue.
+        screen_ref: lobby-screen
+      - id: matched
+        description: Receive a match assignment with an opponent of comparable rank.
+        screen_ref: matchmaking-screen
+      - id: enter-arena
+        description: Both players load into the arena and the match begins.
+        screen_ref: arena-screen
+  - id: play-duel
+    name: Play a duel
+    actor: duelist
+    goal: Compete in a real-time 90-second arena duel to a decisive outcome.
+    steps:
+      - id: engage
+        description: Move and use abilities in real time against the opponent.
+        screen_ref: arena-screen
+      - id: resolve-duel
+        description: The duel resolves by elimination or the 90-second timer with a score comparison.
+        screen_ref: arena-screen
+      - id: view-result
+        description: View the match result and rank delta.
+        screen_ref: results-screen
+  - id: handle-disconnect
+    name: Handle a mid-match disconnect
+    actor: duelist
+    goal: Reconnect to an in-progress match without unfair rank penalty if it fails.
+    steps:
+      - id: detect-disconnect
+        description: Server detects a player's connection drop mid-match.
+        screen_ref: arena-screen
+      - id: attempt-reconnect
+        description: Player has a grace window to reconnect to the same match.
+        screen_ref: reconnect-screen
+      - id: resolve-outcome
+        description: If reconnect fails, the match is scored as a no-penalty void rather than a loss.
+        screen_ref: results-screen
+entities:
+  - id: player_profile
+    name: Player Profile
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: display_name, type: string, required: true, pii: false, phi: false }
+      - { name: rank_rating, type: number, required: true, pii: false, phi: false }
+      - { name: region, type: string, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: match
+    name: Match
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: player_a_id, type: reference, required: true, pii: false, phi: false }
+      - { name: player_b_id, type: reference, required: true, pii: false, phi: false }
+      - { name: mode, type: enum, required: true, pii: false, phi: false, description: "ranked, casual." }
+      - { name: status, type: enum, required: true, pii: false, phi: false, description: "in_progress, completed, voided." }
+      - { name: started_at, type: datetime, required: true, pii: false, phi: false }
+      - { name: ended_at, type: datetime, required: false, pii: false, phi: false }
+    identifiers: [id]
+  - id: match_event
+    name: Match Event
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: match_id, type: reference, required: true, pii: false, phi: false }
+      - { name: player_id, type: reference, required: true, pii: false, phi: false }
+      - { name: event_type, type: enum, required: true, pii: false, phi: false, description: "ability_used, elimination, disconnect, reconnect." }
+      - { name: occurred_at, type: datetime, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: rank_history
+    name: Rank History Entry
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: player_id, type: reference, required: true, pii: false, phi: false }
+      - { name: match_id, type: reference, required: true, pii: false, phi: false }
+      - { name: rating_delta, type: number, required: true, pii: false, phi: false }
+      - { name: recorded_at, type: datetime, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: report
+    name: Player Report
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: match_id, type: reference, required: true, pii: false, phi: false }
+      - { name: reporter_id, type: reference, required: true, pii: false, phi: false }
+      - { name: reported_player_id, type: reference, required: true, pii: false, phi: false }
+      - { name: reason, type: enum, required: true, pii: false, phi: false, description: "cheating, abusive_name, unsporting_conduct." }
+    identifiers: [id]
+
+relationships:
+  - id: rel-match-events
+    from_entity: match
+    to_entity: match_event
+    type: one_to_many
+    description: A match has many logged events.
+  - id: rel-player-rank-history
+    from_entity: player_profile
+    to_entity: rank_history
+    type: one_to_many
+    description: A player accumulates a rank history entry per completed ranked match.
+  - id: rel-match-reports
+    from_entity: match
+    to_entity: report
+    type: one_to_many
+    description: A match may have zero or more player reports filed against it.
+permissions:
+  - id: perm-duelist-own-profile
+    role: duelist
+    entity: player_profile
+    actions: [read, update]
+  - id: perm-duelist-match-read
+    role: duelist
+    entity: match
+    actions: [read, list]
+  - id: perm-duelist-file-report
+    role: duelist
+    entity: report
+    actions: [create]
+  - id: perm-moderator-review-reports
+    role: moderator
+    entity: report
+    actions: [read, list, update]
+  - id: perm-moderator-match-read
+    role: moderator
+    entity: match
+    actions: [read, list]
+
+authentication:
+  methods: [oauth, device_biometric]
+  mfa_required: false
+  session:
+    strategy: jwt
+    expiry: "14d"
+authorization:
+  model: rbac
+  roles:
+    - { id: duelist, name: Duelist, description: A ranked/casual matchmaking player. }
+    - { id: moderator, name: Moderator, description: Reviews filed player reports and match events for abuse. }
+
+backend_profile:
+  id: multiplayer-game
+  overrides:
+    matchmaking_target_wait_seconds: 10
+    reconnect_grace_window_seconds: 20
+    tick_rate_hz: 30
+persistence:
+  datastore: postgres
+  entities: [player_profile, match, match_event, rank_history, report]
+
+realtime:
+  enabled: true
+  channels:
+    - { id: match-state, name: Authoritative match state channel, kind: private }
+    - { id: matchmaking-queue, name: Matchmaking queue status, kind: presence }
+offline:
+  supported: false
+  strategy: none
+
+notifications:
+  channels: [push, in_app]
+  triggers:
+    - id: nt-match-found
+      event: match.created
+      channel: push
+      description: Notify a queued player when a match is found, in case the app is backgrounded.
+    - id: nt-reconnect-available
+      event: match_event.disconnect
+      channel: in_app
+      description: Prompt the disconnected player's opponent that a reconnect window is active.
+storage_media:
+  providers: [none]
+  types: []
+
+privacy:
+  data_classes:
+    - id: pd-display-name
+      entity: player_profile
+      field: display_name
+      classification: internal
+      pii: false
+      phi: false
+      retention: "Retained while account is active; not treated as pii (no real-name requirement)."
+analytics:
+  events:
+    - id: ev-match-started
+      name: Match Started
+      trigger: A match entity transitions to in_progress.
+      properties: [match_id, mode, region]
+    - id: ev-match-completed
+      name: Match Completed
+      trigger: A match entity transitions to completed.
+      properties: [match_id, winner_id, duration_seconds]
+    - id: ev-disconnect-voided
+      name: Disconnect Voided Match
+      trigger: A match is voided due to an unresolved disconnect.
+      properties: [match_id, disconnected_player_id]
+
+integrations:
+  - id: int-anti-cheat
+    provider: Third-party mobile anti-cheat SDK (server-authoritative movement validation)
+    purpose: Detect speed/teleport/ability-cooldown hacks server-side before they affect match outcome.
+screens:
+  - id: lobby-screen
+    name: Lobby
+    workflow_refs: [find-match]
+    entities_shown: [player_profile]
+  - id: matchmaking-screen
+    name: Matchmaking
+    workflow_refs: [find-match]
+    entities_shown: [match]
+  - id: arena-screen
+    name: Arena
+    workflow_refs: [find-match, play-duel, handle-disconnect]
+    entities_shown: [match, match_event]
+  - id: reconnect-screen
+    name: Reconnect
+    workflow_refs: [handle-disconnect]
+    entities_shown: [match]
+  - id: results-screen
+    name: Match Results
+    workflow_refs: [play-duel, handle-disconnect]
+    entities_shown: [match, rank_history]
+
+navigation:
+  entry_screen: lobby-screen
+  edges:
+    - { from: lobby-screen, to: matchmaking-screen, trigger: "tap Find Match" }
+    - { from: matchmaking-screen, to: arena-screen, trigger: "match found and both players loaded" }
+    - { from: arena-screen, to: reconnect-screen, trigger: "connection dropped" }
+    - { from: reconnect-screen, to: arena-screen, trigger: "reconnect succeeded" }
+    - { from: reconnect-screen, to: results-screen, trigger: "reconnect window expired" }
+    - { from: arena-screen, to: results-screen, trigger: "duel resolved" }
+    - { from: results-screen, to: lobby-screen, trigger: "tap Continue" }
+design_system:
+  stack: unity-ui-toolkit
+  library_ref: flutter-material-3
+  tokens:
+    - color.role.player-a
+    - color.role.player-b
+    - color.role.warning-disconnect
+    - type.scale
+    - motion.spring.hit-feedback
+
+apis:
+  - id: api-enter-queue
+    name: Enter matchmaking queue
+    kind: rest_endpoint
+    method: POST
+    path: /v1/matchmaking/queue
+    request_shape:
+      - { name: player_id, type: uuid }
+      - { name: mode, type: string }
+    response_shape:
+      - { name: queue_token, type: string }
+  - id: api-match-state
+    name: Match state stream
+    kind: websocket_message
+    request_shape:
+      - { name: match_id, type: uuid }
+    response_shape:
+      - { name: tick, type: integer }
+      - { name: player_states, type: array }
+  - id: api-file-report
+    name: File a player report
+    kind: rest_endpoint
+    method: POST
+    path: /v1/reports
+    request_shape:
+      - { name: match_id, type: uuid }
+      - { name: reported_player_id, type: uuid }
+      - { name: reason, type: string }
+    response_shape:
+      - { name: id, type: uuid }
+  - id: api-resolve-disconnect
+    name: Resolve disconnect outcome
+    kind: callable_function
+    request_shape:
+      - { name: match_id, type: uuid }
+      - { name: player_id, type: uuid }
+    response_shape:
+      - { name: outcome, type: string }
+acceptance_criteria:
+  - id: ac-matchmaking-pairs-comparable-rank
+    workflow_ref: find-match
+    given: Two duelists are queued in the same mode and region within the matchmaking rating band
+    when: The matchmaker runs its pairing pass
+    then: A match entity is created with both players assigned and status in_progress
+  - id: ac-duel-resolves-and-updates-rank
+    workflow_ref: play-duel
+    given: A ranked match reaches elimination or the 90-second timer
+    when: The match is scored
+    then: The match.status becomes completed and a rank_history entry with a rating_delta is created for each player
+  - id: ac-disconnect-grace-window-voids-fairly
+    workflow_ref: handle-disconnect
+    given: A player disconnects mid-match and does not reconnect within the grace window
+    when: The grace window expires
+    then: The match.status becomes voided and no rank_history entry with a negative rating_delta is created for the disconnected player
+
+tests:
+  - id: test-matchmaking-pairing-unit
+    type: unit
+    acceptance_criteria_refs: [ac-matchmaking-pairs-comparable-rank]
+    description: Unit test for the rating-band pairing rule.
+  - id: test-duel-scoring-integration
+    type: integration
+    acceptance_criteria_refs: [ac-duel-resolves-and-updates-rank]
+    description: Integration test that a completed duel writes rank_history for both players.
+  - id: test-disconnect-void-unit
+    type: unit
+    acceptance_criteria_refs: [ac-disconnect-grace-window-voids-fairly]
+    description: Unit test that an expired reconnect grace window voids rather than penalizes.
+  - id: test-full-match-e2e
+    type: e2e
+    acceptance_criteria_refs: [ac-matchmaking-pairs-comparable-rank, ac-duel-resolves-and-updates-rank]
+    description: End-to-end walk from queueing through a completed scored match.
+deployment:
+  environments:
+    - { id: dev, name: Development, purpose: development }
+    - { id: staging, name: Staging, purpose: staging }
+    - { id: prod, name: Production, purpose: production }
+  ci: GitHub Actions; lint, unit, integration per PR; authoritative game-server build deployed via canary region rollout.
+  secrets_policy: >
+    Anti-cheat SDK and matchmaking-region credentials live only in the
+    platform's managed secret store; this spec records no literal secret values.
+
+observability:
+  logging: Structured JSON logs from the authoritative game server per match tick summary (not per-tick raw state).
+  metrics: [matchmaking_wait_time_p95, match_completion_rate, disconnect_void_rate]
+  alerts: [matchmaking_wait_time_p95_over_budget, disconnect_void_rate_spike]
+migrations:
+  - id: mig-0001-initial-schema
+    description: Create player_profile, match, match_event, rank_history, and report tables.
+  - id: mig-0002-rank-history-index
+    description: Add an index on rank_history.player_id for profile rating-history queries.
+
+implementation_constraints:
+  stack_pins:
+    - "unity >= 2022 LTS"
+    - "authoritative server: netcode tick_rate_hz == 30 (fixed, not client-configurable)"
+  forbidden_dependencies:
+    - "any client-authoritative hit-detection library (server must remain authoritative per anti-cheat integration)"
+  budgets:
+    max_app_size_mb: 300
+    max_p95_latency_ms: 120
+open_questions:
+  - id: oq-region-based-matchmaking-fallback
+    question: When a region's queue is thin, how long before widening the rating band or cross-region matching kicks in?
+    owner: engineering
+  - id: oq-report-review-sla
+    question: What is the target moderator review SLA for a filed player report?
+    owner: trust-and-safety
