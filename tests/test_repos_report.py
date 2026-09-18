@@ -76,7 +76,7 @@ def publish(source: Path, remote_dir: Path) -> None:
     remote-tracking refs it creates are what the inventory actually reads, and
     nothing here contacts a network.
     """
-    subprocess.run(["git", "init", "-q", "--bare", str(remote_dir)], check=True, timeout=60)
+    subprocess.run(["git", *GIT_ENV_ARGS, "init", "-q", "--bare", str(remote_dir)], check=True, timeout=60)
     git(source, "remote", "add", "origin", str(remote_dir))
     git(source, "push", "-q", "origin", "HEAD:refs/heads/main")
     git(source, "fetch", "-q", "origin")
