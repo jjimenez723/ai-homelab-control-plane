@@ -50,6 +50,7 @@ from typing import Any
 
 from tools.ingest.naming.evidence import NamingEvidence, PerceivedEvidence
 from tools.ingest.naming.policy import normalized_extension
+from tools.ingest.naming.quality import looks_like_instruction
 from tools.ingest.naming.proposer import DeterministicProposer, NameProposal, NameProposer
 from tools.prompts.production import render_for_task_class
 
@@ -276,6 +277,11 @@ def _clean_model_output(raw: str, *, original_filename: str, max_filename_length
     stem = line[: -len(true_extension)] if (true_extension and line.lower().endswith(true_extension)) else line
     if not _WORD_RE.search(stem):
         return None, "model output contains no word characters"
+    # A name that is itself an instruction ("ignore-all-previous-instructions")
+    # is the model echoing document text rather than naming a subject; the
+    # same naming-quality rule the deterministic title scan applies.
+    if looks_like_instruction(stem.replace("-", " ").replace("_", " ")):
+        return None, "model output is instruction-shaped text, not a subject"
     return line, "accepted"
 
 

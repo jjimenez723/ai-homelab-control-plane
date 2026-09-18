@@ -59,6 +59,7 @@ from tools.ingest.media.probe import (
 )
 from tools.ingest.naming.evidence import NamingEvidence
 from tools.ingest.naming.policy import slugify
+from tools.ingest.naming.quality import looks_like_instruction
 
 # Confidence bands. These are honest self-assessments of a *deterministic*
 # proposer: high where the file told us its own title, low where all we can say
@@ -219,6 +220,10 @@ def _title_line(text: str) -> str:
             continue
         if len(_WORD_RE.findall(candidate)) < MIN_TITLE_LINE_WORDS:
             continue
+        # An instruction addressed to a reader or a model is not a title, so
+        # the scan continues past it (`quality.looks_like_instruction`).
+        if looks_like_instruction(candidate):
+            continue
         return candidate
     return ""
 
@@ -331,7 +336,10 @@ class DeterministicProposer:
         perceived = evidence.perceived
         if perceived is None:
             return None
-        heading = next((text.strip() for text in perceived.headings if text.strip()), "")
+        heading = next(
+            (text.strip() for text in perceived.headings if text.strip() and not looks_like_instruction(text)),
+            "",
+        )
         source = "the document's own first heading"
         if not heading:
             heading = _title_line(perceived.native_text_excerpt)

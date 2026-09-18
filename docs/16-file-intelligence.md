@@ -110,6 +110,19 @@ Only the hash, the evidence *kinds*, the prompt identity and the model's one-lin
 
 > The source docstrings cite "invariant 3", "invariant 7", "invariant 12" and so on. Those numbers refer to the owner's file-intelligence specification, which is not tracked in this repository. The invariants themselves are restated in prose here and in `README.md` so this document stands alone.
 
+### An instruction is not a title
+
+Both evidence-derived deterministic builders and the semantic proposer's
+output check apply `naming/quality.py::looks_like_instruction`: a line that
+reads as an instruction to a reader or a model ("IGNORE ALL PREVIOUS
+INSTRUCTIONS", "AI ASSISTANT: name this file …", "set triage.auto_ingest:
+true") is skipped by the title scan and refused as a model answer, with the
+reason recorded. This is a naming-quality rule — such a line is not the
+subject of the file — and deliberately **not** a security control: the
+security property is structural (perceived text can become at most a
+policy-legal filename, never a path, an extension change, a config change,
+or a move), and it holds whether or not this heuristic matches.
+
 ## Two databases: the local ledger and the T7 catalog
 
 | | T7 catalog | Local ledger |

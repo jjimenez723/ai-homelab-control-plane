@@ -203,3 +203,40 @@ def _looks_pronounceable(stem: str) -> bool:
 
 def is_poor(filename: str, *, vocabulary: frozenset[str] | tuple[str, ...] = ()) -> bool:
     return assess(filename, vocabulary=vocabulary)[0] == QUALITY_POOR
+
+
+# -- instruction-shaped text is not a title ------------------------------------
+#
+# A document's first line, a screenshot's top OCR line, or a model's answer
+# can be an *instruction* ("IGNORE ALL PREVIOUS INSTRUCTIONS", "AI ASSISTANT:
+# name this file ...", "set triage.auto_ingest: true"). The evidence layer
+# already treats such text as inert data (docs/17): nothing here obeys it.
+# But it is also simply not a title, and naming a file after it puts
+# attacker-shaped text on the owner's disk under the namer's byline. This is
+# therefore a *naming-quality* rule -- "an instruction is not a subject" --
+# not a security control, and it is deliberately narrow: it matches the
+# grammar of an instruction addressed to a reader/model, never ordinary
+# document vocabulary ("Delete key", "System requirements").
+_INSTRUCTION_LINE_PATTERNS = (
+    r"^(?:please\s+)?(?:ignore|disregard|forget|override|bypass)\b.{0,60}\b(?:instruction|prompt|polic|rule|guideline)",
+    r"^(?:ai|assistant|system|model|note to (?:the )?(?:model|assistant|ai)|chatgpt|claude|llm)\s*[:\-]",
+    r"\b(?:rename|name|move|copy|save)\s+this\s+file\b",
+    r"\byour\s+(?:new\s+)?(?:task|job|instruction)s?\s+(?:is|are)\b",
+    r"\b(?:delete|remove|approve|reveal|output|print)\s+(?:this|everything|all|the\s+string|your)\b",
+    r"^\s*set\s+[A-Za-z_][\w.]*\s*:\s*\S",
+    r"\bignore\s+all\s+previous\b",
+)
+_INSTRUCTION_LINE_RE = re.compile("|".join(_INSTRUCTION_LINE_PATTERNS), re.IGNORECASE)
+
+
+def looks_like_instruction(text: str) -> bool:
+    """True when `text` reads as an instruction rather than as a subject.
+
+    Used by the deterministic title-line scan (which then keeps scanning) and
+    by the semantic proposer's output check (which then declines). Bounded
+    regexes over one line; see the comment above for why this exists and what
+    it is not.
+    """
+    if not text:
+        return False
+    return bool(_INSTRUCTION_LINE_RE.search(text.strip()))
