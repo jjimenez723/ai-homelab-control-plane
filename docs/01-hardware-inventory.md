@@ -33,7 +33,8 @@
 - Identity of record: the macOS Volume UUID, held only in the gitignored `config/ingest.yaml` (`t7.volume_uuid`). It is deliberately not duplicated into this tracked file; read it with `diskutil info /Volumes/Angel`.
 - Verified 2026-09-11 on `mac-m4pro`: mounted, unlocked, writable, SMART status Verified
 - Connection: USB (`diskutil info` → Protocol USB, External).
-- Throughput: a 1 GiB `dd` probe on 2026-09-18 measured 34 MB/s write / 51 MB/s read, but under a load average of 47 (a Gate-2 model campaign plus two test suites were running); treat as **not yet measured** — repeat on an idle machine, and if it stays far below ~700 MB/s check the cable/port (USB 2 fallback) before anything else.
+- Throughput (`dd`, 2026-09-18): **34–39 MB/s sequential write** in two probes (1 GiB under a load average of 47; 2 GiB with the machine near idle — same result), which is USB 2.0 territory, not the ~700 MB/s+ a T7 delivers over USB 3.x. The drive itself is fine; the *link* is negotiating at USB 2.0 — confirmed: `ioreg -p IOUSB -l` shows `PSSD T7` with `UsbLinkSpeed = 480000000` (480 Mb/s High Speed), `Device Speed = 2`. Owner action: connect the T7 with its own USB-C cable directly to a Thunderbolt/USB-C port on the Mac, then re-run the probe below. Every Angel write path (ingestion, mirrors, whisper model download) is currently bounded by this. The 2 GiB read-back measured 21 GB/s, i.e. the page cache, and is not a drive measurement.
+- Probe: `cd /Volumes/Angel/90-system/cache && dd if=/dev/zero of=probe.bin bs=1m count=2048 && rm probe.bin` (the `cache/` tree is restic-excluded and disposable).
 - Still to verify: serial number.
 
 ## Inventory commands to capture later

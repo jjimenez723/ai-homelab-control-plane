@@ -1,5 +1,7 @@
 # Phase 2 evaluation — 2026-09-12
 
+> **Superseded 2026-09-18:** this document is the historical record of the Legacy-20 measurement run. Its Gate-2 status statements were true when written; Gate 2 was satisfied on 2026-09-18 by the measured `gate2-holdout-001` campaign (D-059/D-060, `PLAN.md` Gate-2 table, `docs/30-gate2-naming-audit.md`).
+
 > This document is the unedited historical record of the first Phase 2
 > measurement run. Its 20-task corpus is now referred to as **Angel Canary
 > v1 — Legacy 20**: a frozen regression canary, not a complete benchmark of
