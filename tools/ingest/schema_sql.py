@@ -54,7 +54,30 @@ CREATE TABLE IF NOT EXISTS naming_history (
   -- describe different bytes over time; earlier rows stay as audit history but
   -- must never be read back as the current bytes' history (D-028). T7 rows are
   -- reached by asset and simply carry the generation they were written with.
-  generation INTEGER NOT NULL DEFAULT 0
+  generation INTEGER NOT NULL DEFAULT 0,
+  -- D-057 naming audit: what the proposer was asked and what it answered.
+  -- All nullable, because the deterministic proposer has no prompt and no raw
+  -- output, and an absent column is a truer statement than an empty string.
+  --
+  -- `prompt_*` identify the exact rendered prompt by the registry's own
+  -- (id, version) plus the SHA-256 of the fully rendered text, so a naming
+  -- decision can be reproduced rather than merely attributed.
+  prompt_id TEXT,
+  prompt_version TEXT,
+  prompt_sha256 TEXT,
+  -- The content hash of the *perceived evidence* this decision saw. Equal to
+  -- `sha256` in normal operation (evidence is keyed by content), and stored
+  -- separately anyway: it is the column that answers "which evidence produced
+  -- this filename?" without assuming the two can never diverge.
+  evidence_sha256 TEXT,
+  -- JSON array of `PerceivedEvidence.sources` -- which kinds of perception
+  -- were actually in front of the proposer ("native_text", "ocr", "visual",
+  -- "transcript", "structure").
+  evidence_sources TEXT,
+  -- The model's answer exactly as it came back, bounded, BEFORE cleanup or
+  -- validation. Recorded even when the answer was refused: a rejected hostile
+  -- proposal that leaves no trace is a rejection nobody can audit.
+  raw_output TEXT
 );
 CREATE INDEX IF NOT EXISTS naming_history_by_file
   ON naming_history(local_file_id, created_at);

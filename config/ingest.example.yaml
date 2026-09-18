@@ -102,6 +102,52 @@ naming:
   # Matched on whole words, never as a substring.
   vocabulary: []
 
+  # Which proposer answers "what should this file be called?" (D-057).
+  #
+  #   deterministic  names only from measured facts and text the file itself
+  #                  contains -- a PDF's title, its first heading, the title
+  #                  line of OCR on a screenshot, camera EXIF, dimensions.
+  #                  Never from a vision description or a speech transcript:
+  #                  those are summaries, not quotations.
+  #   semantic       asks a local model (loopback-only Ollama) through the
+  #                  exact versioned prompt the Gate-2 naming suite evaluates,
+  #                  reading the same perceived evidence plus the visual
+  #                  description and transcript. Every answer still goes
+  #                  through the identical filename policy, and anything
+  #                  path-shaped, invisible, extension-changing, or over-long
+  #                  is refused outright.
+  #
+  # `enabled: false` above still wins over this: turning the model on is two
+  # deliberate settings, not one.
+  proposer: deterministic
+
+  semantic:
+    # An Ollama tag that is already installed locally. Nothing here pulls a
+    # model; an absent one degrades to the deterministic proposer.
+    model: "qwen3.5:4b"
+
+    # Loopback HTTP only, enforced by the single Ollama client in this repo
+    # (tools/models/ollama_local.py). Anything else is refused the moment the
+    # client is constructed -- which this proposer records as a fallback with
+    # a stated reason rather than failing the run.
+    endpoint: "http://127.0.0.1:11434"
+
+    timeout_seconds: 60
+
+    # A filename is short. More tokens than this only buys an explanation
+    # that nothing downstream reads.
+    num_predict: 64
+
+    # The model never scores itself: confidence is derived deterministically
+    # from the name it produced against the evidence it was shown (see
+    # tools/ingest/naming/semantic.py). Below this, the answer is discarded.
+    min_confidence: 0.6
+
+    # When the model is unreachable, times out, or produces something
+    # unusable, let the deterministic proposer answer instead. Setting this
+    # to false means "a model names it or nothing does".
+    fallback_to_deterministic: true
+
 
 # -- Retention triage --------------------------------------------------------
 #
@@ -215,11 +261,18 @@ exclusions:
 
 # -- Visual & document evidence layer ----------------------------------------
 #
-# Perception only. This layer reads native text, runs OCR, and asks a vision
+# Perception. This layer reads native text, runs OCR, and asks a vision
 # backend to describe an image -- and caches the result, content-hash-keyed,
-# in the local ledger. It grants NO authority to rename, move, delete, or
-# ingest anything: nothing under `naming:`, `triage:`, or `automation:` above
-# reads a value produced here, in this phase or any other change in this PR.
+# in the local ledger.
+#
+# Since D-057 exactly one decision reads it: the *filename* proposal under
+# `naming:` above. It still grants no authority to move, delete, or ingest
+# anything, and `triage:` (what belongs in Angel) and `automation:` read
+# nothing produced here -- two files differing only in what was perceived
+# about them get the identical retention decision, which is a test, not a
+# claim. What a proposer does with this evidence is a string, and
+# tools/ingest/naming/policy.py validates it before it can become a filename.
+#
 # Extracted text is stored only on this Mac (never on the T7/Angel catalog)
 # and only up to `max_text_chars`; see the evidence-layer spec for the full
 # privacy posture.

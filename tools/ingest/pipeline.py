@@ -17,14 +17,25 @@ The two independent questions, in order:
 Angel being disconnected disables only step 2. Naming keeps working, because
 its ledger lives on the Mac (D-021).
 
-A third thing happens, and it is deliberately not a question:
+A third thing happens, and as of D-057 it feeds exactly one of the two:
 
 3. **What is in this file?** Perception -- native text, OCR, a vision
-   description -- runs *after* both decisions above are final, and feeds
-   neither of them. It builds the evidence corpus a later intelligent namer
-   will read. Until that namer exists and has been proved, evidence here is
-   recorded and inspectable but carries no authority at all, which is why the
-   call sits below the decisions rather than above them.
+   description, and in time a speech transcript -- now runs *before* naming
+   and is handed to the proposer as `NamingEvidence.perceived`, converted to
+   bounded plain data by `perception_bridge.py`. It is still handed to
+   **nothing else**. Retention triage receives the same `NamingEvidence` it
+   always did minus that field's influence: `triage/policy.py` reads none of
+   it, may not import the evidence package at all, and
+   `tests/ingest/test_evidence_security.py` proves behaviourally that two
+   files differing only in what was perceived about them get the identical
+   retention decision.
+
+   The ordering change is the whole of the new authority, and it is narrow by
+   construction: what a proposer returns is still a string, still validated by
+   `naming/policy.py::validate_proposal`, and still incapable of relocating or
+   deleting anything. Perception that fails, is disabled, or is unavailable
+   yields `perceived=None` and naming proceeds exactly as it did before --
+   evidence can make a name better, never make naming fail.
 """
 
 from __future__ import annotations
@@ -49,12 +60,14 @@ from tools.ingest.ledger import (
     LocalLedger,
 )
 from tools.ingest.evidence.extract import collect_evidence
-from tools.ingest.evidence.types import EvidenceSource
+from tools.ingest.evidence.types import EvidenceSource, FileEvidence
 from tools.ingest.media.probe import PROBE_VERSION, MediaFacts, probe_file
 from tools.ingest.naming.evidence import gather_evidence
 from tools.ingest.naming.quality import QUALITY_GOOD, assess
 from tools.ingest.naming.proposer import DeterministicProposer, DisabledProposer, NameProposer
 from tools.ingest.naming.rename import NamingOutcome, evaluate_and_apply
+from tools.ingest.naming.semantic import SemanticProposer
+from tools.ingest.perception_bridge import perceived_from_file_evidence
 from tools.ingest.sources import (
     SOURCE_DOWNLOADS,
     SOURCE_SCREENSHOTS,
@@ -89,8 +102,10 @@ class FileOutcome:
     ingested: bool = False
     transfer: TransferOutcome | None = None
     note: str = ""
-    # Perception, recorded alongside the decisions but deliberately not an
-    # input to any of them in this phase. See `evidence/extract.py`.
+    # What was perceived about this file: the route that fired, the kinds
+    # produced, the warnings, the cache hits. Reporting only -- the *content*
+    # reached the naming proposal (D-057) and nothing else; retention was
+    # handed evidence with `perceived` stripped off.
     evidence_route: tuple[str, ...] = ()
     evidence_kinds: tuple[str, ...] = ()
     evidence_warnings: tuple[str, ...] = ()
@@ -180,7 +195,32 @@ class PipelineReport:
 
 
 def build_proposer(config: IngestConfig) -> NameProposer:
-    return DeterministicProposer() if config.naming.enabled else DisabledProposer()
+    """The one proposer for a whole run, chosen by config (D-057).
+
+    Built once per run rather than once per file: `SemanticProposer` resolves
+    its model's digest at construction, and `ledger.evaluated_by` keys the
+    "already answered" check on `model_version`, so a value that changed
+    partway through a run would make every remaining file look unevaluated.
+
+    `naming.enabled: false` still wins over `naming.proposer`, and means
+    exactly what it always meant -- a `DisabledProposer` that declines
+    everything. Turning on the semantic proposer is therefore two deliberate
+    settings, not one.
+    """
+    if not config.naming.enabled:
+        return DisabledProposer()
+    if config.naming.proposer == "semantic":
+        semantic = config.naming.semantic
+        return SemanticProposer(
+            model=semantic.model,
+            endpoint=semantic.endpoint,
+            timeout_seconds=semantic.timeout_seconds,
+            num_predict=semantic.num_predict,
+            min_confidence=semantic.min_confidence,
+            fallback_to_deterministic=semantic.fallback_to_deterministic,
+            max_filename_length=config.naming.max_filename_length,
+        )
+    return DeterministicProposer()
 
 
 def screenshot_candidates(root: Path, *, require_name_pattern: bool) -> list[Path]:
@@ -415,6 +455,30 @@ def _process_file(
         media_facts=facts,
     )
 
+    # -- 0. perception ------------------------------------------------------
+    #
+    # Runs before naming (D-057) and is handed to the proposer, and to nothing
+    # else. Keyed by content hash, so a file this run renames still hits the
+    # cache on the next run under its new name -- the rename costs nothing.
+    #
+    # Everything about this call is failure-tolerant: `_collect_file_evidence`
+    # never raises, an unavailable backend yields a warning rather than an
+    # error, and a `None` result means naming proceeds on measured facts
+    # alone. Evidence can improve a name; it can never prevent one.
+    collected = _collect_file_evidence(
+        config, ledger, path,
+        sha256=sha256,
+        mime=mime,
+        facts=facts,
+        screenshot_by_name=evidence.screenshot_by_name,
+        size=stat.st_size,
+        now=now,
+        report=report,
+    )
+    perceived = perceived_from_file_evidence(collected)
+    if perceived is not None:
+        evidence = dataclasses.replace(evidence, perceived=perceived)
+
     # -- 1. naming ----------------------------------------------------------
 
     naming = evaluate_and_apply(
@@ -473,11 +537,18 @@ def _process_file(
     # meaningful filename should be assessed on that name, not on the machine
     # name it arrived with -- the flow is name-then-triage, and re-deriving the
     # quality here is what makes that ordering real rather than nominal.
-    triage_evidence = evidence
+    #
+    # `perceived=None` is stripped off deliberately rather than merely being
+    # ignored by `triage()`. D-057 grants perceived content authority over a
+    # *name* and nothing else, and the cheapest way to keep that true a year
+    # from now is for the value triage is handed not to contain it: a future
+    # change that wants retention to read OCR text has to widen this call
+    # visibly instead of finding the field already there.
+    triage_evidence = dataclasses.replace(evidence, perceived=None)
     if current_path.name != evidence.original_filename:
         quality, quality_reason = assess(current_path.name, vocabulary=config.naming.vocabulary)
         triage_evidence = dataclasses.replace(
-            evidence,
+            triage_evidence,
             original_filename=current_path.name,
             name_quality=quality,
             name_quality_reason=quality_reason,
@@ -539,25 +610,14 @@ def _process_file(
         retention_reason=decision.reason,
     )
 
-    # -- 2a. perception --------------------------------------------------
+    # -- 2a. perception, reported ------------------------------------------
     #
-    # Deliberately *after* naming and retention, and deliberately feeding
-    # neither. This phase builds the evidence corpus a later intelligent
-    # namer will read; wiring it into the decisions now would hand model
-    # output authority before the perception itself has been proved
-    # trustworthy. The ordering makes that structural rather than polite:
-    # both decisions above are already final by the time anything here runs.
-    _collect_file_evidence(
-        config, ledger, current_path,
-        sha256=sha256,
-        mime=mime,
-        facts=facts,
-        screenshot_by_name=evidence.screenshot_by_name,
-        size=stat.st_size,
-        now=now,
-        outcome=outcome,
-        report=report,
-    )
+    # The measurement itself happened at step 0, before naming. What is left
+    # here is describing it on the outcome: which route fired, which kinds
+    # were produced, what was warned about, and how much was served from
+    # cache -- the fields `organize triage` prints and the idempotency tests
+    # assert against.
+    _describe_collected_evidence(collected, outcome=outcome, report=report)
 
     # -- 3. ingestion, only where policy explicitly allows it ---------------
 
@@ -617,21 +677,23 @@ def _collect_file_evidence(
     screenshot_by_name: bool,
     size: int,
     now: str,
-    outcome: FileOutcome,
     report: SourceReport,
-) -> None:
-    """Perceive one file and record the result. Never affects any decision.
+) -> FileEvidence | None:
+    """Perceive one file and return the result, or `None` if it could not be.
 
-    Failure here is cosmetic by construction: the naming and retention rows
-    are already written, the file has already been left where it belongs, and
-    evidence is a cache of observations. So the whole stage is wrapped -- a
-    backend that crashes, a ledger that is locked, a PDF that is a lie -- and
-    degrades to a note on the outcome plus a line in the run's errors.
+    Failure here never costs a naming decision. The whole stage is wrapped --
+    a backend that crashes, a ledger that is locked, a PDF that is a lie, an
+    `evidence.enabled: false` config -- and every one of those outcomes is the
+    same one: `None`, plus (for a real failure) a line in the run's errors.
+    Naming then proceeds on measured facts alone, exactly as it did before
+    D-057. That is what "evidence unavailability must never block naming"
+    means as code rather than as a promise: there is no path out of this
+    function that raises, and no caller branch that stops.
     """
     if not config.evidence.enabled:
-        return
+        return None
     try:
-        collected = collect_evidence(
+        return collect_evidence(
             source=EvidenceSource(
                 path=path,
                 sha256=sha256,
@@ -647,8 +709,18 @@ def _collect_file_evidence(
         )
     except Exception as exc:  # noqa: BLE001 - perception never costs a decision
         report.errors.append(f"{path.name}: evidence: {type(exc).__name__}: {exc}")
-        return
+        return None
 
+
+def _describe_collected_evidence(
+    collected: FileEvidence | None,
+    *,
+    outcome: FileOutcome,
+    report: SourceReport,
+) -> None:
+    """Copy what was perceived onto the run's report. Decides nothing."""
+    if collected is None:
+        return
     kinds = tuple(sorted({record.kind for record in collected.provenance}))
     outcome.evidence_route = collected.route.rules
     outcome.evidence_kinds = kinds

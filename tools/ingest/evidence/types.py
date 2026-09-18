@@ -9,10 +9,20 @@ for the naming proposer. `FileEvidence` carries no `Path` and no callable, so
 nothing holding one -- including a future model-backed consumer -- has
 anything to mutate the filesystem with.
 
-The invariant this phase must not break is FACTS != INTERPRETATIONS !=
-DECISIONS. Nothing in this module, or anything built on it, is allowed to
-change a naming, retention, or ingestion decision. It is collected,
-normalized, cached, and exposed for inspection, and nothing else.
+The invariant this module must not break is FACTS != INTERPRETATIONS !=
+DECISIONS: nothing here interprets or decides. It is collected, normalized,
+cached, and exposed for inspection.
+
+Where its output may travel is not this module's business, and is deliberately
+narrow: as of D-057 a `FileEvidence` can reach a *filename proposal*, and only
+through `tools/ingest/perception_bridge.py`, which copies a bounded subset of
+it into `tools.ingest.naming.evidence.PerceivedEvidence` -- plain strings and
+tuples, no polygons, no confidences, no provenance. Retention and ingestion
+read nothing produced here, and no module under `tools/ingest/naming/` or
+`tools/ingest/triage/` may import this package at all
+(`tests/ingest/test_evidence_security.py`). Nothing in *this* module knows or
+cares which of those is true, which is the property worth keeping: these types
+are inert either way.
 
 Everything extracted from a file is untrusted data with zero authority (OCR
 text, PDF text, EXIF, filenames, vision descriptions). It cannot reach config,
@@ -292,6 +302,13 @@ class FileEvidence:
 
     Carries no `Path` and no callable, exactly like `NamingEvidence`, so
     nothing holding one can reach the filesystem with it.
+
+    A naming proposer never receives one of these: `tools/ingest/
+    perception_bridge.py` copies a bounded subset into
+    `tools.ingest.naming.evidence.PerceivedEvidence` first (D-057), leaving
+    the polygons, per-block confidences and provenance behind. This type is
+    the perception layer's own full record; that one is the naming boundary's
+    reduced view of it.
     """
 
     content_sha256: str
@@ -370,11 +387,18 @@ RasterPage = RasterImage  # alias; a page is a raster image with page > 0
 # This is a display-safety and storage-hygiene measure. It is deliberately
 # NOT a prompt-injection defense, and must never be described as one: the
 # actual defense against injected instructions is structural. Every type in
-# this module is inert data with nowhere to go -- it cannot reach config,
-# policy, a subprocess argument, or a filesystem call from anywhere evidence
-# is threaded through (see the module docstring). Sanitizing the text changes
-# what it looks like on a terminal and what it costs to store; it does not,
-# and is not claimed to, "filter malicious instructions" out of the content.
+# this module is inert data -- it cannot reach config, policy, a subprocess
+# argument, or a filesystem call. Sanitizing the text changes what it looks
+# like on a terminal and what it costs to store; it does not, and is not
+# claimed to, "filter malicious instructions" out of the content.
+#
+# Since D-057 this text can reach one thing: a filename proposal. That does
+# not make sanitizing it a defense either. The defense there is also
+# structural -- `tools/ingest/naming/policy.py::validate_proposal` refuses
+# anything path-shaped, keeps the real extension, and re-runs the quality
+# check on its own output, so injected words can at worst produce an ugly but
+# legal filename. Nothing about that reasoning depends on this function having
+# removed a control character first.
 
 # C1 control characters, plus the bidi-override and zero-width characters this
 # repo already refuses in filenames (see naming/policy.py's equivalent guard).

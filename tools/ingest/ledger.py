@@ -58,6 +58,21 @@ NAMING_STATE_NAMED = "named"
 NAMING_STATE_REVIEW = "needs_review"
 NAMING_STATE_HUMAN = "human_named"
 
+# The exact column list `append_naming` inserts, in order. One definition
+# rather than a literal inside the method, because `_local_migration_4_naming_
+# audit` (and catalog migration 5) have to add every column named here: an
+# insert naming a column the database does not have fails loudly, which is the
+# behaviour wanted, but only if the two lists are visibly the same list.
+NAMING_HISTORY_COLUMNS = (
+    "naming_id", "local_file_id", "asset_id", "source_volume_id", "source_class",
+    "directory", "sha256", "original_filename", "proposed_filename", "applied_filename",
+    "name_quality", "decision", "reason", "model", "model_version", "confidence",
+    "approved_by", "human_corrected", "policy_outcome", "created_at", "generation",
+    # D-057 naming audit.
+    "prompt_id", "prompt_version", "prompt_sha256", "evidence_sha256",
+    "evidence_sources", "raw_output",
+)
+
 RETENTION_IGNORE = "ignore"
 RETENTION_REVIEW = "review"
 RETENTION_INGEST = "ingest"
@@ -158,12 +173,7 @@ class LedgerTables:
         local_file_id = record["local_file_id"]
         if record.get("generation") is None:
             record["generation"] = self._current_generation(local_file_id) or 0
-        columns = (
-            "naming_id", "local_file_id", "asset_id", "source_volume_id", "source_class",
-            "directory", "sha256", "original_filename", "proposed_filename", "applied_filename",
-            "name_quality", "decision", "reason", "model", "model_version", "confidence",
-            "approved_by", "human_corrected", "policy_outcome", "created_at", "generation",
-        )
+        columns = NAMING_HISTORY_COLUMNS
         placeholders = ", ".join("?" for _ in columns)
         with self._immediate():
             sequence = self._conn.execute(
@@ -601,7 +611,30 @@ def _local_migration_3_evidence(conn: sqlite3.Connection) -> None:
     conn.executescript(FILE_EVIDENCE_SQL)
 
 
-LOCAL_MIGRATIONS = (_local_migration_1, _local_migration_2_generation, _local_migration_3_evidence)
+def _local_migration_4_naming_audit(conn: sqlite3.Connection) -> None:
+    """Record which prompt and which evidence produced each filename (D-057).
+
+    Six additive, nullable columns on `naming_history`. Nothing existing
+    changes: every row written before this migration correctly reads back
+    `NULL` for all six, because those rows were written by a proposer that
+    had no prompt and no raw output and by a pipeline where naming could not
+    see perceived evidence at all. Backfilling a value would be inventing one.
+
+    `NAMING_HISTORY_COLUMNS` is the single list `append_naming` inserts, so
+    adding a column there and forgetting it here would fail loudly on the
+    next insert rather than silently dropping the field.
+    """
+    for column in ("prompt_id", "prompt_version", "prompt_sha256", "evidence_sha256",
+                   "evidence_sources", "raw_output"):
+        add_column_if_missing(conn, "naming_history", column, "TEXT")
+
+
+LOCAL_MIGRATIONS = (
+    _local_migration_1,
+    _local_migration_2_generation,
+    _local_migration_3_evidence,
+    _local_migration_4_naming_audit,
+)
 
 
 @dataclass(frozen=True)
