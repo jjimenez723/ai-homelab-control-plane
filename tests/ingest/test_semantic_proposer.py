@@ -118,7 +118,13 @@ class HappyPathTests(unittest.TestCase):
         self.assertEqual(proposal.model, "semantic:qwen3.5:4b")
         self.assertIn(SEMANTIC_PROPOSER_VERSION, proposal.model_version)
         self.assertEqual(proposal.prompt_id, "acb-v1-semantic-naming")
-        self.assertEqual(proposal.prompt_version, "1.0.0")
+        # The proposer renders whichever version is *active* in the registry
+        # (1.1.0 since D-060); pinning a literal here would make a prompt
+        # graduation look like a proposer regression.
+        from tools.prompts.registry import load_default_registry
+
+        active = load_default_registry().active("acb-v1-semantic-naming").version
+        self.assertEqual(proposal.prompt_version, active)
         self.assertEqual(len(proposal.prompt_sha256), 64)
         self.assertEqual(proposal.raw_output, "2026-04-02_roof-framing-plan-rev3.pdf")
         self.assertEqual(proposal.evidence_sources, ("native_text", "structure"))

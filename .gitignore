@@ -69,3 +69,7 @@ __pycache__/
 
 # Agent worktrees created by Claude Code during integration passes; never source.
 .claude/worktrees/
+
+# Machine-local model registry (exact local tags/digests measured on this host);
+# config/models.example.yaml is the committed template.
+config/models.yaml
