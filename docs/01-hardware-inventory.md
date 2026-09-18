@@ -32,7 +32,9 @@
 - Filesystem: **APFS (Encrypted)**, volume `Angel` at `/Volumes/Angel`, container `disk5` on physical store `disk4s1` (USB) — erased and recreated 2026-09-11 (D-019)
 - Identity of record: the macOS Volume UUID, held only in the gitignored `config/ingest.yaml` (`t7.volume_uuid`). It is deliberately not duplicated into this tracked file; read it with `diskutil info /Volumes/Angel`.
 - Verified 2026-09-11 on `mac-m4pro`: mounted, unlocked, writable, SMART status Verified
-- Still to verify: serial number and measured throughput (`dd`/`fio`)
+- Connection: USB (`diskutil info` → Protocol USB, External).
+- Throughput: a 1 GiB `dd` probe on 2026-09-18 measured 34 MB/s write / 51 MB/s read, but under a load average of 47 (a Gate-2 model campaign plus two test suites were running); treat as **not yet measured** — repeat on an idle machine, and if it stays far below ~700 MB/s check the cable/port (USB 2 fallback) before anything else.
+- Still to verify: serial number.
 
 ## Inventory commands to capture later
 

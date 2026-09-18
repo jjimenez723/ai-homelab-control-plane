@@ -21,6 +21,8 @@ Ten things get demonstrated, each separately:
 
 Budget about ten minutes.
 
+> **Scripted version (2026-09-18):** `python -m tools.acceptance.drill --root /tmp/angel-drill --evidence-config <yaml>` synthesizes a 16-file corpus (`tools/acceptance/corpus.py`: PDFs, screenshot, EXIF photo, HEIC, xlsx, source, zip, m4a speech, MP4 with speech / on-screen text / weak evidence / burned-in prompt injection, corrupt MP4, injection PDF, installer) and runs every demonstration below plus injection-inertness, unplug/reconnect, idempotency, and byte-level survival, writing `drill-report.md`. It refuses to run under your real working folders or `/Volumes/`. This hand-run version stays as the narrative.
+
 ---
 
 ## 0. Set up a scratch world
