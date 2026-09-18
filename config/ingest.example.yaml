@@ -102,6 +102,52 @@ naming:
   # Matched on whole words, never as a substring.
   vocabulary: []
 
+  # Which proposer answers "what should this file be called?" (D-057).
+  #
+  #   deterministic  names only from measured facts and text the file itself
+  #                  contains -- a PDF's title, its first heading, the title
+  #                  line of OCR on a screenshot, camera EXIF, dimensions.
+  #                  Never from a vision description or a speech transcript:
+  #                  those are summaries, not quotations.
+  #   semantic       asks a local model (loopback-only Ollama) through the
+  #                  exact versioned prompt the Gate-2 naming suite evaluates,
+  #                  reading the same perceived evidence plus the visual
+  #                  description and transcript. Every answer still goes
+  #                  through the identical filename policy, and anything
+  #                  path-shaped, invisible, extension-changing, or over-long
+  #                  is refused outright.
+  #
+  # `enabled: false` above still wins over this: turning the model on is two
+  # deliberate settings, not one.
+  proposer: deterministic
+
+  semantic:
+    # An Ollama tag that is already installed locally. Nothing here pulls a
+    # model; an absent one degrades to the deterministic proposer.
+    model: "qwen3.5:4b"
+
+    # Loopback HTTP only, enforced by the single Ollama client in this repo
+    # (tools/models/ollama_local.py). Anything else is refused the moment the
+    # client is constructed -- which this proposer records as a fallback with
+    # a stated reason rather than failing the run.
+    endpoint: "http://127.0.0.1:11434"
+
+    timeout_seconds: 60
+
+    # A filename is short. More tokens than this only buys an explanation
+    # that nothing downstream reads.
+    num_predict: 64
+
+    # The model never scores itself: confidence is derived deterministically
+    # from the name it produced against the evidence it was shown (see
+    # tools/ingest/naming/semantic.py). Below this, the answer is discarded.
+    min_confidence: 0.6
+
+    # When the model is unreachable, times out, or produces something
+    # unusable, let the deterministic proposer answer instead. Setting this
+    # to false means "a model names it or nothing does".
+    fallback_to_deterministic: true
+
 
 # -- Retention triage --------------------------------------------------------
 #
@@ -215,11 +261,18 @@ exclusions:
 
 # -- Visual & document evidence layer ----------------------------------------
 #
-# Perception only. This layer reads native text, runs OCR, and asks a vision
+# Perception. This layer reads native text, runs OCR, and asks a vision
 # backend to describe an image -- and caches the result, content-hash-keyed,
-# in the local ledger. It grants NO authority to rename, move, delete, or
-# ingest anything: nothing under `naming:`, `triage:`, or `automation:` above
-# reads a value produced here, in this phase or any other change in this PR.
+# in the local ledger.
+#
+# Since D-057 exactly one decision reads it: the *filename* proposal under
+# `naming:` above. It still grants no authority to move, delete, or ingest
+# anything, and `triage:` (what belongs in Angel) and `automation:` read
+# nothing produced here -- two files differing only in what was perceived
+# about them get the identical retention decision, which is a test, not a
+# claim. What a proposer does with this evidence is a string, and
+# tools/ingest/naming/policy.py validates it before it can become a filename.
+#
 # Extracted text is stored only on this Mac (never on the T7/Angel catalog)
 # and only up to `max_text_chars`; see the evidence-layer spec for the full
 # privacy posture.
@@ -269,6 +322,42 @@ evidence:
     # endpoint: "http://127.0.0.1:11434"
     # max_image_bytes: 8000000
     # max_prompt_chars: 4000
+    #
+    # How many frames a video is sampled into for vision/OCR, evenly spaced
+    # across its duration (1-12; more catches a subject that only appears
+    # partway through a clip, at the cost of one backend call per frame).
+    video_frame_count: 5
+    # Collapse near-identical sampled frames to one representative before
+    # OCR/vision run, so a static screen recording costs one backend call
+    # rather than `video_frame_count` descriptions of the same picture.
+    frame_dedupe: true
+    # Sample fewer frames from a clip too short to hold that many distinct
+    # moments (under 4s -> at most 2 frames; under 1s -> exactly 1).
+    frame_duration_aware: true
+
+  # Speech transcription: the third perception seam (D-058). Off by default --
+  # it needs the optional whisper.cpp binary (`brew install whisper.cpp`,
+  # providing `whisper-cli`) plus a ggml model file this repository does not
+  # ship. Audio is decoded to an in-memory 16 kHz mono WAV and fed to the
+  # engine on stdin; no temporary file is ever written.
+  transcription:
+    enabled: false
+    # "null" performs no transcription at all and records that it did not.
+    backend: "null"
+    # Opt-in real local speech-to-text:
+    # backend: "whisper-cpp"
+    #
+    # Where the ggml model lives. Leave unset to resolve the sanctioned Angel
+    # whisper cache (`40-ai/model-cache/whisper`) through the AI-storage
+    # helper's `WHISPER_CACHE_DIR`; set it explicitly to name one model file.
+    # model_path: "/Volumes/Angel/40-ai/model-cache/whisper/ggml-base.en.bin"
+    #
+    # Spoken language, or "auto" to let the engine detect it.
+    language: "en"
+    # Only the first N seconds of a long recording are transcribed: this is
+    # evidence about a file, not a subtitle track.
+    max_audio_seconds: 600
+    timeout_seconds: 300
 
 media:
   heic_to_jpeg:
@@ -305,6 +394,8 @@ backup:
   # owner; without excluding it restic exits 3 on every otherwise-healthy run.
   exclude_patterns:
     - "90-system/staging/**"
+    # Volume-local runtime scratch (docs/25). Regenerable by definition.
+    - "90-system/cache/**"
     # Downloadable model weights are regenerated from recorded provider/tag/digest.
     # Manifests and evaluation records under 40-ai remain backed up.
     - "40-ai/model-cache/**"

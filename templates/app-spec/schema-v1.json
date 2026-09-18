@@ -1,0 +1,527 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ai-homelab.internal/app-spec/v1/schema-v1.json",
+  "title": "Angel Application Specification v1",
+  "description": "Canonical, agent-consumable application specification. Small but complete: every addressable element carries an id, cross-references are by id, and every section listed in docs/28-application-spec.md is present, even if minimally populated (e.g. offline.supported: false).",
+  "type": "object",
+  "required": [
+    "spec_version", "app_id", "name", "product_intent", "target_users",
+    "platforms", "workflows", "entities", "relationships", "permissions",
+    "authentication", "authorization", "backend_profile", "persistence",
+    "realtime", "offline", "notifications", "storage_media", "privacy",
+    "analytics", "integrations", "screens", "navigation", "design_system",
+    "apis", "acceptance_criteria", "tests", "deployment", "observability",
+    "migrations", "implementation_constraints", "open_questions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": { "type": "string", "enum": ["1.0"] },
+    "app_id": { "$ref": "#/$defs/id" },
+    "name": { "$ref": "#/$defs/non_empty_string" },
+    "product_intent": {
+      "type": "object",
+      "required": ["problem", "value_proposition", "non_goals"],
+      "additionalProperties": false,
+      "properties": {
+        "problem": { "$ref": "#/$defs/non_empty_string" },
+        "value_proposition": { "$ref": "#/$defs/non_empty_string" },
+        "non_goals": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } }
+      }
+    },
+    "target_users": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/persona" }
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["ios", "android", "web", "macos", "windows", "linux", "cross-platform"]
+      }
+    },
+    "workflows": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/workflow" }
+    },
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/entity" }
+    },
+    "relationships": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/relationship" }
+    },
+    "permissions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/permission" }
+    },
+    "authentication": {
+      "type": "object",
+      "required": ["methods", "mfa_required", "session"],
+      "additionalProperties": false,
+      "properties": {
+        "methods": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["password", "oauth", "magic_link", "sso", "passkey", "device_biometric"] }
+        },
+        "mfa_required": { "type": "boolean" },
+        "session": {
+          "type": "object",
+          "required": ["strategy", "expiry"],
+          "additionalProperties": false,
+          "properties": {
+            "strategy": { "type": "string", "enum": ["jwt", "server_session", "platform_keychain"] },
+            "expiry": { "$ref": "#/$defs/non_empty_string" }
+          }
+        }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "required": ["model", "roles"],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "enum": ["rbac", "abac"] },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/role" }
+        }
+      }
+    },
+    "backend_profile": {
+      "type": "object",
+      "required": ["id", "overrides"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "overrides": { "type": "object" }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "required": ["datastore", "entities"],
+      "additionalProperties": false,
+      "properties": {
+        "datastore": { "type": "string", "enum": ["postgres", "sqlite", "firestore", "dynamodb", "mongodb"] },
+        "entities": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" } }
+      }
+    },
+    "realtime": {
+      "type": "object",
+      "required": ["enabled", "channels"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "channels": { "type": "array", "items": { "$ref": "#/$defs/channel" } }
+      }
+    },
+    "offline": {
+      "type": "object",
+      "required": ["supported", "strategy"],
+      "additionalProperties": false,
+      "properties": {
+        "supported": { "type": "boolean" },
+        "strategy": { "type": "string", "enum": ["none", "read_only_cache", "queued_writes", "full_local_first_sync"] }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "required": ["channels", "triggers"],
+      "additionalProperties": false,
+      "properties": {
+        "channels": { "type": "array", "items": { "type": "string", "enum": ["push", "email", "sms", "in_app"] } },
+        "triggers": { "type": "array", "items": { "$ref": "#/$defs/notification_trigger" } }
+      }
+    },
+    "storage_media": {
+      "type": "object",
+      "required": ["providers", "types"],
+      "additionalProperties": false,
+      "properties": {
+        "providers": { "type": "array", "items": { "type": "string", "enum": ["none", "s3_compatible", "platform_native", "backend_profile_default"] } },
+        "types": { "type": "array", "items": { "type": "string", "enum": ["image", "video", "audio", "document"] } }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "required": ["data_classes"],
+      "additionalProperties": false,
+      "properties": {
+        "data_classes": { "type": "array", "items": { "$ref": "#/$defs/data_class" } }
+      }
+    },
+    "analytics": {
+      "type": "object",
+      "required": ["events"],
+      "additionalProperties": false,
+      "properties": {
+        "events": { "type": "array", "items": { "$ref": "#/$defs/analytics_event" } }
+      }
+    },
+    "integrations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/integration" }
+    },
+    "screens": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/screen" }
+    },
+    "navigation": {
+      "type": "object",
+      "required": ["entry_screen", "edges"],
+      "additionalProperties": false,
+      "properties": {
+        "entry_screen": { "$ref": "#/$defs/id" },
+        "edges": { "type": "array", "items": { "$ref": "#/$defs/nav_edge" } }
+      }
+    },
+    "design_system": {
+      "type": "object",
+      "required": ["stack", "library_ref", "tokens"],
+      "additionalProperties": false,
+      "properties": {
+        "stack": { "$ref": "#/$defs/non_empty_string" },
+        "library_ref": { "$ref": "#/$defs/non_empty_string" },
+        "tokens": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" }, "minItems": 1 }
+      }
+    },
+    "apis": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/api" }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/acceptance_criterion" }
+    },
+    "tests": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/test_plan_item" }
+    },
+    "deployment": {
+      "type": "object",
+      "required": ["environments", "ci", "secrets_policy"],
+      "additionalProperties": false,
+      "properties": {
+        "environments": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/environment" } },
+        "ci": { "$ref": "#/$defs/non_empty_string" },
+        "secrets_policy": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "required": ["logging", "metrics", "alerts"],
+      "additionalProperties": false,
+      "properties": {
+        "logging": { "$ref": "#/$defs/non_empty_string" },
+        "metrics": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } },
+        "alerts": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } }
+      }
+    },
+    "migrations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/migration" }
+    },
+    "implementation_constraints": {
+      "type": "object",
+      "required": ["stack_pins", "forbidden_dependencies", "budgets"],
+      "additionalProperties": false,
+      "properties": {
+        "stack_pins": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } },
+        "forbidden_dependencies": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } },
+        "budgets": {
+          "type": "object",
+          "required": ["max_app_size_mb", "max_p95_latency_ms"],
+          "additionalProperties": false,
+          "properties": {
+            "max_app_size_mb": { "type": "number" },
+            "max_p95_latency_ms": { "type": "number" }
+          }
+        }
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/open_question" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+    "non_empty_string": { "type": "string", "pattern": "\\S" },
+
+    "persona": {
+      "type": "object",
+      "required": ["id", "name", "description", "needs"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "description": { "$ref": "#/$defs/non_empty_string" },
+        "needs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/non_empty_string" } }
+      }
+    },
+
+    "workflow_step": {
+      "type": "object",
+      "required": ["id", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "description": { "$ref": "#/$defs/non_empty_string" },
+        "screen_ref": { "$ref": "#/$defs/id" }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "required": ["id", "name", "actor", "goal", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "actor": { "$ref": "#/$defs/id" },
+        "goal": { "$ref": "#/$defs/non_empty_string" },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/workflow_step" } }
+      }
+    },
+
+    "entity_field": {
+      "type": "object",
+      "required": ["name", "type", "required", "pii", "phi"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "type": { "type": "string", "enum": ["string", "integer", "number", "boolean", "date", "datetime", "uuid", "enum", "array", "object", "reference"] },
+        "required": { "type": "boolean" },
+        "pii": { "type": "boolean" },
+        "phi": { "type": "boolean" },
+        "description": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "required": ["id", "name", "fields", "identifiers"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/entity_field" } },
+        "identifiers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/non_empty_string" } }
+      }
+    },
+
+    "relationship": {
+      "type": "object",
+      "required": ["id", "from_entity", "to_entity", "type", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "from_entity": { "$ref": "#/$defs/id" },
+        "to_entity": { "$ref": "#/$defs/id" },
+        "type": { "type": "string", "enum": ["one_to_one", "one_to_many", "many_to_many"] },
+        "description": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "permission": {
+      "type": "object",
+      "required": ["id", "role", "entity", "actions"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/id" },
+        "entity": { "$ref": "#/$defs/id" },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["create", "read", "update", "delete", "list", "approve", "export"] }
+        }
+      }
+    },
+
+    "role": {
+      "type": "object",
+      "required": ["id", "name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "description": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "channel": {
+      "type": "object",
+      "required": ["id", "name", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "kind": { "type": "string", "enum": ["broadcast", "presence", "private"] }
+      }
+    },
+
+    "notification_trigger": {
+      "type": "object",
+      "required": ["id", "event", "channel", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "event": { "$ref": "#/$defs/non_empty_string" },
+        "channel": { "type": "string", "enum": ["push", "email", "sms", "in_app"] },
+        "description": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "data_class": {
+      "type": "object",
+      "required": ["id", "entity", "field", "classification", "pii", "phi", "retention"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "entity": { "$ref": "#/$defs/id" },
+        "field": { "$ref": "#/$defs/non_empty_string" },
+        "classification": { "type": "string", "enum": ["public", "internal", "confidential", "restricted"] },
+        "pii": { "type": "boolean" },
+        "phi": { "type": "boolean" },
+        "retention": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "analytics_event": {
+      "type": "object",
+      "required": ["id", "name", "trigger", "properties"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "trigger": { "$ref": "#/$defs/non_empty_string" },
+        "properties": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } }
+      }
+    },
+
+    "integration": {
+      "type": "object",
+      "required": ["id", "provider", "purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "provider": { "$ref": "#/$defs/non_empty_string" },
+        "purpose": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "screen": {
+      "type": "object",
+      "required": ["id", "name", "workflow_refs", "entities_shown"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "workflow_refs": { "type": "array", "items": { "$ref": "#/$defs/id" } },
+        "entities_shown": { "type": "array", "items": { "$ref": "#/$defs/id" } }
+      }
+    },
+
+    "nav_edge": {
+      "type": "object",
+      "required": ["from", "to", "trigger"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "$ref": "#/$defs/id" },
+        "to": { "$ref": "#/$defs/id" },
+        "trigger": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "api": {
+      "type": "object",
+      "required": ["id", "name", "kind", "request_shape", "response_shape"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "kind": { "type": "string", "enum": ["rest_endpoint", "callable_function", "graphql_operation", "websocket_message"] },
+        "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+        "path": { "$ref": "#/$defs/non_empty_string" },
+        "request_shape": { "type": "array", "items": { "$ref": "#/$defs/api_field" } },
+        "response_shape": { "type": "array", "items": { "$ref": "#/$defs/api_field" } }
+      }
+    },
+    "api_field": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "type": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "acceptance_criterion": {
+      "type": "object",
+      "required": ["id", "workflow_ref", "given", "when", "then"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "workflow_ref": { "$ref": "#/$defs/id" },
+        "given": { "$ref": "#/$defs/non_empty_string" },
+        "when": { "$ref": "#/$defs/non_empty_string" },
+        "then": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "test_plan_item": {
+      "type": "object",
+      "required": ["id", "type", "acceptance_criteria_refs", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "type": "string", "enum": ["unit", "integration", "e2e"] },
+        "acceptance_criteria_refs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" } },
+        "description": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "environment": {
+      "type": "object",
+      "required": ["id", "name", "purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "purpose": { "type": "string", "enum": ["development", "staging", "production"] }
+      }
+    },
+
+    "migration": {
+      "type": "object",
+      "required": ["id", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "description": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+
+    "open_question": {
+      "type": "object",
+      "required": ["id", "question", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "question": { "$ref": "#/$defs/non_empty_string" },
+        "owner": { "$ref": "#/$defs/non_empty_string" }
+      }
+    }
+  }
+}

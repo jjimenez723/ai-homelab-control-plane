@@ -9,10 +9,17 @@ SharedPathTests` proves a suite runner and a production call produce
 byte-identical rendered text for the same input, which is the only way "the
 same prompt" is more than an assertion in a docstring.
 
-There is no production caller of `classification`/`routing`/`naming.semantic`
-yet (D-051: "still never exercised by a production caller") -- this module
-exists so that when one is built, it has no reason to duplicate the suite
-runners' prompt construction, not because a caller exists today.
+`naming.semantic` now has a real production caller:
+`tools/ingest/naming/semantic.py::SemanticProposer` renders through this
+function when `naming.proposer: "semantic"` is configured (D-057), which
+retires D-051's "still never exercised by a production caller" for that task
+class and makes the shared-path claim above load-bearing rather than
+aspirational -- a change to the prompt's text now changes both what the suite
+measures and what production sends, which is the entire point.
+
+`classification` and `routing` still have no production caller. That remains a
+true statement rather than an oversight: the routing work they belong to is
+Gate-2/attended-autonomous (D-051), not the file-intelligence pipeline.
 """
 
 from __future__ import annotations

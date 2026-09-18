@@ -1,0 +1,180 @@
+# Backend profile: social behavior-change apps (e.g. quitting smoking/vaping,
+# habit trackers, fitness streaks) with social accountability groups and push
+# nudges. See docs/27-backend-baselines.md for the sourced evaluation behind
+# every product choice below, and templates/backend-profiles/index.yaml for
+# the stable id list.
+
+profile_id: social-behavior-change
+version: 1.0.0
+summary: >
+  Auth-gated single-user profile with daily streak/check-in state, small
+  social accountability groups (5-50 members), and scheduled push nudges.
+  Individual health-behavior data (e.g. "days smoke-free") is sensitive but
+  is app-self-reported wellness data, not clinician-generated PHI -- so this
+  profile stays on standard Firebase rather than paying the Identity
+  Platform/BAA cost floor the nursing profile requires. Revisit that choice
+  immediately if the product adds clinician-facing data, insurance
+  integration, or any covered-entity relationship.
+
+fit:
+  application_traits:
+    - single-user-primary with an optional social layer (groups, not a full social graph)
+    - daily/weekly cadence, not real-time (streaks, check-ins, milestones)
+    - read-heavy on own history, write-light (a handful of writes/day/user)
+    - push notifications are a core retention mechanic, not an afterthought
+    - moderate sensitivity: self-reported health-adjacent data, not clinical PHI
+    - mobile-first (iOS/Android), web companion optional
+  scale_assumptions:
+    initial_maus: "1,000-50,000"
+    growth_posture: "viral/social-loop growth possible; design for MAU spikes, not for millions on day one"
+    peak_concurrency: low-moderate; no hard realtime latency requirement
+
+services:
+  auth:
+    chosen: Firebase Authentication (email/password + Apple/Google sign-in)
+    alternatives: [Supabase Auth, Identity Platform]
+    rationale: >
+      Standard consumer sign-in with no enterprise SSO/MFA requirement;
+      Firebase Auth is free for these providers and integrates directly with
+      Firestore Security Rules for group-membership checks.
+    cost_driver: SMS phone-auth verification volume, if phone sign-in is offered
+    quota_watch_outs:
+      - custom claims for group-admin roles only propagate on next ID-token refresh
+      - anonymous-auth-to-permanent-account linking must be designed up front, not bolted on
+  primary_datastore:
+    chosen: Cloud Firestore (regional, single region near primary user base)
+    alternatives: [Supabase/Postgres]
+    rationale: >
+      Per-user streak/check-in documents plus small group subcollections map
+      cleanly to Firestore's document model; native mobile offline cache
+      matters for a habit-tracking app used in low-connectivity moments
+      (e.g. a craving logged on a subway).
+    cost_driver: per-read pricing as group activity feeds (comments/reactions) grow chatty
+    quota_watch_outs:
+      - group activity feeds are a classic unbounded-listener cost leak; paginate and limit(N)
+      - do not build a full social graph in Firestore; this profile is small bounded groups, not a feed platform
+  compute:
+    chosen: Cloud Functions (2nd gen)
+    alternatives: [Cloud Run]
+    rationale: >
+      Streak-reset-at-midnight, milestone-detection, and nudge-fanout logic
+      are small event-driven jobs; no need for Cloud Run's custom-runtime
+      flexibility at this scale.
+    cost_driver: scheduled function invocation frequency (per-timezone midnight jobs multiply invocation count)
+    quota_watch_outs:
+      - a Firestore-triggered function that writes back to the same document risks an infinite-loop trigger bill
+  scheduling:
+    chosen: Cloud Scheduler (drives the daily streak-check Cloud Function)
+    alternatives: []
+    rationale: per-job billing is trivial at this scale; simplest correct primitive for "run this once a day"
+    cost_driver: negligible at this volume
+    quota_watch_outs: []
+  abuse_protection:
+    chosen: App Check (Play Integrity / App Attest, reCAPTCHA Enterprise for any web surface)
+    alternatives: []
+    rationale: prevents scripted account-farming that would distort group leaderboards/streak integrity
+    cost_driver: reCAPTCHA Enterprise assessments beyond the 10,000/month free quota, web surface only
+    quota_watch_outs:
+      - do not enable enforcement before a client build that sends App Check tokens has shipped
+
+data_model_guidance: >
+  Denormalize aggressively: store each user's current streak count and
+  last-check-in-date directly on their profile document rather than
+  recomputing from a check-in history collection on every read. Model a
+  group as `groups/{groupId}` with a bounded `members` subcollection (cap
+  membership, e.g. 50) and a separate `groups/{groupId}/activity` feed
+  collection queried with `limit()` and pagination, never a full listener on
+  an unbounded feed. Store PII (real name, email) only on the user's own
+  document, never denormalized into group-visible documents beyond a
+  display name the user explicitly sets.
+
+security_rules_posture: >
+  Firestore Rules: a user may read/write only their own top-level profile
+  and check-in documents (`request.auth.uid == resource.data.ownerId`).
+  Group membership is checked via a denormalized `members` map/array on the
+  group document (avoid `exists()`/`get()` calls inside rules where
+  possible -- each is a billed read and adds rule-evaluation latency).
+  Group-admin actions (remove a member, delete the group) require a custom
+  claim or an explicit `adminUids` array on the group document, re-validated
+  server-side in a Cloud Function for anything destructive.
+
+offline: >
+  Firestore's native mobile offline persistence covers check-in writes made
+  without connectivity; queue and replay on reconnect. Streak-day
+  calculation must be done with the device's local date at write time and
+  reconciled server-side (a Cloud Function) to prevent a user gaming a
+  streak by changing device time -- do not trust client-reported streak
+  counts as authoritative without server-side reconciliation.
+
+realtime: >
+  Not latency-critical. Firestore's `onSnapshot` listeners are sufficient
+  for "a group member just checked in" style updates; no need for Realtime
+  Database's lower-latency tier at this traffic profile.
+
+notifications: >
+  FCM (HTTP v1 API only -- the legacy API was retired in 2024) for daily
+  check-in reminders, milestone celebrations, and group-accountability nudges
+  ("your buddy is on a 5-day streak"). Schedule via Cloud Scheduler ->
+  Cloud Function -> FCM send, batched per-timezone. Handle token invalidation
+  and rotation; do not assume a registration token is permanent.
+
+storage_media: >
+  Cloud Storage for Firebase for optional profile photos and milestone
+  celebration images/badges. Keep per-object Security Rules scoped to
+  `request.auth.uid` matching the owning user's storage path; enforce App
+  Check on Storage to prevent scripted upload abuse.
+
+privacy_compliance: >
+  Treat streak/check-in history as sensitive personal data (self-reported
+  health-adjacent behavior) even though it is not clinical PHI: apply
+  data-minimization (do not collect more than the habit-tracking loop
+  needs), give users export/delete controls, and disclose social-group
+  visibility explicitly (a user should know exactly what a group member can
+  see about them). If the product later adds any clinician, insurer, or
+  employer-wellness-program integration, re-evaluate against the HIPAA
+  posture in `nursing-shift-productivity.yaml` and docs/27 §12 -- standard
+  Firebase Auth and Realtime Database are not BAA-covered.
+
+analytics: >
+  Google Analytics for Firebase for funnel/retention analysis, exported to
+  BigQuery on the Blaze plan for cohort/retention SQL queries (e.g.
+  streak-survival curves by acquisition cohort). Avoid sending raw
+  check-in content to analytics events; log behavioral events (checked_in,
+  streak_milestone_reached), not free-text.
+
+testing_emulators: >
+  Firebase Local Emulator Suite (Firestore + Auth + Functions + Storage) for
+  the full local dev/test loop, plus `@firebase/rules-unit-testing` for
+  Security Rules unit tests covering own-data and group-membership access
+  paths. FCM send has no emulator; mock the Admin SDK send call in tests.
+
+deployment: >
+  Firebase Hosting for any marketing/web companion surface; mobile apps
+  ship through App Store/Play Store as normal. Use separate Firebase
+  projects for dev/staging/production with distinct App Check
+  configurations so debug tokens never leak into production enforcement.
+
+observability: >
+  Cloud Functions structured logging + Cloud Monitoring alerting on function
+  error rate and the scheduled streak-check job's completion; Crashlytics
+  for mobile client crash reporting; a simple Cloud Monitoring budget alert
+  on Firestore read volume to catch a runaway unbounded-listener bug early.
+
+known_pitfalls:
+  - "Unbounded group activity-feed listeners are the #1 Firestore cost leak in this app shape -- always paginate/limit."
+  - "Client-reported streak counts are trivially gameable via device clock changes; reconcile server-side."
+  - "Legacy FCM HTTP API code samples (pre-2024) are dead on arrival -- verify HTTP v1 usage."
+  - "Enabling App Check enforcement before the client ships tokens breaks all production traffic instantly."
+  - "Treating self-reported health-adjacent data as low-sensitivity 'just app data' invites a privacy-review surprise later."
+
+references:
+  - url: "https://firebase.google.com/pricing"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/firestore/locations"
+    accessed: "2026-09-17"
+  - url: "https://customer.io/learn/mobile-marketing/fcm-deprecation"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/app-check/web/recaptcha-enterprise-provider"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/emulator-suite"
+    accessed: "2026-09-17"

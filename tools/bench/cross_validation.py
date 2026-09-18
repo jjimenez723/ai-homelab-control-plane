@@ -39,6 +39,7 @@ candidate to *replace* this module's role, not `tools/bench/acb_v1/*`'s.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from pathlib import PurePosixPath
 
@@ -61,14 +62,70 @@ def cross_verify_routing_classification(task: SuiteTask, output: object) -> bool
     """Independent re-check: exact match against the expected label.
 
     Written directly against `task.expected["label"]` with no import of
-    `tools.bench.acb_v1.routing_classification`.
+    `tools.bench.acb_v1.routing_classification`. Suite 1.1.0 separated format
+    compliance from label correctness in the *reported detail* but did not
+    loosen the verdict: one bare label, exactly, is still what passes -- so
+    this side stays a plain equality check, which is the point of an
+    independent implementation (if the primary oracle had quietly started
+    accepting decorated answers, these two would disagree).
     """
     if not isinstance(output, str):
         return False
     return output.strip().lower() == str(task.expected["label"]).strip().lower()
 
 
-_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_")
+# Suite 1.1.0 scores a date-shaped token anywhere in the stem, not only a
+# leading prefix. Written independently here: a plain scan for the three
+# shapes, with a calendar check, rather than the primary oracle's pattern
+# tuple.
+_DATE_RE = re.compile(r"(?<!\d)(\d{4})[-_]?(\d{2})[-_]?(\d{2})(?!\d)")
+
+_SUFFIXES = ("ings", "ing", "ies", "es", "ed", "s")
+
+# Words that say nothing about a file's subject, for the evidence-grounding
+# rule suite 1.1.0 added for ambiguous assets. Written here independently of
+# the oracle's own list.
+_FUNCTION_WORDS = frozenset({
+    "about", "also", "and", "any", "are", "been", "beyond", "both", "but",
+    "clear", "contains", "does", "each", "either", "from", "have", "into",
+    "only", "other", "over", "page", "part", "reads", "resembles", "short",
+    "some", "such", "than", "that", "their", "them", "then", "there", "these",
+    "this", "three", "through", "times", "very", "what", "when", "which",
+    "while", "with", "without", "would",
+})
+
+
+def _word_family(word: str) -> str:
+    """Crude independent stemmer; different code, same intent as the oracle's."""
+    lowered = word.lower()
+    for suffix in _SUFFIXES:
+        if lowered.endswith(suffix) and len(lowered) - len(suffix) >= 4:
+            return lowered[: -len(suffix)]
+    return lowered
+
+
+def _same_family(left: str, right: str) -> bool:
+    if left == right or _word_family(left) == _word_family(right):
+        return True
+    shared = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        shared += 1
+    return shared >= 7
+
+
+def _dates_in(text: str) -> set[str]:
+    found: set[str] = set()
+    for match in _DATE_RE.finditer(text):
+        year, month, day = (int(match.group(i)) for i in (1, 2, 3))
+        if not 1900 <= year <= 2099:
+            continue
+        try:
+            found.add(dt.date(year, month, day).isoformat())
+        except ValueError:
+            continue
+    return found
 
 
 def cross_verify_semantic_naming(task: SuiteTask, proposed: object) -> bool:
@@ -101,20 +158,39 @@ def cross_verify_semantic_naming(task: SuiteTask, proposed: object) -> bool:
 
     stem = name.rsplit(".", 1)[0] if "." in name else name
     tokens = _tokens(stem)
+    squashed = re.sub(r"[^a-z0-9]+", "", stem.lower())
+
+    def satisfied(word: str) -> bool:
+        lowered_word = word.lower()
+        if any(_same_family(lowered_word, token) for token in tokens):
+            return True
+        flat = re.sub(r"[^a-z0-9]+", "", lowered_word)
+        return len(flat) >= 6 and flat in squashed
 
     for concept in expected.get("required_concept_sets", ()):
-        if not tokens.intersection(word.lower() for word in concept):
+        if not any(satisfied(word) for word in concept):
+            return False
+
+    minimum = int(expected.get("min_evidence_words", 0) or 0)
+    if minimum:
+        evidence = str(task.input.get("evidence_text", "")).lower()
+        words = {
+            piece for piece in re.split(r"[^a-z0-9]+", evidence)
+            if len(piece) >= 4 and not piece.isdigit() and piece not in _FUNCTION_WORDS
+        }
+        if sum(1 for word in words if satisfied(word)) < minimum:
             return False
 
     for word in expected.get("forbidden_tokens", ()):
+        # Exact, unstemmed -- widening a prohibition would fail correct names.
         if word.lower() in tokens:
             return False
 
-    match = _DATE_RE.match(name)
-    allowed_dates = expected.get("allowed_dates", ())
-    if match and match.group(1) not in allowed_dates:
+    allowed_dates = set(expected.get("allowed_dates", ()))
+    found = _dates_in(stem)
+    if found - allowed_dates:
         return False
-    if not match and expected.get("require_date", False):
+    if not found and expected.get("require_date", False):
         return False
 
     lowered = name.lower()

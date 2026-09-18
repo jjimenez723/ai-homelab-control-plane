@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Thin wrapper around `python -m tools.campaign.cli` -- the deterministic,
 # unattended evaluation-campaign command. See docs/22-evaluation-campaign.md.
+#
+# `naming-lab` is dispatched separately to `tools.naming_lab.cli`, which
+# launches the local-only, interactive Streamlit Naming Lab UI
+# (docs/23-naming-lab.md) -- a different kind of command from the rest of
+# this script, so `tools/campaign/cli.py` stays scoped to unattended
+# campaigns only.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,6 +16,10 @@ if [[ -x "$ROOT_DIR/.venv/bin/python3" ]]; then
   PYTHON="$ROOT_DIR/.venv/bin/python3"
 else
   PYTHON="python3"
+fi
+
+if [[ "${1:-}" == "naming-lab" ]]; then
+  exec "$PYTHON" -m tools.naming_lab.cli "$@"
 fi
 
 exec "$PYTHON" -m tools.campaign.cli "$@"

@@ -1,12 +1,15 @@
 """Optional, offline OCR via the `tesseract` CLI.
 
-THE ONLY MODULE IN THE EVIDENCE PACKAGE PERMITTED TO USE `subprocess` --
-there is a test asserting exactly that. Every other module under
-`tools/ingest/evidence/` must stay free of processes and sockets; this one
-module is where "run an external offline binary, with a hard timeout and no
-shell" is allowed to live, because tesseract is the only OCR engine this
-project ships that needs no Python package, only a system binary, and
-confining the exception to one file keeps it auditable.
+One of exactly two modules in the evidence package permitted to use
+`subprocess` -- `EVIDENCE_SUBPROCESS_JUSTIFICATIONS` in
+`tests/ingest/test_mutation_authority.py` names both this module and
+`backends/ffmpeg_video.py`, and fails the build for any third. Every other
+module under `tools/ingest/evidence/` must stay free of processes and
+sockets; these two are where "run an external offline binary, with a hard
+timeout and no shell" is allowed to live, because tesseract is the only OCR
+engine this project ships that needs no Python package, only a system
+binary, and confining the exception to justified, reviewed files keeps it
+auditable.
 
 Detection follows `media/probe.py`'s pattern for optional tooling
 (`ffprobe_available`/`_probe_av`): `tesseract_version()` is checked once per

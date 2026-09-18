@@ -163,21 +163,35 @@ context-pack composition, deterministic: identical inputs render
 byte-identical text and SHA-256), `tools/prompts/adapters.py` (the Ollama
 runtime adapter, kept as a named seam separate from semantic content), and
 `tools/prompts/library.py` (the two Gate-2 prompts, `acb-v1-routing-
-classification` and `acb-v1-semantic-naming`, both `version: "1.0.0"`).
+classification` and `acb-v1-semantic-naming`, both `version: "1.0.0"` as of
+that pass; both now have a measured, frozen `1.1.0` and several `draft`
+experiment arms -- section 8).
 
 `tools/prompts/production.py::render_for_task_class` is the one path both
-an ACB-v1 suite runner and a future production caller render through —
-proven identical by `tests/test_prompt_registry.py::SharedPathTests`, not
-merely asserted. There is still no production caller of
-`classification`/`routing`/`naming.semantic` (D-051), so this seam is
-currently exercised only by evaluation; it exists so a production caller,
-when built, has no reason to duplicate prompt construction.
+an ACB-v1 suite runner and a production caller render through — proven
+identical by `tests/test_prompt_registry.py::SharedPathTests`, not merely
+asserted.
+
+**`naming.semantic` now has that production caller**:
+`tools/ingest/naming/semantic.py::SemanticProposer`, opt-in via
+`naming.proposer: "semantic"` (D-057). That retires D-051's "still never
+exercised by a production caller" for this task class and makes the shared
+path load-bearing rather than aspirational — editing
+`library.py::SEMANTIC_NAMING_V1` now changes both what the Gate-2 suite
+measures and what the file-intelligence pipeline sends, which is exactly the
+property D-041 exists to guarantee. Bumping that prompt's version therefore
+also reopens every naming question the previous version declined, because
+`SemanticProposer.model_version` folds in the proposer version that the
+ledger's "already answered" check keys on.
+
+`classification` and `routing` still have no production caller — they belong
+to the attended-autonomous routing work (D-051), not to file intelligence.
 
 **The canonical/production track split (section 5) is not built.** Only one
 track exists today — the canonical one, a simple closed-label/property
 contract applied identically to every candidate, with no few-shot and no
-per-model tuning. A production-optimized track is future work once a
-production caller and real measured evidence exist to justify one.
+per-model tuning. A production-optimized track is future work once real
+measured evidence from that production caller justifies one.
 
 Existing evaluation prompts for the Legacy 20
 (`tools/bench/harness.py:benchmark_prompt()`) are **unchanged by this
@@ -211,3 +225,113 @@ leak, from the *closed label set*, which is the output contract. A future
 renderer should carry the same guard: telling a model which labels exist is
 not telling it which one applies, but showing it a solved instance of the
 item being scored is.
+
+## 8. The 1.1.0 line: a measured prompt experiment (D-059, D-060, 2026-09-18)
+
+Sections 5 and 6 describe the discipline; this section is what happened the
+first time it was actually exercised against real models.
+
+### 8.1 Why there was a second version at all
+
+`gate2-validation-001` measured both prompts at `1.0.0` and produced numbers
+well under Gate 2's thresholds. Auditing the whole chain first
+(`docs/30-gate2-naming-audit.md`) found two defects in the *prompts*,
+distinct from anything about the models:
+
+* **The naming output contract contradicted the oracle.** It called the
+  leading ISO date "optional" while 14 of 42 items required one. A model could
+  obey the published contract and be deterministically failed — §4's "the same
+  prompt definition is evaluated and deployed" is worth nothing if the prompt
+  and the grader disagree about what a correct answer is.
+* **The routing output contract published fifteen label names and defined
+  none of them.** `routing` versus `classification`, and `unsupported`
+  ("cannot be done at all") versus `escalation_required` ("possible but
+  unauthorised"), were left for the model to guess from the label spellings.
+
+Both are prompt bugs, and both are the kind that a single aggregate pass rate
+hides completely.
+
+### 8.2 The experiment, on the dev split only
+
+Eight draft versions, each differing from its predecessor in exactly one
+thing, all measured on the **dev** split of suite 1.1.0 at 3 samples per item
+(`config/campaigns/gate2-dev.yaml`, `gate2-dev-naming.yaml`,
+`gate2-dev-reasoning.yaml`). Every arm's prompt id, version, content
+fingerprint, generation settings, raw output and verdict is in the append-only
+store. Dev pass rates:
+
+| Prompt | One change from previous | `qwen3.5:4b` | `qwen3.5:9b` |
+|---|---|---:|---:|
+| routing `1.0.0` | (baseline) | 0.474 | 0.526 |
+| routing `1.1.0-a` | + label-by-label definitions | 0.684 | 0.895 |
+| routing `1.1.0-b` | + precedence rules for the overlapping pairs | 0.684 | **0.947** |
+| naming `1.0.0` | (baseline) | 0.714 | 0.643 |
+| naming `1.1.0-a` | + the date rule the oracle enforces | 0.643 | 0.429 |
+| naming `1.1.0-b` | + keep-the-extension rule | 0.714 | 0.429 |
+| naming `1.1.0-c` | + guidance for unidentifiable evidence | 0.643 | 0.643 |
+| naming `1.1.0-d` | + three non-suite few-shot examples | **0.786** | **0.786** |
+| naming `1.1.0-e` | `1.0.0` with only the word "optional" replaced | 0.643 | 0.571 |
+
+The naming line is the result worth keeping. Stating the date rule *at length*
+made `qwen3.5:9b` substantially worse, not better: it began echoing the
+original filename back (`scan0007.pdf`, `Book3.xlsx`) and attaching extensions
+with an underscore (`..._HEIC`). The minimal restatement (`-e`) did not recover
+it either. What recovered and then improved it was **showing** the output shape
+rather than describing it. Three sentences of extra instruction cost this model
+more than the ambiguity they removed — a measured fact about instruction
+density on a 9B model, not a general law, and exactly the kind of thing §5's
+"two tracks, never merged into one number" exists to let you see.
+
+### 8.3 Few-shot examples, and the overfitting rule
+
+`1.1.0-d` and the frozen `1.1.0` carry three worked examples and declare
+`example_set_version: "naming-nonsuite-2026-09-18"`. They were written from
+scratch for the prompt: no entity, vendor, client, date or wording is shared
+with any suite item in any split. §6's rule is enforced three ways rather than
+asserted once:
+
+* `tools.campaign.runner.check_prompt_contamination` runs the D-052 run-time
+  guard (`assert_no_holdout_leak`) over the exact prompt versions a campaign
+  will send — on `--dry-run` too, and **before** any model is staged or
+  loaded. Previously that guard only ever ran in tests, and only against
+  whichever version happened to be `active`; a campaign may pin any version,
+  including a draft carrying examples, which is precisely the case that
+  needed covering.
+* `tools/bench/gate2_audit.py` checks in both directions: no suite item's text
+  in the prompt, and no item's expected answer (an allowed date, a scored
+  entity name) in the prompt.
+* Development used the dev split only. Validation was run once, after the
+  freeze, and nothing measured there was used to change a prompt.
+
+### 8.4 The freeze
+
+The winning arms' content is published under new version strings —
+`acb-v1-routing-classification@1.1.0` (from `1.1.0-b`) and
+`acb-v1-semantic-naming@1.1.0` (from `1.1.0-d`) — each `status: active`, each
+with its own `LOCKED_FINGERPRINTS` row. An arm and the frozen version are
+separate immutable identities even where their text is identical, so a record
+from the experiment can never be mistaken for a record from the frozen
+configuration.
+
+`1.0.0` is untouched and stays in the registry as `deprecated`: every record
+`gate2-validation-001` produced still resolves to exactly the text that
+produced it. `status` is deliberately excluded from the content fingerprint —
+promoting or deprecating is a lifecycle change, not a change of meaning.
+
+### 8.5 The prompt effect, measured on validation
+
+On the **validation** split, with the same model, the same suite version and
+the same sampling, prompt 1.1.0 versus 1.0.0 on `qwen3.5:9b`:
+
+| Suite | Prompt 1.0.0 | Prompt 1.1.0 |
+|---|---:|---:|
+| `acb-v1/routing-classification` | 0.632 [0.531, 0.722] | **1.000** [0.961, 1.000] |
+| `acb-v1/semantic-naming` | 0.714 [0.599, 0.807] | **0.929** [0.843, 0.969] |
+
+That control arm is in `config/campaigns/gate2-validation-002.yaml` on purpose.
+Without it, the prompt's contribution would have had to be inferred from the
+dev split, and §4's claim that a prompt version is part of a capability claim
+would have rested on an inference rather than a measurement. It is also why a
+certification pins `prompt_version` (D-051): on this evidence, the same weights
+are a qualifying configuration or a failing one depending on which prompt
+version they are asked with.

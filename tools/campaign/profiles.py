@@ -12,6 +12,11 @@ PROFILES_DIR = Path(__file__).resolve().parents[2] / "config" / "campaigns"
 
 PROFILES: dict[str, str] = {
     "gate2": "gate2.yaml",
+    "gate2-dev": "gate2-dev.yaml",
+    "gate2-dev-naming": "gate2-dev-naming.yaml",
+    "gate2-dev-reasoning": "gate2-dev-reasoning.yaml",
+    "gate2-validation-002": "gate2-validation-002.yaml",
+    "gate2-holdout": "gate2-holdout.yaml",
 }
 
 

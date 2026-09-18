@@ -86,8 +86,11 @@ def build_provider(candidate: Candidate) -> OllamaTextProvider:
         num_predict=int(sampling.get("num_predict", OllamaTextProvider.DEFAULT_NUM_PREDICT)),
         num_ctx=sampling.get("num_ctx"),
         seed=base_seed,
-        think=bool(sampling.get("think", False)),
+        # Passed through, not coerced: Ollama's effort levels ("low"/"medium"/
+        # "high") are meaningful for models that cannot disable reasoning.
+        think=sampling.get("think", False),
         temperature=float(sampling.get("temperature", 0.0)),
+        reasoning=candidate.reasoning,
     )
 
 
@@ -169,6 +172,26 @@ def execute_work_unit(unit: WorkUnit, provider: OllamaTextProvider) -> ResultRec
         # explicit stop reason. New Ollama records carry done_reason.
         truncated = bool(output_tokens is not None and output_tokens >= num_predict)
 
+    # Reasoning channel (D-059). Only `output` is scored; `thinking` is
+    # recorded so that "spent the whole budget reasoning" is a distinguishable
+    # fact rather than an unexplained empty answer.
+    thinking_chars = response.get("thinking_chars") if isinstance(response, dict) else None
+    thinking_chars = int(thinking_chars) if isinstance(thinking_chars, int) else None
+    reasoning_detail: dict[str, Any] = {}
+    if thinking_chars:
+        reasoning_detail["thinking_chars"] = thinking_chars
+        reasoning_detail["answer_empty_after_reasoning"] = not output.strip()
+    if isinstance(response, dict) and response.get("think_requested") is not None:
+        reasoning_detail["think_requested"] = response.get("think_requested")
+    if isinstance(response, dict) and response.get("reasoning_declared"):
+        reasoning_detail["reasoning_declared"] = True
+    if thinking_chars and not output.strip() and finish_reason is None:
+        # Reasoning ran, the answer channel is empty, and the runtime told us
+        # nothing about why: the budget was spent thinking. A runtime that
+        # *does* report `stop` with an empty answer is a different fact (the
+        # model declined to answer) and is left as an invalid output.
+        truncated = True
+
     try:
         verify = lookup_verifier(unit.suite_id)
         passed, detail = verify(unit.item, output)
@@ -179,15 +202,24 @@ def execute_work_unit(unit: WorkUnit, provider: OllamaTextProvider) -> ResultRec
                             raw_output=output, finish_reason=finish_reason,
                             error=f"verifier raised: {type(exc).__name__}: {exc}")
 
-    if not passed and isinstance(detail, dict) and detail.get("failure") == "non_string_output":
-        status = "invalid_output"
-    elif not passed and truncated:
+    failure = detail.get("failure") if isinstance(detail, dict) else None
+    if not passed and truncated:
+        # Truncation is a first-class status and outranks the verifier's own
+        # reason for rejecting a half-written answer (D-052, D-059): a model
+        # that never finished was not measured on the capability.
         status = "truncated"
+    elif not passed and failure in {"non_string_output", "empty_output"}:
+        status = "invalid_output"
     elif passed:
         status = "verified_pass"
     else:
         status = "verified_fail"
 
-    return ResultRecord(**common, status=status, passed=passed, detail=dict(detail or {}),
+    merged_detail = dict(detail or {})
+    if reasoning_detail:
+        merged_detail["reasoning"] = reasoning_detail
+
+    return ResultRecord(**common, status=status, passed=passed, detail=merged_detail,
                         wall_seconds=wall, input_tokens=input_tokens, output_tokens=output_tokens,
-                        raw_output=output, finish_reason=finish_reason, error=None)
+                        raw_output=output, finish_reason=finish_reason, error=None,
+                        thinking_chars=thinking_chars, num_predict=num_predict)

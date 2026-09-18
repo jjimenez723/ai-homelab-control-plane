@@ -41,11 +41,23 @@ from tools.ingest.media.probe import (
 )
 
 # Media kinds that never carry anything worth perceiving: an archive's
-# interesting facts are its listing (already in `media_metadata`), an
-# installer is a binary blob, and audio/video get no evidence backend in this
-# phase. Grouped under one rule id because the reason -- "opaque to this
-# layer" -- is the same for all of them.
-_OPAQUE_MEDIA_KINDS = frozenset({MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_VIDEO, MEDIA_OTHER})
+# interesting facts are its listing (already in `media_metadata`) and an
+# installer is a binary blob. Grouped under one rule id because the reason --
+# "opaque to this layer" -- is the same for both. Video left this set with
+# `r14-video-frame`, and audio left it with `r16-audio-transcript` (D-058):
+# a recording's speech is perceivable evidence, so "opaque" was a statement
+# about the tooling that shipped, not about the bytes.
+_OPAQUE_MEDIA_KINDS = frozenset({MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_OTHER})
+
+# Spreadsheet, presentation, and delimited-text extensions that
+# `tools/ingest/evidence/office.py` reads natively (D-029's native-text
+# extractor, extended -- see docs/17). Checked by extension rather than
+# `media_kind` alone, and ahead of the `media_kind` dispatch below, so this
+# fires the same way regardless of exactly how the probe happened to bucket
+# the file (`.xlsm` in particular is a document container the same way
+# `.xlsx` is; `.csv`/`.tsv` are structured text). Macro-enabled `.xlsm` is
+# routed identically to `.xlsx` -- the macro stream is never read either way.
+_OFFICE_NATIVE_TEXT_SUFFIXES = frozenset({".xlsx", ".xlsm", ".pptx", ".csv", ".tsv"})
 
 
 @dataclass(frozen=True)
@@ -57,6 +69,11 @@ class EvidenceRoute:
     vision: bool
     reason: str  # one sentence, human-readable
     rules: tuple[str, ...]  # every rule id that fired, in order
+    # Speech transcription, the third perception seam (D-058). Last and
+    # defaulted so that every existing construction of this type -- in this
+    # module, in the naming lab, in tests -- keeps working unchanged: a route
+    # that does not mention transcription does not ask for it.
+    transcript: bool = False
 
 
 def route_for(
@@ -101,9 +118,14 @@ def route_for(
     native_text = False
     ocr = False
     vision = False
+    transcript = False
     reason = ""
 
-    if media_kind == MEDIA_TEXT:
+    if extension in _OFFICE_NATIVE_TEXT_SUFFIXES:
+        rules.append("r18-office-native-text")
+        native_text = True
+        reason = "spreadsheet/presentation/csv: native text only"
+    elif media_kind == MEDIA_TEXT:
         rules.append("r2-text")
         native_text = True
         reason = "plain/structured text file: native text only"
@@ -119,9 +141,10 @@ def route_for(
             reason = "pdf has no confirmed embedded text: attempt native extraction and OCR"
     elif media_kind == MEDIA_DOCUMENT:
         # Any non-PDF document extension classified as MEDIA_DOCUMENT by the
-        # probe (.docx, .pptx, .xlsx, .pages, .rtf, .epub, and so on) is an
-        # office/e-book container with its own native text layer -- OCR has
-        # nothing to add over a text extractor that understands the format.
+        # probe (.docx, .pages, .rtf, .epub, and so on -- .xlsx/.xlsm/.pptx
+        # are claimed by r18 above) is an office/e-book container with its
+        # own native text layer -- OCR has nothing to add over a text
+        # extractor that understands the format.
         rules.append("r5-office-document")
         native_text = True
         reason = "office/e-book document: native text only"
@@ -139,10 +162,38 @@ def route_for(
             rules.append("r8-image-other")
             vision = True
             reason = "image of unknown origin: vision only"
+    elif media_kind == MEDIA_VIDEO:
+        # Several sampled frames (config.vision.video_frame_count), each
+        # shown to both vision and OCR -- OCR as a deliberate fallback for
+        # text a vision model reads poorly or not at all (a slide, a title
+        # card, an on-screen caption), the same reasoning r6-screenshot
+        # already applies to a single screenshot image.
+        rules.append("r14-video-frame")
+        vision = True
+        ocr = True
+        reason = "video: vision and OCR on several sampled frames"
+        # A video's audio track is a second, independent kind of evidence
+        # about the same file, and the probe has already told us whether
+        # there is one -- so a silent screen recording costs no ffmpeg run
+        # and no engine call. `audio_present` is checked for `is True`
+        # rather than truthiness because a probe that could not run at all
+        # leaves the fact absent, and "unknown" must not read as "yes".
+        if facts.get("audio_present") is True and config.transcription.enabled:
+            rules.append("r15-video-transcript")
+            transcript = True
+            reason = "video: vision and OCR on several sampled frames, plus speech transcription"
+    elif media_kind == MEDIA_AUDIO:
+        # An audio file has no pixels to describe and no text layer to read;
+        # what it has is speech. Unlike `r15-video-transcript` this rule
+        # fires whether or not transcription is enabled, so that a disabled
+        # gate is visible as `r17-transcription-disabled` below rather than
+        # being indistinguishable from "this kind is opaque".
+        rules.append("r16-audio-transcript")
+        transcript = True
+        reason = "audio: speech transcription only"
     else:
-        # MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_AUDIO, MEDIA_VIDEO, MEDIA_OTHER,
-        # and anything this router does not otherwise recognise: opaque to
-        # perception in this phase.
+        # MEDIA_ARCHIVE, MEDIA_INSTALLER, MEDIA_OTHER, and anything this
+        # router does not otherwise recognise: opaque to perception.
         rules.append("r9-opaque")
         if media_kind in _OPAQUE_MEDIA_KINDS:
             reason = f"{media_kind}: opaque to the evidence layer, nothing to perceive"
@@ -155,8 +206,18 @@ def route_for(
     if vision and not config.vision.enabled:
         rules.append("r11-vision-disabled")
         vision = False
+    if transcript and not config.transcription.enabled:
+        rules.append("r17-transcription-disabled")
+        transcript = False
 
-    return EvidenceRoute(native_text=native_text, ocr=ocr, vision=vision, reason=reason, rules=tuple(rules))
+    return EvidenceRoute(
+        native_text=native_text,
+        ocr=ocr,
+        vision=vision,
+        reason=reason,
+        rules=tuple(rules),
+        transcript=transcript,
+    )
 
 
 def refine_route(route: EvidenceRoute, visual: VisualEvidence | None, *, config: EvidenceConfig) -> EvidenceRoute:
@@ -180,6 +241,7 @@ def refine_route(route: EvidenceRoute, visual: VisualEvidence | None, *, config:
         vision=route.vision,
         reason=route.reason,
         rules=route.rules + ("r12-vision-says-text-bearing",),
+        transcript=route.transcript,
     )
 
 
@@ -216,4 +278,5 @@ def refine_route_for_native_text(
         vision=route.vision,
         reason=route.reason,
         rules=route.rules + ("r13-native-text-inadequate",),
+        transcript=route.transcript,
     )

@@ -16,6 +16,7 @@ try:
         load_queue,
         output_path,
         process_one,
+        resolve_candidates_root,
         safe_component,
         unique_queue_items,
         update_queue_item,
@@ -28,6 +29,7 @@ except ImportError:  # direct script execution from tools/
         load_queue,
         output_path,
         process_one,
+        resolve_candidates_root,
         safe_component,
         unique_queue_items,
         update_queue_item,
@@ -72,7 +74,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="reprocess items even if a completed artifact exists")
     parser.add_argument("--knowledge-root", type=Path, default=Path("knowledge/social-video"))
     parser.add_argument("--work-root", type=Path, default=Path("work/social-video"))
-    parser.add_argument("--candidates-root", type=Path, default=DEFAULT_CANDIDATES_ROOT)
+    parser.add_argument(
+        "--candidates-root",
+        type=Path,
+        default=None,
+        help="Where untrusted candidate skills go. Default: Angel 40-ai/skills/candidates/ "
+             f"when the configured volume is mounted, else {DEFAULT_CANDIDATES_ROOT}.",
+    )
     parser.add_argument("--vts-bin", default=default_vts_bin())
     return parser.parse_args(argv)
 
@@ -83,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         args.queue,
         knowledge_root=args.knowledge_root,
         work_root=args.work_root,
-        candidates_root=args.candidates_root,
+        candidates_root=resolve_candidates_root(args.candidates_root),
         vts_bin=args.vts_bin,
         force=args.force,
     )

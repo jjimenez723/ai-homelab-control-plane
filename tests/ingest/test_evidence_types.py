@@ -3,8 +3,11 @@
 `FileEvidence` and everything it is built from are plain frozen dataclasses
 with no `Path` and no callable (the one deliberate exception, `EvidenceSource`,
 is covered by its own test below, not hidden). That is what makes "evidence
-carries no authority" a property of the *type*, not a convention a future
-caller could quietly break. This suite also pins down `sanitize_extracted_text`
+carries nothing to act with" a property of the *type*, not a convention a
+future caller could quietly break -- and it is why a naming proposal reading
+perceived text (D-057) is a narrow grant rather than a widening one: the
+richest thing a consumer can hold is still inert. This suite also pins down
+`sanitize_extracted_text`
 against its documented contract -- C0/C1 control stripping, bidi/zero-width
 stripping, CRLF normalization, blank-line collapsing, truncation reporting --
 and the JSON round-trip helpers that let evidence survive a trip through the

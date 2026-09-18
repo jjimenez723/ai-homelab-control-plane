@@ -14,10 +14,20 @@ The order of the checks is the order of the invariants, and it matters:
 Every branch -- including every decision *not* to rename -- is appended to the
 naming ledger. That is what keeps repeat runs cheap and lets a human see why a
 file is called what it is called.
+
+Since D-057 each of those rows also carries the *audit* of the proposal: which
+prompt (id, version, and the SHA-256 of the rendered text) was used, which
+kinds of perceived evidence were in front of the proposer, the content hash of
+that evidence, and the model's raw answer before any cleanup -- recorded even
+when the answer was refused, because a rejected hostile proposal that leaves
+no trace is a rejection nobody can audit. `organize naming-history PATH`
+prints it. None of that changes the order of the checks below, and the order
+is the guarantee.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -55,6 +65,15 @@ class NamingOutcome:
     reason: str = ""
     model: str | None = None
     model_version: str | None = None
+    # D-057 audit, carried from the proposal onto the ledger row. Absent for
+    # every branch that never reached a proposer (a human lock, a settled
+    # name, a protected extension, an already-good name).
+    prompt_id: str | None = None
+    prompt_version: str | None = None
+    prompt_sha256: str | None = None
+    raw_output: str | None = None
+    evidence_sources: tuple[str, ...] = ()
+    evidence_sha256: str | None = None
 
     @property
     def renamed(self) -> bool:
@@ -90,6 +109,9 @@ def evaluate_and_apply(
     """Decide this file's name and, when `apply` is set, make it so."""
     original = path.name
     directory = path.parent
+    perceived_sha256 = (
+        evidence.perceived.evidence_sha256 or None if evidence.perceived is not None else None
+    )
 
     def record(outcome: NamingOutcome, *, approved_by: str = "automatic", human_corrected: int = 0) -> NamingOutcome:
         ledger.append_naming(
@@ -113,6 +135,18 @@ def evaluate_and_apply(
                 "human_corrected": human_corrected,
                 "policy_outcome": outcome.decision,
                 "created_at": now,
+                "prompt_id": outcome.prompt_id,
+                "prompt_version": outcome.prompt_version,
+                "prompt_sha256": outcome.prompt_sha256,
+                # The evidence hash is read from the evidence the proposer was
+                # handed, not from the proposal: it is a fact about the input,
+                # and a proposer -- hostile or merely broken -- must not be
+                # able to write a different one into the audit trail.
+                "evidence_sha256": perceived_sha256,
+                "evidence_sources": (
+                    json.dumps(list(outcome.evidence_sources)) if outcome.evidence_sources else None
+                ),
+                "raw_output": outcome.raw_output,
             }
         )
         return outcome
@@ -209,6 +243,12 @@ def evaluate_and_apply(
         reason=proposal.reason,
         model=proposal.model,
         model_version=proposal.model_version,
+        prompt_id=proposal.prompt_id,
+        prompt_version=proposal.prompt_version,
+        prompt_sha256=proposal.prompt_sha256,
+        raw_output=proposal.raw_output,
+        evidence_sources=tuple(proposal.evidence_sources or ()),
+        evidence_sha256=perceived_sha256,
     )
 
     if proposal.confidence < min_confidence:
@@ -255,16 +295,11 @@ def evaluate_and_apply(
         )
 
     return record(
-        NamingOutcome(
+        replace(
+            base,
             decision=DECISION_RENAMED,
             path=destination,
-            original_filename=original,
             proposed_filename=validated.filename,
             applied_filename=destination.name,
-            name_quality=evidence.name_quality,
-            confidence=proposal.confidence,
-            reason=proposal.reason,
-            model=proposal.model,
-            model_version=proposal.model_version,
         )
     )

@@ -5,8 +5,16 @@ measurably" and nothing else. It performs zero filesystem writes, opens owner
 files read-only, never raises out of a public entry point, and hands
 model-facing backends bytes rather than paths. See the binding evidence-layer
 spec for the full set of invariants this package must not break, chief among
-them: FACTS != INTERPRETATIONS != DECISIONS. Nothing here changes a naming,
-retention, or ingestion decision.
+them: FACTS != INTERPRETATIONS != DECISIONS. Nothing here interprets, and
+nothing here decides.
+
+What reads the output of this package is deliberately narrow (D-057): a
+*filename proposal* may, via the one-way conversion in
+`tools/ingest/perception_bridge.py` into bounded plain data. Retention and
+ingestion read nothing produced here, and no module under
+`tools/ingest/naming/` or `tools/ingest/triage/` may import this package at
+all -- `tests/ingest/test_evidence_security.py` enforces both with AST guards
+that have no exception list.
 
 The public surface, in the order a file travels through it:
 
@@ -30,6 +38,13 @@ The public surface, in the order a file travels through it:
 from __future__ import annotations
 
 from tools.ingest.evidence.cache import CacheKey, CacheLookup, EvidenceLedger, lookup, store
+from tools.ingest.evidence.summary import (
+    FrameDescription,
+    PerceptionSummary,
+    SummaryProvenance,
+    SummaryWarning,
+    perception_summary,
+)
 from tools.ingest.evidence.router import (
     EvidenceRoute,
     refine_route,
@@ -52,12 +67,15 @@ from tools.ingest.evidence.types import (
     WARN_BACKEND_UNAVAILABLE,
     WARN_LOW_CONFIDENCE,
     WARN_MALFORMED,
+    WARN_DEDUPLICATED,
+    WARN_NO_AUDIO,
     WARN_PARTIAL,
     WARN_SKIPPED_BY_POLICY,
     WARN_TIMEOUT,
     WARN_TOO_LARGE,
     WARN_TRUNCATED,
     WARN_UNSUPPORTED,
+    AudioClip,
     EvidenceProvenance,
     EvidenceSource,
     EvidenceWarning,
@@ -73,6 +91,8 @@ from tools.ingest.evidence.types import (
     StructureEvidence,
     TableRegion,
     TextSection,
+    TranscriptEvidence,
+    TranscriptSegment,
     VisualEvidence,
     evidence_section_to_json,
     evidence_warning_from_json,
@@ -84,6 +104,8 @@ from tools.ingest.evidence.types import (
     sanitize_extracted_text,
     structure_evidence_from_json,
     structure_evidence_to_json,
+    transcript_evidence_from_json,
+    transcript_evidence_to_json,
     visual_evidence_from_json,
     visual_evidence_to_json,
 )
@@ -100,6 +122,8 @@ __all__ = [
     "WARN_TIMEOUT",
     "WARN_TOO_LARGE",
     "WARN_SKIPPED_BY_POLICY",
+    "WARN_NO_AUDIO",
+    "WARN_DEDUPLICATED",
     "EvidenceWarning",
     "IMAGE_KIND_SCREENSHOT",
     "IMAGE_KIND_ORDINARY_PHOTO",
@@ -118,6 +142,8 @@ __all__ = [
     "TextSection",
     "NativeText",
     "VisualEvidence",
+    "TranscriptSegment",
+    "TranscriptEvidence",
     "Heading",
     "Region",
     "TableRegion",
@@ -127,6 +153,7 @@ __all__ = [
     "EvidenceSource",
     "RasterImage",
     "RasterPage",
+    "AudioClip",
     "sanitize_extracted_text",
     "evidence_section_to_json",
     "evidence_warning_to_json",
@@ -139,6 +166,8 @@ __all__ = [
     "visual_evidence_from_json",
     "structure_evidence_to_json",
     "structure_evidence_from_json",
+    "transcript_evidence_to_json",
+    "transcript_evidence_from_json",
     # router.py
     "EvidenceRoute",
     "route_for",
@@ -156,7 +185,14 @@ __all__ = [
     "KIND_NATIVE_TEXT",
     "KIND_OCR",
     "KIND_VISUAL",
+    "KIND_TRANSCRIPT",
     "KIND_STRUCTURE",
+    # summary.py
+    "PerceptionSummary",
+    "FrameDescription",
+    "SummaryProvenance",
+    "SummaryWarning",
+    "perception_summary",
 ]
 
 
@@ -184,4 +220,5 @@ def pipeline_version_for(*args, **kwargs):
 KIND_NATIVE_TEXT = "native_text"
 KIND_OCR = "ocr"
 KIND_VISUAL = "visual"
+KIND_TRANSCRIPT = "transcript"
 KIND_STRUCTURE = "structure"

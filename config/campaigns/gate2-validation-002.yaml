@@ -1,0 +1,119 @@
+# Gate-2 VALIDATION bakeoff, second run (D-060).
+#
+# A new campaign id, not a resume of gate2-validation-001: the suites moved to
+# version 1.1.0 and the prompts to 1.1.0, so every configuration fingerprint --
+# and therefore every work-unit id -- is different. gate2-validation-001's
+# records stand untouched as the measurement of the 1.0 configuration.
+#
+# What changed since 001, and why this run is comparable to nothing else:
+#   * suite acb-v1/semantic-naming 1 -> 1.1.0 (five defect fixes, D-059)
+#   * suite acb-v1/routing-classification 1 -> 1.1.0 (format/label fixes)
+#   * both prompts 1.0.0 -> 1.1.0, frozen from the dev-split experiment
+#     (gate2-dev-001, gate2-dev-naming-001)
+#   * gpt-oss:20b is declared `reasoning: true` and run at a budget its
+#     reasoning channel can survive; at 001's num_predict 64 it recorded
+#     95-100% truncation and measured nothing
+#
+# The `qwen3.5-9b-p100` arm is deliberately kept: it is the same model and the
+# same suite version as the finalists, differing only in prompt version, so the
+# validation-split effect of the prompt freeze is measured rather than inferred
+# from the dev split.
+#
+# Development of prompts and oracles is finished before this file runs. Nothing
+# measured here may be used to change a prompt, an expectation or a threshold;
+# doing so would consume the validation split and leave only the frozen holdout.
+
+version: 1
+campaign_id: gate2-validation-002
+description: >
+  Gate-2 validation bakeoff at suite 1.1.0 and prompt 1.1.0 across the four
+  staged local candidates, plus a prompt-1.0.0 control on qwen3.5:9b.
+
+samples_per_item: 5
+timeout_seconds: 300
+concurrency: 2
+
+suites:
+  - id: acb-v1/routing-classification
+    split: validation
+    threshold:
+      min_pass_rate: 0.80
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+  - id: acb-v1/semantic-naming
+    split: validation
+    threshold:
+      min_pass_rate: 0.75
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+
+candidates:
+  - name: qwen2.5-0.5b-p110
+    model: qwen2.5:0.5b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: &plain_sampling
+      temperature: 0
+      seed: 42
+      num_ctx: 4096
+      num_predict: 128
+      think: false
+    prompts: &frozen_prompts
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.1.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0"
+
+  - name: qwen3.5-4b-p110
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *plain_sampling
+    prompts: *frozen_prompts
+
+  - name: qwen3.5-9b-p110
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *plain_sampling
+    prompts: *frozen_prompts
+
+  # Prompt control: same model, same suite version, prompt 1.0.0.
+  - name: qwen3.5-9b-p100
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *plain_sampling
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.0.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.0.0"
+
+  - name: gpt-oss-20b-p110
+    model: gpt-oss:20b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: true
+    sampling:
+      temperature: 0
+      seed: 42
+      num_ctx: 8192
+      num_predict: 1024
+      think: low
+    prompts: *frozen_prompts

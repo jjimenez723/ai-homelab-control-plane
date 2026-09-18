@@ -314,6 +314,21 @@ def render_doctor(config: IngestConfig, data: StatusData) -> str:
         f"{'available' if pdfium_available() else 'not installed -- scanned PDFs cannot be rendered for OCR'}"
     )
     lines.append("  evidence never renames, moves, deletes, or ingests anything (D-029).")
+    transcription = getattr(evidence, "transcription", None)
+    if transcription is not None:
+        lines.append(
+            f"  transcription backend:  {transcription.backend}"
+            f"{'' if transcription.enabled else '  (disabled in config)'}"
+        )
+
+    lines.append("")
+    lines.append("Semantic naming (a model proposes; policy disposes -- D-057)")
+    lines.append(f"  naming.proposer:        {config.naming.proposer}")
+    if config.naming.proposer == "semantic":
+        lines.append(f"  model:                  {config.naming.semantic.model} via {config.naming.semantic.endpoint}")
+        lines.append(f"  certification:          {semantic_certification_note(config)}")
+    else:
+        lines.append("  model:                  none (deterministic proposer; set naming.proposer: semantic to opt in)")
 
     lines.append("")
     lines.append("Scheduling")
@@ -322,3 +337,53 @@ def render_doctor(config: IngestConfig, data: StatusData) -> str:
     lines.append("  install:                scripts/install-file-intelligence-launchd")
     lines.append("  remove:                 scripts/uninstall-file-intelligence-launchd")
     return "\n".join(lines)
+
+
+def semantic_certification_note(config: IngestConfig, *, repo_root: Path | None = None) -> str:
+    """Is the configured semantic-naming model a *certified* configuration?
+
+    Read-only and advisory. The semantic proposer's output is policy-gated
+    regardless (D-057), so this is not a gate; it is the one place the
+    operator can see whether the tag in `naming.semantic.model` matches a
+    registry entry (`config/models.yaml`) that `config/certifications.yaml`
+    certifies for `naming.semantic` at the currently *active* prompt version
+    (D-060). Both files are machine-local and optional; their absence is
+    reported, never raised.
+    """
+    root = repo_root or Path(__file__).resolve().parents[2]
+    models_path = root / "config" / "models.yaml"
+    certs_path = root / "config" / "certifications.yaml"
+    if not models_path.exists():
+        return "unknown -- config/models.yaml is absent on this machine (see config/models.example.yaml)"
+    if not certs_path.exists():
+        return "not certified -- config/certifications.yaml is absent on this machine (no Gate-2 result recorded here)"
+    try:
+        from tools.models.certification import load_certifications
+        from tools.models.registry import load_registry
+        from tools.prompts.production import prompt_id_for_task_class
+        from tools.prompts.registry import load_default_registry
+
+        registry = load_registry(models_path)
+        certifications = load_certifications(certs_path)
+        prompt_version = load_default_registry().active(prompt_id_for_task_class("naming.semantic")).version
+    except Exception as exc:  # noqa: BLE001 - a doctor line must never crash the doctor
+        return f"unknown -- could not read registry/certifications: {type(exc).__name__}: {exc}"
+    tag = config.naming.semantic.model
+    runtime = "ollama"
+    matches = [spec for spec in registry.all() if spec.model_id == tag and spec.runtime == runtime]
+    if not matches:
+        return f"not certified -- no config/models.yaml entry has model_id {tag!r} (runtime {runtime})"
+    reasons = []
+    for spec in matches:
+        record, reason = certifications.check(
+            model=spec.name, task_class_name="naming.semantic", runtime=spec.runtime,
+            quantization=spec.quantization, prompt_version=prompt_version, tool_schema_version="none",
+        )
+        if record is not None:
+            return (
+                f"certified as {spec.name} for naming.semantic at prompt {prompt_version} "
+                f"(suite {record.suite} {record.suite_version}, measured {record.measured_pass_rate:.3f} "
+                f"on {record.measured_samples} samples, expires {record.expires_at})"
+            )
+        reasons.append(f"{spec.name}: {reason.reason if reason else 'not certified'}")
+    return "not certified -- " + "; ".join(reasons)

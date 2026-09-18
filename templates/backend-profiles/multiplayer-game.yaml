@@ -1,0 +1,208 @@
+# Backend profile: real-time multiplayer games needing authoritative server
+# state, low-latency presence/matchmaking, and dedicated game-server compute.
+# See docs/27-backend-baselines.md for the sourced evaluation behind every
+# product choice below, and single-player-game.yaml for the (much cheaper)
+# non-realtime sibling profile.
+
+profile_id: multiplayer-game
+version: 1.0.0
+summary: >
+  Session-based real-time multiplayer with an authoritative game server (not
+  a client-trusts-client model), presence/matchmaking, and low-latency state
+  sync during a match. This profile is deliberately the most GCP-heavy (not
+  Firebase-only) of the four: Firestore/RTDB are used for metadata and
+  lobby/presence, never for authoritative in-match state at tick rate.
+
+fit:
+  application_traits:
+    - authoritative server required: any game with competitive stakes (ranked play, wagers, leaderboard integrity) cannot trust client-reported match outcomes or in-match state
+    - real-time latency matters during an active match (tens to low-hundreds of ms budget), which is well outside Firestore's per-document-write cost/latency sweet spot at tick rate
+    - matchmaking and presence are their own subsystem, distinct from in-match state sync
+    - session lifecycle (server allocation, match start, disconnect/reconnect handling, server teardown) is a first-class engineering problem
+    - anti-cheat is a hard requirement given authoritative-server stakes
+  scale_assumptions:
+    initial_maus: "1,000-100,000, concurrent-match-count is the real capacity planning unit, not MAU"
+    growth_posture: "game-server fleet must scale with concurrent matches, independent of total registered players"
+    peak_concurrency: "matches cluster around regional evening peak hours; capacity planning must account for this, not just average load"
+
+services:
+  auth:
+    chosen: Firebase Authentication (anonymous-first, linkable) + App Check on every backend surface
+    alternatives: [platform identity (Game Center/Play Games) federated into Firebase Auth]
+    rationale: same consumer-friction reasoning as single-player-game.yaml, but App Check enforcement is non-negotiable here given cheat/abuse stakes
+    cost_driver: negligible at auth layer itself
+    quota_watch_outs:
+      - App Check must cover the matchmaking and game-server allocation endpoints specifically, not just Firestore
+  lobby_and_presence:
+    chosen: Realtime Database (per-region instance if latency to players demands it) for presence and pre-match lobby state
+    alternatives: [Firestore, if lobby churn is low enough that RTDB's latency edge doesn't matter]
+    rationale: >
+      RTDB's `onDisconnect()` is the standard primitive for "did this player
+      leave the lobby/queue" without a client-side heartbeat hack, and its
+      lower per-operation overhead suits high-frequency small presence
+      writes (queue position updates, ready-check state) better than
+      Firestore's per-document-write pricing model.
+    cost_driver: bandwidth (GB downloaded) scales with concurrent lobby size and presence-update frequency
+    quota_watch_outs:
+      - RTDB is single-region per instance; a globally distributed playerbase needs regional RTDB instances or acceptance of the latency to one region
+  matchmaking:
+    chosen: a dedicated matchmaking service on Cloud Run, backed by Memorystore (Redis) for queue/skill-bucket state
+    alternatives: [Agones' built-in allocator for server-side fleet allocation, paired with a custom matchmaking layer -- Agones itself does not do skill-based matchmaking]
+    rationale: >
+      Matchmaking needs sub-second read/write on skill-bucket queues at
+      high frequency -- exactly Memorystore's sweet spot, and a poor fit for
+      Firestore's per-operation pricing at that frequency. Cloud Run hosts
+      the matchmaking logic itself (queue a player, find a match, hand off
+      to game-server allocation).
+    cost_driver: Memorystore instance is always-on (not scale-to-zero) -- a fixed cost floor regardless of traffic, size it deliberately
+    quota_watch_outs:
+      - do not build matchmaking logic directly on Firestore listeners; the query pattern (find N players in a skill band, atomically claim them) is a poor fit and will be both slow and expensive
+  authoritative_game_server:
+    chosen: Cloud Run for session-based/short-match games with moderate tick-rate tolerance; Agones on GKE for games needing full UDP/custom-protocol control, long-lived match sessions, or fleet-level features (health checks, graceful shutdown draining, fleet autoscaling tuned for game-server workloads)
+    alternatives: [a third-party game-server hosting platform, if the team does not want to operate GKE/Agones themselves]
+    rationale: >
+      Cloud Run session affinity + WebSocket/HTTP2 support now makes it
+      viable for many session-based multiplayer designs without standing up
+      Kubernetes at all -- pick this first and only move to Agones/GKE when
+      a concrete requirement (raw UDP, very long match sessions, fine-grained
+      fleet lifecycle control) demands it. Agones itself moved from a
+      Google-led project to CNCF Sandbox governance in March 2026 and remains
+      the standard open-source answer for Kubernetes-based dedicated game
+      server fleets as of September 2026, cloud-agnostic by design (it also
+      runs on non-GCP Kubernetes, which matters if multi-cloud portability is
+      a requirement for this specific game).
+    cost_driver: >
+      Cloud Run: pay-per-use compute during active matches, scale-to-zero
+      between peak windows if session patterns allow it. Agones/GKE: cluster
+      node costs are largely fixed/always-on regardless of match volume --
+      substantially higher cost floor, justified only when Cloud Run's
+      constraints (stateless-by-default, HTTP/WebSocket-centric, session
+      affinity rather than true sticky UDP) are a real blocker.
+    quota_watch_outs:
+      - Cloud Run's default statelessness means in-memory match state is NOT safely assumed to survive between requests without explicit session-affinity configuration -- verify this is actually enabled, not assumed
+      - Agones adds real operational surface area (a Kubernetes cluster to run, patch, and monitor) -- do not reach for it "to be safe" without a concrete requirement forcing it
+  match_result_and_metadata_store:
+    chosen: Cloud Firestore for match history, player stats, and leaderboards (post-match, not in-match)
+    alternatives: [Cloud SQL/Data Connect, if match analytics need relational joins across many match/player/team dimensions]
+    rationale: >
+      Once a match ends, result data is exactly Firestore's sweet spot
+      (structured documents, per-player stat aggregation, offline-tolerant
+      client reads of match history). The authoritative game server (not the
+      client) writes the final match-result document.
+    cost_driver: per-write pricing on match-completion events, generally low-volume relative to in-match state
+    quota_watch_outs:
+      - never let the game server accept a client-reported match outcome without the server's own authoritative record of what happened
+  event_fanout:
+    chosen: Pub/Sub for decoupling match-completion events from downstream consumers (leaderboard update, achievement check, analytics export)
+    alternatives: [direct Cloud Function chaining, for very simple fanout needs]
+    rationale: keeps the game server's match-end path fast (publish one event) rather than synchronously calling every downstream system
+    cost_driver: throughput-based, negligible at this profile's match-completion volume
+    quota_watch_outs:
+      - Pub/Sub Lite was shut down in 2026 -- use standard Pub/Sub, not Lite, for any new design
+
+data_model_guidance: >
+  Separate three data lifecycles explicitly: (1) in-match state, which lives
+  only in the authoritative game server's memory/Memorystore and is never
+  persisted to Firestore at tick rate; (2) lobby/presence state in RTDB,
+  ephemeral and cleared on disconnect; (3) post-match results in Firestore,
+  the durable record. Conflating these (e.g. writing in-match position
+  updates to Firestore) is the most common architectural mistake in this
+  profile and will both blow the cost budget and add unacceptable latency.
+
+security_rules_posture: >
+  Firestore Rules: match-result documents are write-only by the game
+  server's service-account identity (via Admin SDK, bypassing client
+  Security Rules entirely), read-open to participants and, for public
+  leaderboards, to all authenticated users. RTDB lobby rules restrict a
+  player to writing only their own presence/ready-state node, keyed on
+  `auth.uid`. No client, however authenticated, is ever granted direct write
+  access to another player's match-relevant state.
+
+offline: >
+  Deliberately out of scope for in-match play -- a real-time competitive
+  match assumes an active connection, and disconnect handling (reconnect
+  window, forfeit-on-timeout) is a session-lifecycle feature, not an offline
+  feature. Post-match history/leaderboard reads can use Firestore's normal
+  offline cache for browsing past results while offline.
+
+realtime: >
+  This is the profile's central engineering problem. In-match state sync
+  runs through the authoritative game server directly to connected clients
+  (WebSocket/UDP depending on platform choice above), not through
+  Firestore/RTDB listeners, which are both too slow and too expensive at
+  tick-rate frequency. RTDB is used only for the lower-frequency
+  lobby/presence layer, not in-match state.
+
+notifications: >
+  FCM (HTTP v1) for "your match is ready" / "a friend is online and
+  inviting you to play" style nudges -- delivered outside the active-match
+  path entirely, purely for pre/post-match engagement.
+
+storage_media: >
+  Cloud Storage for Firebase for replay files, match recordings, or
+  user-generated content (custom loadouts/skins if applicable); keep large
+  binary artifacts out of Firestore documents (1 MiB limit) and out of
+  Memorystore (not designed for large blob storage).
+
+privacy_compliance: >
+  Standard consumer-app posture (no special PHI/regulated-data
+  consideration by default); the main sensitivity is anti-cheat/anti-abuse
+  data (device fingerprinting signals, if used) which should be disclosed in
+  a privacy policy and scoped to what's proportionate for the game's actual
+  cheating risk profile, not collected indiscriminately.
+
+analytics: >
+  Match-completion events published to Pub/Sub fan out to both a
+  BigQuery-bound analytics sink and the leaderboard-update path, keeping
+  the two concerns decoupled from the game server's own latency-sensitive
+  path. Analyze matchmaking queue times and match-abandonment rate as
+  leading indicators of matchmaking-system health.
+
+testing_emulators: >
+  Firebase Local Emulator Suite covers RTDB lobby/presence, Firestore
+  match-result writes, and Auth. There is no emulator for Memorystore,
+  Cloud Run session behavior, or Agones fleet allocation -- these require
+  either real (dev-tier) GCP resources in a staging project or
+  local-container/local-Kubernetes (kind/minikube + a local Agones install)
+  test environments. Load-test matchmaking and in-match tick-rate behavior
+  against realistic concurrent-match counts before trusting capacity
+  assumptions; this is the profile most likely to have its true failure
+  modes hidden by an emulator-only test story.
+
+deployment: >
+  Regional game-server deployment matched to player population centers
+  (latency to the authoritative server directly affects competitive
+  fairness and perceived quality); a staging environment must include a
+  realistic multi-match-concurrency load test, not just a single-match
+  smoke test, before any capacity/cost assumption in this profile is
+  trusted.
+
+observability: >
+  Per-match server-side tick-time and latency metrics (not just uptime),
+  matchmaking queue-depth and average wait-time dashboards, and an explicit
+  alert on game-server crash/restart rate during an active match (a mid-
+  match server crash is a severe player-facing failure and should page,
+  not just log). Cloud Monitoring + Cloud Trace on the Cloud Run/GKE layer;
+  Memorystore memory/eviction metrics to catch matchmaking-queue growth
+  before it degrades wait times.
+
+known_pitfalls:
+  - "Writing in-match state to Firestore/RTDB at tick rate instead of keeping it in the authoritative server's memory/Memorystore -- the most common and most expensive mistake in this profile."
+  - "Trusting a client-reported match outcome instead of having the authoritative server itself record and publish the result."
+  - "Assuming Cloud Run session affinity is on by default; unconfigured, in-memory match state can be silently dropped between requests."
+  - "Reaching for Agones/GKE 'to be safe' without a concrete requirement (raw UDP, very long sessions, fleet lifecycle control) that Cloud Run genuinely cannot satisfy -- it adds a large, mostly-fixed cost floor and real operational surface area."
+  - "Designing matchmaking directly against Firestore query patterns instead of a purpose-built queue/skill-bucket store (Memorystore) -- both slow and expensive at matchmaking frequency."
+  - "Building against Pub/Sub Lite instead of standard Pub/Sub -- Lite was shut down in 2026."
+  - "No emulator covers Memorystore/Cloud Run session affinity/Agones allocation -- skipping real load tests against these leaves the profile's true failure modes undiscovered until production."
+
+references:
+  - url: "https://www.cncf.io/blog/2026/03/23/agones-moves-to-the-cncf-a-new-era-for-open-source-multiplayer-game-infrastructure/"
+    accessed: "2026-09-17"
+  - url: "https://github.com/googleforgames/agones"
+    accessed: "2026-09-17"
+  - url: "https://cloud.google.com/pubsub/pricing"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/firestore/locations"
+    accessed: "2026-09-17"
+  - url: "https://firebase.google.com/docs/emulator-suite"
+    accessed: "2026-09-17"

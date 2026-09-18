@@ -1,0 +1,381 @@
+# Driftbound — single-player roguelike deckbuilder.
+# Fictional product used only as a representative example spec for
+# docs/28-application-spec.md and tools/appspec. Validate with:
+#   python -m tools.appspec validate templates/app-spec/examples/single-player-game.yaml
+
+spec_version: "1.0"
+app_id: driftbound
+name: Driftbound
+
+product_intent:
+  problem: >
+    Mobile roguelike deckbuilders either gate meaningful progress behind
+    energy timers/IAP or offer no persistent meta-progression, so a single
+    run's outcome is the only thing that matters and losing feels like
+    wasted time.
+  value_proposition: >
+    A single-player roguelike deckbuilder with unlimited free play, a run
+    length of 15-25 minutes, and permanent meta-progression (card unlocks,
+    relic unlocks) that survives every run regardless of outcome.
+  non_goals:
+    - No multiplayer, PvP, or leaderboard features in v1 -- pure single-player.
+    - No energy system, timers, or pay-to-skip mechanics.
+    - No live-service seasonal content cadence in v1; content ships in versioned updates.
+
+target_users:
+  - id: player
+    name: Player
+    description: A single-player roguelike deckbuilder fan playing solo, offline-capable sessions.
+    needs:
+      - Start a run quickly with no mandatory tutorial gate after the first playthrough.
+      - See permanent meta-progression (unlocks) regardless of whether a run is won or lost.
+      - Resume an in-progress run exactly where they left it, including mid-combat.
+
+platforms:
+  - ios
+  - android
+  - macos
+
+workflows:
+  - id: start-run
+    name: Start a run
+    actor: player
+    goal: Begin a new roguelike run with a starting deck and character.
+    steps:
+      - id: select-character
+        description: Choose a starting character/deck archetype.
+        screen_ref: character-select
+      - id: confirm-start
+        description: Confirm and generate the run's initial map.
+        screen_ref: map-screen
+  - id: play-turn
+    name: Play a combat turn
+    actor: player
+    goal: Play cards from hand to resolve a combat encounter turn.
+    steps:
+      - id: draw-hand
+        description: Draw the turn's hand from the current deck.
+        screen_ref: combat-screen
+      - id: play-cards
+        description: Play one or more cards, spending energy.
+        screen_ref: combat-screen
+      - id: end-turn
+        description: End the turn and resolve enemy actions.
+        screen_ref: combat-screen
+  - id: complete-run
+    name: Complete a run
+    actor: player
+    goal: Reach a run's end (win or loss) and receive meta-progression rewards.
+    steps:
+      - id: reach-run-end
+        description: Reach the final encounter or lose all health.
+        screen_ref: combat-screen
+      - id: view-results
+        description: View the run summary and rewards earned.
+        screen_ref: results-screen
+      - id: apply-unlocks
+        description: Apply any newly unlocked cards/relics to the persistent collection.
+        screen_ref: collection-screen
+
+entities:
+  - id: player_profile
+    name: Player Profile
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: display_name, type: string, required: false, pii: false, phi: false }
+      - { name: total_runs, type: integer, required: true, pii: false, phi: false }
+      - { name: wins, type: integer, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: run
+    name: Run
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: player_id, type: reference, required: true, pii: false, phi: false }
+      - { name: character_id, type: reference, required: true, pii: false, phi: false }
+      - { name: seed, type: string, required: true, pii: false, phi: false }
+      - { name: status, type: enum, required: true, pii: false, phi: false, description: "in_progress, won, lost." }
+      - { name: started_at, type: datetime, required: true, pii: false, phi: false }
+      - { name: ended_at, type: datetime, required: false, pii: false, phi: false }
+    identifiers: [id]
+  - id: card
+    name: Card
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: card_name, type: string, required: true, pii: false, phi: false }
+      - { name: energy_cost, type: integer, required: true, pii: false, phi: false }
+      - { name: rarity, type: enum, required: true, pii: false, phi: false, description: "common, uncommon, rare." }
+    identifiers: [id]
+  - id: unlock
+    name: Unlock
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: player_id, type: reference, required: true, pii: false, phi: false }
+      - { name: card_id, type: reference, required: true, pii: false, phi: false }
+      - { name: unlocked_at, type: datetime, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: save_state
+    name: Save State
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: run_id, type: reference, required: true, pii: false, phi: false }
+      - { name: map_position, type: string, required: true, pii: false, phi: false }
+      - { name: deck_snapshot, type: array, required: true, pii: false, phi: false }
+      - { name: health, type: integer, required: true, pii: false, phi: false }
+      - { name: updated_at, type: datetime, required: true, pii: false, phi: false }
+    identifiers: [id]
+
+relationships:
+  - id: rel-player-runs
+    from_entity: player_profile
+    to_entity: run
+    type: one_to_many
+    description: A player profile has many runs over time.
+  - id: rel-player-unlocks
+    from_entity: player_profile
+    to_entity: unlock
+    type: one_to_many
+    description: A player profile accumulates many unlocks.
+  - id: rel-run-save-state
+    from_entity: run
+    to_entity: save_state
+    type: one_to_one
+    description: An in-progress run has exactly one current save state.
+
+permissions:
+  - id: perm-player-own-runs
+    role: player
+    entity: run
+    actions: [create, read, update, list]
+  - id: perm-player-own-save-state
+    role: player
+    entity: save_state
+    actions: [read, update]
+  - id: perm-player-own-unlocks
+    role: player
+    entity: unlock
+    actions: [read, list]
+
+authentication:
+  methods: [device_biometric]
+  mfa_required: false
+  session:
+    strategy: platform_keychain
+    expiry: "90d"
+
+authorization:
+  model: rbac
+  roles:
+    - { id: player, name: Player, description: The single local player profile on this device. }
+
+backend_profile:
+  id: single-player-game
+  overrides:
+    save_sync: cloud_optional
+    run_seed_source: device_csprng
+
+persistence:
+  datastore: sqlite
+  entities: [player_profile, run, card, unlock, save_state]
+
+realtime:
+  enabled: false
+  channels: []
+
+offline:
+  supported: true
+  strategy: full_local_first_sync
+
+notifications:
+  channels: [in_app]
+  triggers:
+    - id: nt-new-unlock
+      event: unlock.created
+      channel: in_app
+      description: Show an unlock celebration banner when a new card/relic is unlocked.
+
+storage_media:
+  providers: [none]
+  types: []
+
+privacy:
+  data_classes:
+    - id: pd-display-name
+      entity: player_profile
+      field: display_name
+      classification: internal
+      pii: false
+      phi: false
+      retention: "Retained while the local profile exists; not pii, optional cosmetic field only."
+
+analytics:
+  events:
+    - id: ev-run-started
+      name: Run Started
+      trigger: A new run entity is created.
+      properties: [player_id, character_id, seed]
+    - id: ev-run-completed
+      name: Run Completed
+      trigger: A run reaches status won or lost.
+      properties: [run_id, status]
+    - id: ev-card-unlocked
+      name: Card Unlocked
+      trigger: An unlock entity is created.
+      properties: [player_id, card_id]
+
+integrations:
+  - id: int-cloud-save-backup
+    provider: Platform-native cloud save (iCloud/Google Play Games Services)
+    purpose: Optional, user-initiated backup/restore of save_state across devices.
+
+screens:
+  - id: main-menu
+    name: Main Menu
+    workflow_refs: [start-run]
+    entities_shown: [player_profile]
+  - id: character-select
+    name: Character Select
+    workflow_refs: [start-run]
+    entities_shown: [card]
+  - id: map-screen
+    name: Run Map
+    workflow_refs: [start-run, play-turn]
+    entities_shown: [run, save_state]
+  - id: combat-screen
+    name: Combat
+    workflow_refs: [play-turn, complete-run]
+    entities_shown: [run, card, save_state]
+  - id: results-screen
+    name: Run Results
+    workflow_refs: [complete-run]
+    entities_shown: [run, unlock]
+  - id: collection-screen
+    name: Collection
+    workflow_refs: [complete-run]
+    entities_shown: [card, unlock]
+
+navigation:
+  entry_screen: main-menu
+  edges:
+    - { from: main-menu, to: character-select, trigger: "tap New Run" }
+    - { from: character-select, to: map-screen, trigger: "character confirmed" }
+    - { from: map-screen, to: combat-screen, trigger: "enter encounter node" }
+    - { from: combat-screen, to: map-screen, trigger: "combat won, return to map" }
+    - { from: combat-screen, to: results-screen, trigger: "run ends (win or loss)" }
+    - { from: results-screen, to: collection-screen, trigger: "tap View Collection" }
+    - { from: collection-screen, to: main-menu, trigger: "tap Done" }
+    - { from: main-menu, to: collection-screen, trigger: "tap Collection tab" }
+
+design_system:
+  stack: unity-ui-toolkit
+  library_ref: swiftui
+  tokens:
+    - color.role.energy
+    - color.role.damage
+    - color.role.block
+    - type.scale
+    - motion.spring.card-play
+
+apis:
+  - id: api-start-run
+    name: Start run
+    kind: callable_function
+    request_shape:
+      - { name: character_id, type: uuid }
+    response_shape:
+      - { name: run_id, type: uuid }
+      - { name: seed, type: string }
+  - id: api-play-card
+    name: Play card
+    kind: callable_function
+    request_shape:
+      - { name: run_id, type: uuid }
+      - { name: card_id, type: uuid }
+    response_shape:
+      - { name: save_state, type: object }
+  - id: api-complete-run
+    name: Complete run
+    kind: callable_function
+    request_shape:
+      - { name: run_id, type: uuid }
+      - { name: status, type: string }
+    response_shape:
+      - { name: unlocks, type: array }
+  - id: api-sync-cloud-save
+    name: Sync cloud save
+    kind: callable_function
+    request_shape:
+      - { name: player_id, type: uuid }
+    response_shape:
+      - { name: synced_at, type: datetime }
+
+acceptance_criteria:
+  - id: ac-start-run-generates-seed
+    workflow_ref: start-run
+    given: A player selects a character on the character-select screen
+    when: They confirm starting a run
+    then: A run entity is created with a fresh seed and status in_progress, and a save_state is initialized
+  - id: ac-play-card-updates-save-state
+    workflow_ref: play-turn
+    given: A player has an in-progress run with cards in hand
+    when: They play a card with sufficient energy available
+    then: The save_state deck_snapshot and health reflect the card's effect and are persisted
+  - id: ac-complete-run-grants-unlocks
+    workflow_ref: complete-run
+    given: A run reaches its final encounter or the player's health reaches zero
+    when: The run is marked won or lost
+    then: The run.status and ended_at are set, and any newly earned unlock entities are created for the player
+
+tests:
+  - id: test-start-run-unit
+    type: unit
+    acceptance_criteria_refs: [ac-start-run-generates-seed]
+    description: Unit test that starting a run creates a run row and an initial save_state.
+  - id: test-play-card-unit
+    type: unit
+    acceptance_criteria_refs: [ac-play-card-updates-save-state]
+    description: Unit test for energy-cost enforcement and save_state mutation on card play.
+  - id: test-complete-run-integration
+    type: integration
+    acceptance_criteria_refs: [ac-complete-run-grants-unlocks]
+    description: Integration test that a won run grants the expected unlock set for its character.
+  - id: test-full-run-e2e
+    type: e2e
+    acceptance_criteria_refs: [ac-start-run-generates-seed, ac-complete-run-grants-unlocks]
+    description: End-to-end run from character select through a completed run and unlock screen.
+
+deployment:
+  environments:
+    - { id: dev, name: Development, purpose: development }
+    - { id: staging, name: Staging, purpose: staging }
+    - { id: prod, name: Production, purpose: production }
+  ci: GitHub Actions; lint, unit, integration per PR; store submission is a manual release step.
+  secrets_policy: >
+    No backend credentials are required for core offline play; optional
+    cloud-save credentials are handled entirely by the platform SDK and
+    never recorded in this spec.
+
+observability:
+  logging: Local structured debug log, opt-in crash reporting only.
+  metrics: [run_completion_rate, average_run_duration_seconds, unlock_rate_per_run]
+  alerts: [crash_rate_spike]
+
+migrations:
+  - id: mig-0001-initial-schema
+    description: Create player_profile, run, card, unlock, and save_state tables (local SQLite).
+
+implementation_constraints:
+  stack_pins:
+    - "unity >= 2022 LTS"
+  forbidden_dependencies:
+    - "any analytics SDK that fingerprints device identity beyond an anonymous install id"
+  budgets:
+    max_app_size_mb: 250
+    max_p95_latency_ms: 50
+
+open_questions:
+  - id: oq-cloud-save-conflict
+    question: What is the resolution policy when local and cloud save_state diverge after offline play on two devices?
+    owner: engineering
+  - id: oq-seed-sharing
+    question: Should run seeds be shareable/replayable between players in a future update?
+    owner: product

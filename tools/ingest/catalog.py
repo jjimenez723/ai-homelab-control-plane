@@ -270,11 +270,33 @@ def _migration_4_reusable_source_paths(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _migration_5_naming_audit(conn: sqlite3.Connection) -> None:
+    """Carry the D-057 naming-audit columns onto the T7 copy of a lineage row.
+
+    Same reasoning as `_migration_3_generation`: the catalog never queries
+    these columns itself, but `pipeline.py::_attach_provenance` copies ledger
+    rows across verbatim through `append_naming`, whose column list is
+    `ledger.NAMING_HISTORY_COLUMNS`. Without the columns here that insert
+    would fail on an already-ingested file the moment naming gained an audit
+    trail.
+
+    Note what this does *not* carry: the evidence text itself. Only the
+    content hash, the evidence *kinds*, the prompt identity and the model's
+    own raw one-line answer travel to Angel. Extracted document text stays in
+    the Mac-side ledger, which is not restic-backed -- D-030's privacy posture
+    is unchanged by giving naming an audit trail.
+    """
+    for column in ("prompt_id", "prompt_version", "prompt_sha256", "evidence_sha256",
+                   "evidence_sources", "raw_output"):
+        add_column_if_missing(conn, "naming_history", column, "TEXT")
+
+
 MIGRATIONS = (
     _migration_1_phase_1a,
     _migration_2_file_intelligence,
     _migration_3_generation,
     _migration_4_reusable_source_paths,
+    _migration_5_naming_audit,
 )
 
 

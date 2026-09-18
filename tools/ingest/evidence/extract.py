@@ -19,7 +19,10 @@ Four things happen here, in this order, and the order is the design:
    images, because "what am I looking at" is what tells us whether OCR is even
    worth a pass -- `router.refine_route` then reopens the question with that
    answer in hand, and `router.refine_route_for_native_text` reopens it again
-   when a document's supposed text layer turns out to be a watermark.
+   when a document's supposed text layer turns out to be a watermark. Speech
+   transcription runs last of all: it is the most expensive stage by an order
+   of magnitude, it cannot reopen any routing question, and nothing else waits
+   on its answer.
 3. **Cache by content.** Every stage's result is keyed by the file's SHA-256
    plus the identity and version of whatever produced it (`cache.CacheKey`).
    A pathname is nowhere in that key, which is what lets a rename reuse work
@@ -67,12 +70,19 @@ from tools.ingest.evidence.backends import (
     build_vision_backend,
     text_extractors,
 )
+from tools.ingest.evidence.backends import (
+    TranscriptionBackend,
+    TranscriptionResult,
+    build_transcription_backend,
+)
+from tools.ingest.evidence.backends import ffmpeg_audio, ffmpeg_video
 from tools.ingest.evidence.raster import rasterize_image, rasterize_pdf_pages
 from tools.ingest.evidence.reading_order import assign_reading_order
 from tools.ingest.evidence.types import (
     EVIDENCE_PIPELINE_VERSION,
     IMAGE_KIND_UNKNOWN,
     IMAGE_KINDS,
+    MAX_TRANSCRIPT_SEGMENTS,
     WARN_BACKEND_UNAVAILABLE,
     WARN_LOW_CONFIDENCE,
     WARN_MALFORMED,
@@ -89,6 +99,8 @@ from tools.ingest.evidence.types import (
     RasterImage,
     StructureEvidence,
     TextSection,
+    TranscriptEvidence,
+    TranscriptSegment,
     VisualEvidence,
     native_text_from_json,
     native_text_to_json,
@@ -99,13 +111,17 @@ from tools.ingest.evidence.types import (
     structure_evidence_to_json,
     visual_evidence_from_json,
     visual_evidence_to_json,
+    transcript_evidence_from_json,
+    transcript_evidence_to_json,
+    visual_frames_from_json,
 )
 from tools.ingest.identity import short_hash
-from tools.ingest.media.probe import MEDIA_DOCUMENT, MEDIA_IMAGE
+from tools.ingest.media.probe import MEDIA_DOCUMENT, MEDIA_IMAGE, MEDIA_VIDEO
 
 KIND_NATIVE_TEXT = "native_text"
 KIND_OCR = "ocr"
 KIND_VISUAL = "visual"
+KIND_TRANSCRIPT = "transcript"
 KIND_STRUCTURE = "structure"
 
 STATUS_OK = "ok"
@@ -147,6 +163,11 @@ def pipeline_version_for(config: EvidenceConfig) -> str:
             config.raster_max_pixels,
             config.max_text_chars,
             config.ocr.max_blocks,
+            config.vision.video_frame_count,
+            config.vision.frame_dedupe,
+            config.vision.frame_duration_aware,
+            config.transcription.max_audio_seconds,
+            config.transcription.language,
         )
     )
     return f"{EVIDENCE_PIPELINE_VERSION}-{short_hash(material)}"
@@ -162,6 +183,7 @@ def collect_evidence(
     ledger: cache.EvidenceLedger | None = None,
     ocr_backend: OCRBackend | None = None,
     vision_backend: VisionBackend | None = None,
+    transcription_backend: TranscriptionBackend | None = None,
     extractors: tuple[Any, ...] | None = None,
 ) -> FileEvidence:
     """Perceive one file and return normalized evidence about its bytes.
@@ -221,10 +243,11 @@ def collect_evidence(
             config=config,
         )
 
-    visual: VisualEvidence | None = None
+    visual_frames: tuple[VisualEvidence, ...] = ()
     if route.vision:
-        visual = _vision_stage(
+        visual_frames = _vision_stage(
             source=source,
+            facts=facts,
             config=config,
             route_reason=route.reason,
             pipeline_version=pipeline_version,
@@ -236,18 +259,36 @@ def collect_evidence(
         )
         # Vision has now actually looked at the pixels. If it says the image
         # is text-bearing, that outranks the filename-and-EXIF guess `route_for`
-        # had to make before anything was decoded.
-        route = router.refine_route(route, visual, config=config)
+        # had to make before anything was decoded. For a video, `route.ocr` is
+        # already True (r14-video-frame), so this is a no-op regardless of
+        # which sampled frame is checked.
+        route = router.refine_route(route, visual_frames[0] if visual_frames else None, config=config)
 
     ocr_blocks: tuple[OCRBlock, ...] = ()
     if route.ocr:
         ocr_blocks = _ocr_stage(
             source=source,
+            facts=facts,
             config=config,
             route_reason=route.reason,
             pipeline_version=pipeline_version,
             ledger=ledger,
             backend=ocr_backend,
+            now=now,
+            warnings=warnings,
+            provenance=provenance,
+        )
+
+    transcript: TranscriptEvidence | None = None
+    if route.transcript:
+        transcript = _transcript_stage(
+            source=source,
+            facts=facts,
+            config=config,
+            route_reason=route.reason,
+            pipeline_version=pipeline_version,
+            ledger=ledger,
+            backend=transcription_backend,
             now=now,
             warnings=warnings,
             provenance=provenance,
@@ -261,7 +302,9 @@ def collect_evidence(
         route=route,
         native_text=native_text,
         ocr_blocks=ocr_blocks,
-        visual=visual,
+        visual=visual_frames[0] if visual_frames else None,
+        visual_frames=visual_frames,
+        transcript=transcript,
         structure=structure,
         provenance=tuple(provenance),
         warnings=tuple(warnings),
@@ -361,6 +404,7 @@ def _native_text_stage(
 def _vision_stage(
     *,
     source: EvidenceSource,
+    facts: dict[str, Any],
     config: EvidenceConfig,
     route_reason: str,
     pipeline_version: str,
@@ -369,7 +413,11 @@ def _vision_stage(
     now: str,
     warnings: list[EvidenceWarning],
     provenance: list[EvidenceProvenance],
-) -> VisualEvidence | None:
+) -> tuple[VisualEvidence, ...]:
+    """One `VisualEvidence` per image the backend is shown, in order --
+    always exactly one for a photo/screenshot, one per sampled frame for a
+    video (`_rasterize` is what decides how many, and is shared with
+    `_ocr_stage` so both stages see the same frames)."""
     backend = backend if backend is not None else build_vision_backend(config.vision)
     key = cache.CacheKey(
         content_sha256=source.sha256,
@@ -384,11 +432,13 @@ def _vision_stage(
     if cached is not None and cached.hit:
         warnings.extend(cached.warnings)
         payload = cached.payload or {}
-        visual = visual_evidence_from_json(payload["visual"]) if payload.get("visual") else None
+        frames = visual_frames_from_json(payload) if payload.get("frames") is not None else (
+            (visual_evidence_from_json(payload["visual"]),) if payload.get("visual") else ()
+        )
         provenance.append(
             _provenance(key, generated_at=cached.generated_at or now, cache_hit=True, status=cached.status)
         )
-        return visual
+        return frames
 
     if not _available(backend):
         stage_warnings = (
@@ -403,42 +453,60 @@ def _vision_stage(
         # Deliberately not cached. Availability is a property of the machine,
         # not of the bytes, and caching "absent" would mean installing the
         # backend never re-asks for files already scanned.
-        return None
+        return ()
 
-    image, raster_warnings = _raster_for_vision(source, config)
+    images, raster_warnings = _rasterize(source, config, facts=facts)
     warnings.extend(raster_warnings)
-    if image is None:
+    if not images:
         provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_FAILED))
-        return None
+        return ()
 
-    result = _call_backend(
-        lambda: backend.describe(image, timeout_seconds=config.vision.timeout_seconds),
-        stage=KIND_VISUAL,
-        name=backend.name,
-        empty=VisionResult(visual=None, status=STATUS_FAILED),
-    )
-    visual, coercions = _normalize_visual(result.visual, backend=backend)
-    stage_warnings = tuple(result.warnings) + coercions
-    warnings.extend(stage_warnings)
-    provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=result.status))
+    frames: list[VisualEvidence] = []
+    stage_warnings: list[EvidenceWarning] = []
+    status = STATUS_OK
+    for image in images:
+        result = _call_backend(
+            lambda image=image: backend.describe(image, timeout_seconds=config.vision.timeout_seconds),
+            stage=KIND_VISUAL,
+            name=backend.name,
+            empty=VisionResult(visual=None, status=STATUS_FAILED),
+        )
+        visual, coercions = _normalize_visual(result.visual, backend=backend)
+        stage_warnings.extend(result.warnings)
+        stage_warnings.extend(coercions)
+        if visual is not None:
+            frames.append(visual)
+        if result.status != STATUS_OK:
+            # One unreadable frame does not invalidate the rest of the video,
+            # but the file's evidence must not claim to be complete either --
+            # the same posture `_ocr_stage`'s per-page loop already takes.
+            status = STATUS_PARTIAL if frames else STATUS_FAILED
 
-    if ledger is not None and result.status != STATUS_UNAVAILABLE:
+    stage_warnings_tuple = tuple(stage_warnings)
+    warnings.extend(stage_warnings_tuple)
+    provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=status))
+
+    if ledger is not None and status != STATUS_UNAVAILABLE:
         _store(
             ledger,
             key,
-            payload={"visual": visual_evidence_to_json(visual) if visual is not None else None},
-            warnings=stage_warnings,
-            status=result.status,
+            payload={
+                "visual": visual_evidence_to_json(frames[0]) if frames else None,
+                "frames": [visual_evidence_to_json(frame) for frame in frames],
+            },
+            warnings=stage_warnings_tuple,
+            status=status,
             route_reason=route_reason,
             now=now,
             failures=warnings,
         )
-    return visual
+    return tuple(frames)
 
 
 def _ocr_stage(
     *,
     source: EvidenceSource,
+    facts: dict[str, Any],
     config: EvidenceConfig,
     route_reason: str,
     pipeline_version: str,
@@ -476,7 +544,7 @@ def _ocr_stage(
         provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_UNAVAILABLE))
         return ()  # not cached; see the same reasoning in `_vision_stage`
 
-    pages, raster_warnings = _rasterize(source, config)
+    pages, raster_warnings = _rasterize(source, config, facts=facts)
     warnings.extend(raster_warnings)
     if not pages:
         provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_FAILED))
@@ -542,11 +610,132 @@ def _ocr_stage(
     return blocks
 
 
+def _transcript_stage(
+    *,
+    source: EvidenceSource,
+    facts: dict[str, Any],
+    config: EvidenceConfig,
+    route_reason: str,
+    pipeline_version: str,
+    ledger: cache.EvidenceLedger | None,
+    backend: TranscriptionBackend | None,
+    now: str,
+    warnings: list[EvidenceWarning],
+    provenance: list[EvidenceProvenance],
+) -> TranscriptEvidence | None:
+    """What the file's audio says, or None with a recorded reason (D-058).
+
+    The same shape as the other stages -- cache key from the producer's
+    identity, cached payload if there is one, the producer inside a guard
+    that converts any escape into a warning, normalize, store -- with two
+    differences worth stating:
+
+    * **The audio is decoded only after the backend says it can run.**
+      Extracting a clip is an ffmpeg subprocess; spending it to discover the
+      engine is not installed would make "no transcription backend" cost
+      more than "no audio".
+    * **A file with no audio to transcribe is not a failure.** A silent
+      track, or a container whose audio stream is absent despite the probe's
+      fact, produces a `no_audio` warning and an `unavailable` status, and
+      is deliberately not cached: it is the same reasoning as an unavailable
+      backend one line above, applied to an answer that cost nothing to
+      reach.
+    """
+    backend = backend if backend is not None else build_transcription_backend(config.transcription)
+    key = cache.CacheKey(
+        content_sha256=source.sha256,
+        kind=KIND_TRANSCRIPT,
+        producer=backend.name,
+        producer_version=backend.version,
+        model=getattr(backend, "model", "") or "",
+        model_version=getattr(backend, "model_version", "") or "",
+        pipeline_version=pipeline_version,
+    )
+    cached = cache.lookup(ledger, key) if ledger is not None else None
+    if cached is not None and cached.hit:
+        warnings.extend(cached.warnings)
+        payload = cached.payload or {}
+        provenance.append(
+            _provenance(key, generated_at=cached.generated_at or now, cache_hit=True, status=cached.status)
+        )
+        return (
+            transcript_evidence_from_json(payload["transcript"]) if payload.get("transcript") else None
+        )
+
+    if not _available(backend):
+        warnings.append(
+            EvidenceWarning(
+                code=WARN_BACKEND_UNAVAILABLE,
+                stage=KIND_TRANSCRIPT,
+                detail=f"transcription backend {backend.name} reports itself unavailable",
+            )
+        )
+        provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_UNAVAILABLE))
+        return None  # not cached; see the same reasoning in `_vision_stage`
+
+    clip, audio_warnings = ffmpeg_audio.extract_audio_clip(
+        source.path,
+        source_sha256=source.sha256,
+        max_seconds=config.transcription.max_audio_seconds,
+        timeout_seconds=config.transcription.timeout_seconds,
+        source_duration_seconds=facts.get("duration_seconds"),
+    )
+    warnings.extend(audio_warnings)
+    if clip is None:
+        # No usable audio: an answer about the file (or about ffmpeg), never
+        # an exception, and never cached -- installing ffmpeg, or the same
+        # bytes later being probed with a working decoder, must re-ask.
+        provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=STATUS_UNAVAILABLE))
+        return None
+
+    result = _call_backend(
+        lambda: backend.transcribe(clip, timeout_seconds=config.transcription.timeout_seconds),
+        stage=KIND_TRANSCRIPT,
+        name=backend.name,
+        empty=TranscriptionResult(transcript=None, status=STATUS_FAILED),
+    )
+    stage_warnings = tuple(result.warnings)
+    warnings.extend(stage_warnings)
+    transcript = _normalize_transcript(result.transcript, backend=backend, config=config, clip=clip)
+    status = result.status
+    if status == STATUS_UNAVAILABLE:
+        provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=status))
+        return None
+    provenance.append(_provenance(key, generated_at=now, cache_hit=False, status=status))
+
+    if ledger is not None:
+        _store(
+            ledger,
+            key,
+            payload={
+                "transcript": transcript_evidence_to_json(transcript) if transcript is not None else None
+            },
+            warnings=stage_warnings,
+            status=status,
+            route_reason=route_reason,
+            now=now,
+            failures=warnings,
+        )
+    return transcript
+
+
 # -- rasterization ----------------------------------------------------------
 
 
-def _rasterize(source: EvidenceSource, config: EvidenceConfig) -> tuple[list[RasterImage], tuple[EvidenceWarning, ...]]:
-    """Pixels for OCR: every eligible page of a document, or the one image."""
+def _rasterize(
+    source: EvidenceSource, config: EvidenceConfig, *, facts: dict[str, Any]
+) -> tuple[list[RasterImage], tuple[EvidenceWarning, ...]]:
+    """Pixels for OCR and/or vision: every eligible page of a document, every
+    sampled frame of a video, or the one image.
+
+    Shared by both stages so a video's OCR pass and vision pass always see
+    the exact same sampled frames (one `ffmpeg` run per frame, not two) --
+    `page` on each `RasterImage` is its 1-based sampling order, which is
+    also what lets `_ocr_stage`'s existing per-page loop handle a video with
+    zero changes: it already treats "however many pages `_rasterize`
+    returned" as the unit of work, the way it already did for a multi-page
+    PDF.
+    """
     if source.media_kind == MEDIA_DOCUMENT:
         return rasterize_pdf_pages(
             source,
@@ -554,25 +743,18 @@ def _rasterize(source: EvidenceSource, config: EvidenceConfig) -> tuple[list[Ras
             max_pages=config.max_pages,
             max_pixels=config.raster_max_pixels,
         )
+    if source.media_kind == MEDIA_VIDEO:
+        return ffmpeg_video.extract_frames(
+            source.path,
+            source_sha256=source.sha256,
+            count=config.vision.video_frame_count,
+            duration_seconds=facts.get("duration_seconds"),
+            timeout_seconds=config.vision.timeout_seconds,
+            dedupe=config.vision.frame_dedupe,
+            duration_aware=config.vision.frame_duration_aware,
+        )
     image, warnings = rasterize_image(source, max_pixels=config.raster_max_pixels)
     return ([image] if image is not None else []), warnings
-
-
-def _raster_for_vision(
-    source: EvidenceSource, config: EvidenceConfig
-) -> tuple[RasterImage | None, tuple[EvidenceWarning, ...]]:
-    """Pixels for vision: one image. A vision backend describes a scene, and
-    a multi-page document does not have one -- routing never asks for vision on
-    a document, and this asserts that rather than quietly describing page 1."""
-    if source.media_kind != MEDIA_IMAGE:
-        return None, (
-            EvidenceWarning(
-                code=WARN_UNSUPPORTED,
-                stage=KIND_VISUAL,
-                detail=f"vision is only attempted for images, not {source.media_kind}",
-            ),
-        )
-    return rasterize_image(source, max_pixels=config.raster_max_pixels)
 
 
 # -- normalization ----------------------------------------------------------
@@ -648,6 +830,81 @@ def _normalize_visual(
         model=visual.model or "",
         model_version=visual.model_version or "",
     ), warnings
+
+
+def _normalize_transcript(
+    transcript: TranscriptEvidence | None,
+    *,
+    backend: Any,
+    config: EvidenceConfig,
+    clip: Any,
+) -> TranscriptEvidence | None:
+    """Sanitize, bound, and re-anchor a backend's transcript to what it heard.
+
+    Everything a speech engine returns is untrusted in exactly the sense OCR
+    text is untrusted: it is a transcription of words a stranger recorded.
+    Text is sanitized and capped at `evidence.max_text_chars`, segment text
+    is sanitized individually, the segment count is bounded, timestamps are
+    coerced to finite non-negative seconds in order, and the confidence is
+    clamped. `engine`/`engine_version` fall back to the backend's own
+    identity rather than being trusted from the payload, matching
+    `_normalize_ocr_blocks`.
+    """
+    if transcript is None:
+        return None
+
+    text, truncated = sanitize_extracted_text(
+        str(transcript.text or ""), max_chars=config.max_text_chars
+    )
+    covered = _non_negative(getattr(clip, "duration_seconds", 0.0))
+    segments: list[TranscriptSegment] = []
+    for segment in (transcript.segments or ())[:MAX_TRANSCRIPT_SEGMENTS]:
+        segment_text, segment_truncated = sanitize_extracted_text(
+            str(getattr(segment, "text", "") or ""), max_chars=config.max_text_chars
+        )
+        segment_text = segment_text.strip()
+        truncated = truncated or segment_truncated
+        if not segment_text:
+            continue
+        start = _non_negative(getattr(segment, "start_seconds", 0.0))
+        end = _non_negative(getattr(segment, "end_seconds", 0.0))
+        # A segment cannot end after the audio did. whisper reports the end
+        # of its 30-second decoding window rather than the end of the sound
+        # for the last segment of a short clip, which would otherwise leave
+        # a four-second recording claiming a thirty-second segment.
+        if covered > 0:
+            start = min(start, covered)
+            end = min(end, covered)
+        segments.append(
+            TranscriptSegment(start_seconds=start, end_seconds=max(start, end), text=segment_text)
+        )
+    if len(transcript.segments or ()) > MAX_TRANSCRIPT_SEGMENTS:
+        truncated = True
+
+    return TranscriptEvidence(
+        text=text,
+        language=str(transcript.language or "")[:16],
+        segments=tuple(segments),
+        engine=transcript.engine or backend.name,
+        engine_version=transcript.engine_version or backend.version,
+        model=str(transcript.model or getattr(backend, "model", "") or ""),
+        # How much audio was listened to is a fact this layer measured when it
+        # decoded the clip, not something the engine is asked to self-report.
+        duration_covered_seconds=covered,
+        truncated=bool(transcript.truncated) or bool(getattr(clip, "truncated", False)) or truncated,
+        confidence=_clamp(transcript.confidence),
+    )
+
+
+def _non_negative(value: Any) -> float:
+    """Seconds, coerced to a finite value at or above zero."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number != number or number in (float("inf"), float("-inf")):
+        return 0.0
+    return max(0.0, number)
 
 
 def _normalize_ocr_blocks(

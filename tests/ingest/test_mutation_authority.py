@@ -26,15 +26,18 @@ import unittest
 from pathlib import Path
 
 from tools.ingest.evidence.types import (
+    AudioClip,
     EvidenceProvenance,
     EvidenceSource,
     FileEvidence,
     NativeText,
     OCRBlock,
     RasterImage,
+    TranscriptEvidence,
+    TranscriptSegment,
     VisualEvidence,
 )
-from tools.ingest.naming.evidence import NamingEvidence
+from tools.ingest.naming.evidence import NamingEvidence, PerceivedEvidence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INGEST = REPO_ROOT / "tools" / "ingest"
@@ -77,6 +80,17 @@ PURE_MODULES = (
     "naming/quality.py",
     "naming/evidence.py",
     "naming/proposer.py",
+    # The model-backed proposer (D-057). It reaches a loopback HTTP endpoint,
+    # which is a capability the deterministic proposer does not have -- so it
+    # belongs on this list more than any other module here, not less: the
+    # claim being enforced is that the one place in the pipeline a model
+    # speaks still cannot touch a file.
+    "naming/semantic.py",
+    # The FileEvidence -> PerceivedEvidence conversion (D-057). It is the one
+    # module allowed to import both the perception package and the naming
+    # package, which makes it the single point where a mistake could turn
+    # perceived content into something with reach. Zero mutation, asserted.
+    "perception_bridge.py",
     "triage/policy.py",
     "exclusions.py",
     "scanner.py",
@@ -87,7 +101,7 @@ PURE_MODULES = (
     "migrations.py",
     "schema_sql.py",
     "status.py",
-    # Evidence layer (§20): these five do zero I/O of any kind -- not merely
+    # Evidence layer (§20): these six do zero I/O of any kind -- not merely
     # zero *mutation*, which is all `_mutations_in` can actually detect. The
     # rest of `evidence/` (text.py, raster.py, preprocess.py, perspective.py,
     # extract.py, backends/__init__.py, backends/tesseract.py,
@@ -98,6 +112,7 @@ PURE_MODULES = (
     "evidence/router.py",
     "evidence/reading_order.py",
     "evidence/cache.py",
+    "evidence/summary.py",
     "evidence/backends/null.py",
     # The interpretation layer turns evidence into hypotheses (D-036). It is
     # squarely on the path a model's output travels, so it belongs on this
@@ -119,6 +134,28 @@ EVIDENCE_SUBPROCESS_JUSTIFICATIONS = {
         "package, only a system binary. Invoked with a fixed argv and a hard "
         "timeout, no shell, fed PNG bytes on stdin -- never a path, never a "
         "user-influenced argument."
+    ),
+    "backends/ffmpeg_video.py": (
+        "The only offline video-frame sampler this project ships that needs "
+        "no Python package, only a system binary. Invoked with a fixed argv "
+        "and a hard timeout, no shell, no `-y` and no output path -- a "
+        "single PNG frame is read back on stdout, never written to disk."
+    ),
+    "backends/ffmpeg_audio.py": (
+        "The audio half of the same binary, split into its own module "
+        "because it carries different guards (a byte-and-seconds budget, a "
+        "silence floor) than the frame sampler. Fixed argv, hard timeout, no "
+        "shell, no `-y` and no output path -- the decoded WAV is read back on "
+        "stdout as bytes, never written to disk."
+    ),
+    "backends/transcription.py": (
+        "The only offline speech-to-text engine this project ships that "
+        "needs no Python package, only a system binary plus a model file "
+        "(whisper.cpp's `whisper-cli`). Fixed argv, hard timeout, no shell; "
+        "the WAV goes in on stdin (`-f -`) and JSON comes back on stdout "
+        "(`-oj -of -`), so no `--output-*` file is ever produced. If a future "
+        "build cannot read stdin, this backend must report itself "
+        "unavailable rather than fall back to a temp file (D-058)."
     ),
 }
 
@@ -219,6 +256,42 @@ class EvidenceBoundaryTests(unittest.TestCase):
     def test_evidence_is_frozen(self):
         """A proposer must not be able to edit the facts it was given."""
         self.assertTrue(NamingEvidence.__dataclass_params__.frozen)
+
+    def test_perceived_evidence_is_frozen_plain_data(self):
+        """D-057: perception reaches the proposer as strings and tuples only.
+
+        This is the same argument as the two tests above, applied to the
+        field that carries OCR text, a vision description and a transcript
+        into naming. Every annotation must be a `str`, a `tuple[str, ...]`,
+        or a number -- not a `Path`, not a callable, and not one of the
+        perception layer's own richer value types (`OCRBlock`, `Polygon`,
+        `VisualEvidence`), which would drag geometry, per-block confidences
+        and provenance into the naming boundary and give a future consumer a
+        second, unvalidated way to reason about a file.
+        """
+        allowed_annotations = {"str", "tuple[str, ...]", "int", "float", "bool"}
+        for field in dataclasses.fields(PerceivedEvidence):
+            with self.subTest(field=field.name):
+                annotation = str(field.type)
+                self.assertIn(
+                    annotation, allowed_annotations,
+                    f"PerceivedEvidence.{field.name} is {annotation!r}; only bounded plain "
+                    "strings/tuples/numbers may cross into the naming boundary",
+                )
+        self.assertTrue(PerceivedEvidence.__dataclass_params__.frozen)
+
+    def test_naming_evidence_carries_perceived_evidence_and_nothing_richer(self):
+        """The `perceived` field exists and is the only perception channel."""
+        annotations = {field.name: str(field.type) for field in dataclasses.fields(NamingEvidence)}
+        self.assertEqual(annotations.get("perceived"), "PerceivedEvidence | None")
+        for name, annotation in annotations.items():
+            with self.subTest(field=name):
+                for forbidden in ("FileEvidence", "OCRBlock", "VisualEvidence", "NativeText", "Polygon"):
+                    self.assertNotIn(
+                        forbidden, annotation,
+                        f"NamingEvidence.{name} exposes the perception layer's own "
+                        f"{forbidden} to a proposer; use PerceivedEvidence",
+                    )
 
 
 class SourceDeletionAuthorityTests(unittest.TestCase):
@@ -365,7 +438,7 @@ class EvidenceLayerImportGuardTests(unittest.TestCase):
                     offenders.append(f"{relative}: imports {imported!r}")
         self.assertEqual(offenders, [], "banned import(s) found: " + ", ".join(offenders))
 
-    def test_subprocess_is_confined_to_the_justified_tesseract_module(self):
+    def test_subprocess_is_confined_to_the_justified_modules(self):
         offenders: list[str] = []
         for path in sorted(EVIDENCE.rglob("*.py")):
             if "__pycache__" in path.parts:
@@ -401,7 +474,21 @@ class EvidenceLayerImportGuardTests(unittest.TestCase):
 class EvidenceValueTypesCarryNoAuthorityTests(unittest.TestCase):
     """Mirrors `EvidenceBoundaryTests` above, for the new evidence value types."""
 
-    _TYPES = (FileEvidence, RasterImage, OCRBlock, VisualEvidence, NativeText, EvidenceProvenance)
+    # `AudioClip` and `TranscriptEvidence` are on this list for the same
+    # reason `RasterImage` is: `AudioClip` is what a speech backend is
+    # handed (bytes, never a path -- D-058), and `TranscriptEvidence` is
+    # what it hands back.
+    _TYPES = (
+        FileEvidence,
+        RasterImage,
+        AudioClip,
+        OCRBlock,
+        VisualEvidence,
+        NativeText,
+        TranscriptEvidence,
+        TranscriptSegment,
+        EvidenceProvenance,
+    )
 
     def test_none_of_the_core_evidence_types_expose_a_path_or_callable(self):
         allowed_fragments = ("Path", "Callable", "IO")

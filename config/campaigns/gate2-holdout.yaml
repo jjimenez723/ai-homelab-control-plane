@@ -1,0 +1,67 @@
+# Gate-2 FROZEN-HOLDOUT certification run (D-040, D-053, D-060).
+#
+# This is the certification stage, and it is the only campaign allowed to touch
+# the frozen holdout. Three rules it exists to enforce:
+#
+#   1. One finalist only. A holdout run is not a bakeoff; comparing candidates
+#      is what the validation split is for. Adding a second candidate here
+#      spends holdout items on a comparison and leaves nothing clean to
+#      certify against.
+#   2. Serialized. `tools.campaign.runner` forces one candidate at a time for
+#      any campaign containing a frozen_holdout suite (D-053), so the final
+#      latency and reliability envelopes are not measured under deliberate
+#      cross-model memory contention.
+#   3. Run once, per configuration. The campaign id pins the manifest
+#      fingerprint; a different finalist, prompt version or suite version is a
+#      new campaign id, never a resume of this one.
+#
+# The finalist below is the candidate that satisfied both thresholds on the
+# validation split in `gate2-validation-002`. Changing it means a new
+# campaign_id, not an edit to this one.
+
+version: 1
+campaign_id: gate2-holdout-001
+description: >
+  Frozen-holdout certification run for the single Gate-2 finalist
+  (qwen3.5:9b, prompt 1.1.0, suite 1.1.0), serialized.
+
+samples_per_item: 5
+timeout_seconds: 300
+concurrency: 1
+
+suites:
+  - id: acb-v1/routing-classification
+    split: frozen_holdout
+    threshold:
+      min_pass_rate: 0.80
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+  - id: acb-v1/semantic-naming
+    split: frozen_holdout
+    threshold:
+      min_pass_rate: 0.75
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+
+candidates:
+  - name: qwen3.5-9b-p110
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling:
+      temperature: 0
+      seed: 42
+      num_ctx: 4096
+      num_predict: 128
+      think: false
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.1.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0"

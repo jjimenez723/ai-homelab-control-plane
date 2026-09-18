@@ -99,3 +99,56 @@ class FailureAnalysisTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttributionHintTests(unittest.TestCase):
+    """D-059: a result is evidence about a model only once contract, budget
+    and oracle have been ruled out, so the analysis labels which of those a
+    failure category points at."""
+
+    def test_hints_separate_model_contract_budget_and_verifier(self) -> None:
+        from tools.bench.gate2_failure_analysis import attribution_hint
+        self.assertEqual(attribution_hint("wrong_label"), "model")
+        self.assertEqual(attribution_hint("missing_required_concept"), "model")
+        self.assertEqual(attribution_hint("wrong_extension"), "prompt_contract")
+        self.assertEqual(attribution_hint("truncated"), "sampling_budget")
+        self.assertEqual(attribution_hint("verifier_error"), "verifier")
+        self.assertEqual(attribution_hint("timeout"), "infrastructure")
+        self.assertEqual(attribution_hint("pass"), "pass")
+        self.assertEqual(attribution_hint("something-new"), "unclassified")
+
+    def test_cells_carry_hint_and_scenario_breakdowns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResultStore(result_store_path("camp", root=Path(tmp)))
+            store.append(_record(detail={"failure": "wrong_label"}, raw_output="general"))
+            store.append(_record(item="i2", detail={"failure": "wrong_extension"},
+                                 raw_output="x.docx"))
+            store.append(_record(item="i3", status="truncated", detail={"failure": "empty_output"},
+                                 raw_output="", finish_reason="length"))
+            analysis = generate_failure_analysis("camp", root=Path(tmp))
+            cell = analysis["cells"][0]
+            self.assertEqual(cell["attribution_hint_counts"],
+                             {"model": 1, "prompt_contract": 1, "sampling_budget": 1})
+            self.assertEqual(cell["failures_by_scenario"], {"scenario": 3})
+            markdown = to_markdown(analysis)
+            self.assertIn("Failure attribution hints", markdown)
+
+    def test_reasoning_output_volume_is_summarized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResultStore(result_store_path("camp", root=Path(tmp)))
+            record = _record(status="truncated", detail={"failure": "empty_output"},
+                             raw_output="", finish_reason="length")
+            store.append(ResultRecord(**{**record.as_dict(), "thinking_chars": 1200,
+                                         "num_predict": 64, "schema_version": 3}))
+            analysis = generate_failure_analysis("camp", root=Path(tmp))
+            cell = analysis["cells"][0]
+            self.assertEqual(cell["attempts_with_reasoning_output"], 1)
+            self.assertEqual(cell["max_thinking_chars"], 1200)
+
+    def test_the_hint_is_labelled_as_a_hint_not_a_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResultStore(result_store_path("camp", root=Path(tmp)))
+            store.append(_record(detail={"failure": "wrong_label"}))
+            analysis = generate_failure_analysis("camp", root=Path(tmp))
+            self.assertTrue(any("triage hint, not a verdict" in line
+                                for line in analysis["limitations"]))

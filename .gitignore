@@ -29,6 +29,13 @@ knowledge/
 # Machine-specific ingestion config (T7 UUID, real Desktop/Documents/Downloads
 # paths, registered SD UUIDs). Commit config/ingest.example.yaml instead.
 config/ingest.yaml
+# Measured model-role certifications (D-042, D-060). Machine-specific: a
+# certification names the exact local model digest/quantization that was
+# measured on this host, so it is local state, not a repository claim. The
+# empty `config/certifications.example.yaml` stays committed and stays empty
+# (tests/test_autonomous_routing.py), and the content of any real record is
+# reproduced in DECISIONS.md where it can be reviewed.
+config/certifications.yaml
 # Local ingest catalog/sidecars/staging when a dev T7 root lives in-repo.
 90-system/
 # The generic `media/` ignore above (for local media dumps) would otherwise
@@ -59,3 +66,10 @@ __pycache__/
 *.mp4
 *.wav
 *.webm
+
+# Agent worktrees created by Claude Code during integration passes; never source.
+.claude/worktrees/
+
+# Machine-local model registry (exact local tags/digests measured on this host);
+# config/models.example.yaml is the committed template.
+config/models.yaml

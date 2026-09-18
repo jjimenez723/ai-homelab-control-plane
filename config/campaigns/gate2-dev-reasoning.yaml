@@ -1,0 +1,77 @@
+# Gate-2 DEVELOPMENT-split reasoning-model arms (D-059).
+#
+# `gpt-oss:20b` is a reasoning model whose thinking cannot be turned off:
+# measured on this machine, Ollama 0.33.3 accepts `think: false` for it and
+# returns a full `thinking` payload anyway. Its reasoning and its answer share
+# one `num_predict` budget, which is why gate2-validation-001 -- run at
+# num_predict 64 -- recorded 95-100% truncation and measured nothing about the
+# model's naming or classification ability.
+#
+# So this manifest is a separate campaign, not another arm of `gate2-dev.yaml`:
+# it changes the sampling budget as well as the prompt, and mixing those into
+# one comparison would confound them. `think: low` is Ollama's own effort
+# level for this model family; it is declared here rather than assumed to be
+# ignored, and `reasoning: true` makes the campaign runner refuse any budget
+# below the measured floor.
+
+version: 1
+campaign_id: gate2-dev-reasoning-001
+description: >
+  Dev-split arms for gpt-oss:20b with its reasoning channel accounted for:
+  prompt 1.0.0 vs the frozen 1.1.0 line, at a reasoning-adequate output budget.
+
+samples_per_item: 3
+timeout_seconds: 300
+concurrency: 1
+
+suites:
+  - id: acb-v1/routing-classification
+    split: dev
+    threshold:
+      min_pass_rate: 0.80
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+  - id: acb-v1/semantic-naming
+    split: dev
+    threshold:
+      min_pass_rate: 0.75
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+
+candidates:
+  - name: gpt-oss-20b-p100
+    model: gpt-oss:20b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: true
+    sampling: &reasoning_sampling
+      temperature: 0
+      seed: 42
+      num_ctx: 8192
+      num_predict: 1024
+      think: low
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.0.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.0.0"
+
+  - name: gpt-oss-20b-p110
+    model: gpt-oss:20b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: true
+    sampling: *reasoning_sampling
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.1.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0"

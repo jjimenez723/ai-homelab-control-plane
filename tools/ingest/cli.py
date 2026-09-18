@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ from tools.ingest.catalog import (
 )
 from tools.ingest.config import IngestConfig, load_config
 from tools.ingest.identity import local_file_id_for
+from tools.ingest.naming.evidence import sanitize_perceived_text
 from tools.ingest.ledger import (
     DECISION_PROPOSED,
     DECISION_RENAMED,
@@ -52,6 +54,7 @@ from tools.ingest.enrichment import enrich_asset
 from tools.ingest.exclusions import ExclusionReason
 from tools.ingest.git_repos import inspect_git_repo
 from tools.ingest.identity import source_ref_id_for
+from tools.ingest.repos_report import cmd_repos_report as cmd_repos_report_impl
 from tools.ingest.scanner import ScanResult, scan_source
 from tools.ingest.sources import (
     ALL_SOURCE_CLASSES,
@@ -494,6 +497,27 @@ def _print_triage_reports(report: PipelineReport, *, apply: bool) -> None:
         print("\nDry run. No files were renamed, moved, or removed.")
 
 
+def cmd_repos_report(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
+    """Inventory development repositories; write two reports and nothing else.
+
+    The default report directory is on the volume, so it goes through the
+    same UUID resolver every other write does. `--report-dir` writes wherever
+    it points -- useful for a local copy -- and never needs the volume.
+    """
+    config = config if config is not None else load_config(args.config)
+    report_dir: Path | None = getattr(args, "report_dir", None)
+    if report_dir is None:
+        resolved = resolve_t7(
+            config,
+            prober or diskutil_volume_prober,
+            for_apply=False,
+            allow_storage_root_override=bool(getattr(args, "allow_dev_storage_root", False)),
+        )
+        report_dir = resolved.system_dir / "migration-reports"
+    roots = tuple(getattr(args, "roots", None) or ()) or None
+    return cmd_repos_report_impl(report_dir, config=config, roots=roots)
+
+
 def cmd_status(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
     config = config if config is not None else load_config(args.config)
     data = collect_status(
@@ -677,6 +701,93 @@ def cmd_correct_name(args: argparse.Namespace, prober: VolumeProber | None = Non
     return 0
 
 
+def cmd_naming_history(
+    args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None
+) -> int:
+    """Why is this file called what it is called? Strictly read-only.
+
+    `organize status` and `organize review` answer "what is waiting on me".
+    This answers the audit question instead, and it is the reason the D-057
+    columns exist: for one file, every naming decision ever recorded against
+    it, in order, with the prompt that was rendered, the evidence kinds that
+    were in front of the proposer, the content hash of that evidence, and --
+    where a model was involved -- its raw answer before any cleanup.
+
+    The raw answer is printed because that is the whole point: a proposal that
+    was refused by policy is the most interesting row in this table, and a
+    refusal nobody can inspect is indistinguishable from a rename nobody
+    noticed. It is file-derived text, so it is printed through the same
+    bounded, clearly-marked excerpt helper `organize evidence --show-text`
+    uses, and it is already bounded at the point it was stored.
+
+    Writes nothing, renames nothing, moves nothing.
+    """
+    config = config if config is not None else load_config(args.config)
+    if not config.local_ledger_path.exists():
+        print("No local ledger yet. Run `organize triage all` first.")
+        return 1
+
+    path = args.path.expanduser()
+    with LocalLedger(config.local_ledger_path) as ledger:
+        row = _local_file_row(ledger, path)
+        if row is None:
+            print(f"Not in the ledger: {path}")
+            print("Run `organize triage all` over its source folder first.")
+            return 1
+        rows = ledger.naming_history(row["local_file_id"])
+        print(f"{row['current_path']}")
+        print(f"  first seen as: {row['first_seen_filename'] or '(unknown)'}")
+        print(f"  content sha256: {row['sha256'] or '(none recorded)'}")
+        print(f"  naming state: {row['naming_state']}")
+        if not rows:
+            print("\nNo naming decisions recorded for this file yet.")
+            return 0
+        print(f"\n{len(rows)} naming decision(s), oldest first:")
+        for record in rows:
+            _print_naming_history_row(record)
+
+    print(
+        "\nEvery filename above was produced by a proposal that "
+        "tools/ingest/naming/policy.py validated before it could be applied."
+    )
+    return 0
+
+
+def _print_naming_history_row(record: dict) -> None:
+    print(f"\n  [{record['created_at']}] {record['decision']}")
+    print(f"    from: {record['original_filename']}")
+    if record["proposed_filename"]:
+        print(f"    proposed: {record['proposed_filename']}")
+    if record["applied_filename"]:
+        print(f"    applied: {record['applied_filename']}")
+    confidence = record["confidence"]
+    model = record["model"] or "(no proposer)"
+    print(f"    proposer: {model} {record['model_version'] or ''}".rstrip()
+          + (f"   confidence {float(confidence):.2f}" if confidence is not None else ""))
+    print(f"    approved by: {record['approved_by']}"
+          + ("  (human correction)" if record["human_corrected"] else ""))
+    if record["reason"]:
+        print(f"    reason: {record['reason']}")
+
+    prompt_id = record.get("prompt_id")
+    if prompt_id:
+        print(f"    prompt: {prompt_id} v{record.get('prompt_version') or '?'}")
+        print(f"      rendered sha256: {record.get('prompt_sha256') or '(none)'}")
+    sources = record.get("evidence_sources")
+    if sources:
+        try:
+            kinds = ", ".join(str(kind) for kind in json.loads(sources))
+        except (TypeError, ValueError):
+            kinds = str(sources)
+        print(f"    evidence kinds: {kinds or '(none)'}")
+    if record.get("evidence_sha256"):
+        print(f"    evidence sha256: {record['evidence_sha256']}")
+    raw = record.get("raw_output")
+    if raw:
+        print("    raw model output (untrusted, recorded as produced):")
+        _print_excerpt(str(raw), limit=400)
+
+
 def cmd_evidence(args: argparse.Namespace, prober: VolumeProber | None = None, config: IngestConfig | None = None) -> int:
     """Report what the perception layer has seen. Strictly read-only.
 
@@ -711,6 +822,8 @@ def _print_evidence_summary(ledger: LocalLedger, config: IngestConfig) -> int:
           f"{'' if config.evidence.ocr.enabled else '  (disabled)'}")
     print(f"  Vision backend: {config.evidence.vision.backend}"
           f"{'' if config.evidence.vision.enabled else '  (disabled)'}")
+    print(f"  Transcription:  {config.evidence.transcription.backend}"
+          f"{'' if config.evidence.transcription.enabled else '  (disabled)'}")
     print()
     if not summary["total"]:
         print("No evidence recorded yet.")
@@ -785,6 +898,27 @@ def _print_evidence_payload(record: dict, *, show_text: bool) -> None:
         if show_text:
             ordered = sorted(blocks, key=lambda block: (block.get("page", 1), block.get("reading_order", 0)))
             _print_excerpt("\n".join(str(block.get("text", "")) for block in ordered))
+    transcript = payload.get("transcript")
+    if transcript:
+        # Presence, language, coverage and segment count -- never the words,
+        # unless `--show-text` was asked for. A transcript is the most
+        # sensitive thing this layer produces: it is a verbatim record of
+        # what was said in the owner's own recordings, and a terminal dump of
+        # it piped to a log file would persist that (the same reasoning
+        # `cmd_evidence`'s docstring gives for extracted document text).
+        segments = transcript.get("segments") or []
+        covered = float(transcript.get("duration_covered_seconds", 0.0) or 0.0)
+        print(f"    transcript: present, {len(segments)} segment(s), "
+              f"{len(transcript.get('text') or '')} chars, "
+              f"language {transcript.get('language') or 'unknown'}, "
+              f"{covered:.1f}s of audio covered"
+              f"{', truncated' if transcript.get('truncated') else ''}")
+        print(f"      engine: {transcript.get('engine', '?')} "
+              f"{transcript.get('engine_version', '?')}"
+              f"{'  model=' + str(transcript.get('model')) if transcript.get('model') else ''}"
+              f"   confidence {float(transcript.get('confidence', 0.0) or 0.0):.2f}")
+        if show_text:
+            _print_excerpt(transcript.get("text") or "")
     visual = payload.get("visual")
     if visual:
         print(f"    visual: {visual.get('image_kind')} (confidence {float(visual.get('confidence', 0.0)):.2f})")
@@ -799,15 +933,24 @@ def _print_evidence_payload(record: dict, *, show_text: bool) -> None:
 def _print_excerpt(text: str, *, limit: int = 800) -> None:
     """Print a bounded excerpt of stored text, indented and clearly marked.
 
-    The text is already sanitized at the point it was stored
-    (`evidence/types.py::sanitize_extracted_text` strips the control and bidi
-    characters that let a terminal be driven by file content), so this only
-    has to bound the volume.
+    Text reaching here is normally already sanitized at the point it was
+    stored (`evidence/types.py::sanitize_extracted_text` strips the control
+    and bidi characters that let a terminal be driven by file content). It is
+    re-stripped here anyway, for the same reason
+    `naming/evidence.py::_sanitize_excerpt` re-sanitizes at its own boundary:
+    this is the function that hands attacker-influenced text to a terminal,
+    and it must be safe by construction rather than by the provenance of its
+    caller. The `raw_output` column proved the point -- it was bounded but
+    never sanitized, so rows written before that was fixed still contain
+    whatever a model emitted.
     """
     if not text.strip():
         print("      (no text)")
         return
-    excerpt = text[:limit]
+    excerpt = sanitize_perceived_text(text, max_chars=limit)
+    if not excerpt.strip():
+        print("      (no printable text)")
+        return
     print("      --- extracted text (untrusted file content) ---")
     for line in excerpt.splitlines():
         print(f"      | {line}")
@@ -922,12 +1065,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(evidence)
 
+    naming_history = subparsers.add_parser(
+        "naming-history",
+        help="Why this file is called what it is called. Read-only audit trail.",
+        description=(
+            "Every naming decision recorded for one file, oldest first: the proposer, its "
+            "confidence, the prompt that was rendered, which kinds of perceived evidence were "
+            "in front of it, and a model's raw answer where one was involved. Writes nothing."
+        ),
+    )
+    naming_history.add_argument("path", type=Path, help="The file, as it is currently named on disk.")
+    _add_common_arguments(naming_history)
+
     correct = subparsers.add_parser(
         "correct-name",
         help="Record a name you chose yourself. Nothing automatic overrides it afterwards.",
     )
     correct.add_argument("path", type=Path, help="The file as it is now named on disk.")
     _add_common_arguments(correct)
+
+    repos = subparsers.add_parser(
+        "repos-report",
+        help="Inventory development repositories. Read-only: nothing is moved, fetched, or pushed.",
+    )
+    repos.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+        help="Where to write repos-inventory.yaml and unpushed-repos.md. "
+             "Defaults to 90-system/migration-reports/ on the UUID-verified volume.",
+    )
+    repos.add_argument(
+        "--root",
+        type=Path,
+        action="append",
+        default=None,
+        dest="roots",
+        help="A source root to inventory. Repeatable. Defaults to ~/Documents, ~/Projects, ~/OpenMontage.",
+    )
+    _add_common_arguments(repos)
 
     return parser
 
@@ -944,7 +1120,9 @@ def main(argv: list[str] | None = None, prober: VolumeProber | None = None) -> i
         "review": cmd_review,
         "duplicates": cmd_duplicates,
         "evidence": cmd_evidence,
+        "naming-history": cmd_naming_history,
         "correct-name": cmd_correct_name,
+        "repos-report": cmd_repos_report,
         "keep": cmd_decide,
         "ignore": cmd_decide,
     }[args.command]

@@ -59,6 +59,36 @@ DEFAULTS: dict[str, Any] = {
         # Words the owner's own projects/clients use. Present in a filename,
         # they are strong evidence the name is already meaningful.
         "vocabulary": [],
+        # Which proposer answers "what should this be called?" (D-057).
+        # "deterministic" is the default and names only from measured facts
+        # and quoted evidence. "semantic" asks a loopback-only local model
+        # through the same versioned prompt the Gate-2 naming suite
+        # evaluates, and still passes every answer through the identical
+        # filename policy -- see `naming/semantic.py`.
+        "proposer": "deterministic",
+        "semantic": {
+            # Ollama model tag. Must already be installed locally; nothing
+            # here pulls a model.
+            "model": "qwen3.5:4b",
+            # Loopback-only, enforced by `OllamaLocalClient` itself. A
+            # non-loopback endpoint is refused at the moment the client is
+            # constructed, which this proposer degrades into a recorded
+            # fallback rather than a crash.
+            "endpoint": "http://127.0.0.1:11434",
+            "timeout_seconds": 60,
+            # A filename is short; generating more tokens than this only
+            # buys an explanation nothing reads.
+            "num_predict": 64,
+            # Below this *derived* confidence (see `semantic.py`'s header on
+            # how it is computed -- the model never scores itself) the answer
+            # is discarded and the deterministic proposer answers instead.
+            "min_confidence": 0.6,
+            # When the model is unreachable, times out, or produces something
+            # unusable, fall back to the deterministic proposer rather than
+            # leaving the file unnamed. Turning this off means "a model names
+            # it or nothing does".
+            "fallback_to_deterministic": True,
+        },
     },
     "triage": {
         "enabled": True,
@@ -150,6 +180,29 @@ DEFAULTS: dict[str, Any] = {
             # no vision perception at all.
             "backend": "heuristic",
             "timeout_seconds": 30,
+            "video_frame_count": 5,
+            # Collapse near-identical sampled frames to one representative
+            # before OCR/vision run, and sample fewer frames from a very
+            # short clip. Both are deterministic; see
+            # `evidence/backends/ffmpeg_video.py` for the exact algorithm.
+            "frame_dedupe": True,
+            "frame_duration_aware": True,
+        },
+        "transcription": {
+            # Off by default, like every other optional inference seam: it
+            # needs a whisper.cpp binary and a multi-hundred-megabyte model
+            # the repository does not ship (D-058).
+            "enabled": False,
+            "backend": "null",  # "null" | "whisper-cpp"
+            # Unset means "look in the Angel whisper cache", resolved through
+            # `tools/models/storage.py` at call time -- never a machine path
+            # baked into code.
+            "model_path": None,
+            "language": "en",
+            # Only the first N seconds of a long recording are transcribed.
+            # Evidence about a file, not a subtitle track.
+            "max_audio_seconds": 600,
+            "timeout_seconds": 300,
         },
     },
     "backup": {
@@ -177,6 +230,7 @@ DEFAULTS: dict[str, Any] = {
         # an explicit decision.
         "exclude_patterns": [
             "90-system/staging/**",
+            "90-system/cache/**",
             "40-ai/model-cache/**",
             "**/*.partial",
             ".Spotlight-V100",
@@ -250,6 +304,34 @@ class SourcesConfig:
     screenshots: ScreenshotsConfig = field(default_factory=ScreenshotsConfig)
 
 
+# Proposer implementations `naming.proposer` may name. Refused at load time
+# rather than silently falling back, for the same reason an unknown evidence
+# backend is: an operator who typed `semantics` meant to enable a model, and
+# quietly running the deterministic proposer instead would hide that.
+VALID_NAME_PROPOSERS = frozenset({"deterministic", "semantic"})
+
+
+@dataclass(frozen=True)
+class SemanticNamingConfig:
+    """The opt-in model-backed proposer's settings (D-057).
+
+    Inert unless `naming.proposer == "semantic"`. `endpoint` is not validated
+    here: `tools.models.ollama_local.OllamaLocalClient` is the single place
+    that decides what a permissible endpoint is (loopback HTTP only), and
+    re-implementing that rule in config would create a second definition of
+    it that could drift. `naming/semantic.py` constructs the client inside a
+    guard, so a non-loopback endpoint becomes a recorded fallback with a
+    stated reason instead of an unhandled error mid-run.
+    """
+
+    model: str = "qwen3.5:4b"
+    endpoint: str = "http://127.0.0.1:11434"
+    timeout_seconds: int = 60
+    num_predict: int = 64
+    min_confidence: float = 0.6
+    fallback_to_deterministic: bool = True
+
+
 @dataclass(frozen=True)
 class NamingConfig:
     enabled: bool = True
@@ -258,6 +340,11 @@ class NamingConfig:
     max_filename_length: int = 120
     protected_extensions: frozenset[str] = frozenset({".app", ".dmg", ".pkg", ".mpkg", ".framework", ".kext"})
     vocabulary: tuple[str, ...] = ()
+    # "deterministic" | "semantic". `naming.enabled` keeps its own meaning:
+    # false disables naming entirely (a `DisabledProposer`), whichever
+    # proposer is named here.
+    proposer: str = "deterministic"
+    semantic: SemanticNamingConfig = field(default_factory=SemanticNamingConfig)
 
 
 @dataclass(frozen=True)
@@ -277,6 +364,15 @@ class TriageConfig:
 # for -- the same posture as the screenshots-path guard above.
 VALID_OCR_BACKENDS = frozenset({"null", "tesseract"})
 VALID_VISION_BACKENDS = frozenset({"null", "heuristic", "ollama"})
+VALID_TRANSCRIPTION_BACKENDS = frozenset({"null", "whisper-cpp"})
+
+# The hard ceiling on sampled video frames, independent of what an operator
+# asks for. Every frame is a separate `ffmpeg` run plus (up to) one vision
+# call and one OCR pass, so an unbounded count turns one file into an
+# arbitrarily long stall in a batch that has a whole volume left to scan.
+# Deduplication (`evidence.vision.frame_dedupe`) reduces the *backend* calls
+# below this; it does not raise the ceiling on sampling.
+MAX_VIDEO_FRAME_COUNT = 12
 
 
 @dataclass(frozen=True)
@@ -298,6 +394,37 @@ class VisionConfig:
     model: str = "qwen3-vl:8b"
     max_image_bytes: int = 8_000_000
     max_prompt_chars: int = 4_000
+    # How many frames a video gets sampled into for vision/OCR (evenly spaced
+    # across its duration). The ROI knob: more frames catches a subject that
+    # only appears partway through a clip, at the cost of one backend call
+    # (and, if OCR is enabled, one OCR pass) per frame.
+    video_frame_count: int = 5
+    # Collapse near-identical sampled frames (average-hash, see
+    # `evidence/backends/ffmpeg_video.py::deduplicate_frames`) so a static
+    # clip costs one backend call rather than `video_frame_count` calls
+    # describing the same picture.
+    frame_dedupe: bool = True
+    # Sample fewer frames from a clip too short for `video_frame_count`
+    # distinct moments to exist in.
+    frame_duration_aware: bool = True
+
+
+@dataclass(frozen=True)
+class TranscriptionConfig:
+    """Speech-to-text: the third perception seam (D-058).
+
+    Disabled by default. `model_path` unset means "resolve the Angel whisper
+    cache through `tools/models/storage.py`", which only answers on a machine
+    whose UUID-verified T7 is mounted -- so the default is a *policy*, not a
+    path, and no machine-specific location appears in this repository.
+    """
+
+    enabled: bool = False
+    backend: str = "null"  # "null" | "whisper-cpp"
+    model_path: Path | None = None
+    language: str = "en"
+    max_audio_seconds: int = 600
+    timeout_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -317,6 +444,7 @@ class EvidenceConfig:
     max_text_chars: int = 20_000
     ocr: OCRConfig = field(default_factory=OCRConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
+    transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
 
 
 @dataclass(frozen=True)
@@ -347,6 +475,7 @@ class BackupConfig:
     restore_drill_relative_path: str | None = None
     exclude_patterns: tuple[str, ...] = (
         "90-system/staging/**",
+        "90-system/cache/**",
         "40-ai/model-cache/**",
         "**/*.partial",
         ".Spotlight-V100",
@@ -428,6 +557,21 @@ def load_config(path: Path | None = None) -> IngestConfig:
         inbox_relative_path=t7_raw["inbox_relative_path"],
         system_relative_path=t7_raw["system_relative_path"],
     )
+    # Both are joined to the UUID-verified volume root by `t7.resolve_t7`, and
+    # `Path(root) / "/tmp/x"` in pathlib *is* `/tmp/x` -- so an absolute value
+    # here silently relocated the catalog, the staging directory, the sidecars
+    # and the whole organized inbox off the verified volume, and a `..` value
+    # walked out of it. `automation.state_relative_path` has been validated for
+    # exactly this since it was added; these two were the gap. D-026's rule is
+    # that a config file alone must never be able to move a write target
+    # outside the volume the UUID check resolved.
+    for key in ("inbox_relative_path", "system_relative_path"):
+        candidate = Path(str(getattr(t7, key)))
+        if candidate.is_absolute() or ".." in candidate.parts or not str(candidate).strip():
+            raise ValueError(
+                f"t7.{key} must be a relative path inside the volume root, "
+                "without `..` (it is joined to the UUID-verified root)"
+            )
 
     sources_raw = merged["sources"]
     screenshots_raw = sources_raw.get("screenshots") or {}
@@ -455,6 +599,31 @@ def load_config(path: Path | None = None) -> IngestConfig:
     )
 
     naming_raw = merged["naming"]
+    proposer_name = str(naming_raw.get("proposer", "deterministic"))
+    if proposer_name not in VALID_NAME_PROPOSERS:
+        raise ValueError(
+            f"naming.proposer must be one of {sorted(VALID_NAME_PROPOSERS)}, got {proposer_name!r}"
+        )
+    semantic_raw = naming_raw.get("semantic") or {}
+    if not isinstance(semantic_raw, dict):
+        raise ValueError("naming.semantic must be a mapping")
+    semantic = SemanticNamingConfig(
+        model=str(semantic_raw.get("model", "qwen3.5:4b")),
+        endpoint=str(semantic_raw.get("endpoint", "http://127.0.0.1:11434")),
+        timeout_seconds=int(semantic_raw.get("timeout_seconds", 60)),
+        num_predict=int(semantic_raw.get("num_predict", 64)),
+        min_confidence=float(semantic_raw.get("min_confidence", 0.6)),
+        fallback_to_deterministic=bool(semantic_raw.get("fallback_to_deterministic", True)),
+    )
+    if not semantic.model.strip():
+        raise ValueError("naming.semantic.model must name an installed local model tag")
+    if not 1 <= semantic.timeout_seconds <= 600:
+        raise ValueError("naming.semantic.timeout_seconds must be between 1 and 600")
+    if not 1 <= semantic.num_predict <= 2048:
+        raise ValueError("naming.semantic.num_predict must be between 1 and 2048")
+    if not 0.0 <= semantic.min_confidence <= 1.0:
+        raise ValueError("naming.semantic.min_confidence must be between 0 and 1")
+
     naming = NamingConfig(
         enabled=bool(naming_raw["enabled"]),
         source_classes=frozenset(naming_raw["source_classes"]),
@@ -462,6 +631,8 @@ def load_config(path: Path | None = None) -> IngestConfig:
         max_filename_length=int(naming_raw["max_filename_length"]),
         protected_extensions=frozenset(ext.lower() for ext in naming_raw["protected_extensions"]),
         vocabulary=tuple(str(word) for word in naming_raw.get("vocabulary") or ()),
+        proposer=proposer_name,
+        semantic=semantic,
     )
     if not 0.0 <= naming.min_confidence <= 1.0:
         raise ValueError("naming.min_confidence must be between 0 and 1")
@@ -493,6 +664,12 @@ def load_config(path: Path | None = None) -> IngestConfig:
             f"evidence.vision.backend must be one of {sorted(VALID_VISION_BACKENDS)}, "
             f"got {vision_raw['backend']!r}"
         )
+    transcription_raw = evidence_raw["transcription"]
+    if transcription_raw["backend"] not in VALID_TRANSCRIPTION_BACKENDS:
+        raise ValueError(
+            f"evidence.transcription.backend must be one of {sorted(VALID_TRANSCRIPTION_BACKENDS)}, "
+            f"got {transcription_raw['backend']!r}"
+        )
     ocr = OCRConfig(
         enabled=bool(ocr_raw["enabled"]),
         backend=str(ocr_raw["backend"]),
@@ -512,6 +689,9 @@ def load_config(path: Path | None = None) -> IngestConfig:
         model=str(vision_raw.get("model", "qwen3-vl:8b")),
         max_image_bytes=int(vision_raw.get("max_image_bytes", 8_000_000)),
         max_prompt_chars=int(vision_raw.get("max_prompt_chars", 4_000)),
+        video_frame_count=int(vision_raw.get("video_frame_count", 5)),
+        frame_dedupe=bool(vision_raw.get("frame_dedupe", True)),
+        frame_duration_aware=bool(vision_raw.get("frame_duration_aware", True)),
     )
     if not 1 <= vision.timeout_seconds <= 600:
         raise ValueError("evidence.vision.timeout_seconds must be between 1 and 600")
@@ -519,6 +699,28 @@ def load_config(path: Path | None = None) -> IngestConfig:
         raise ValueError("evidence.vision.max_image_bytes must be between 1 and 50000000")
     if not 100 <= vision.max_prompt_chars <= 100_000:
         raise ValueError("evidence.vision.max_prompt_chars must be between 100 and 100000")
+    if not 1 <= vision.video_frame_count <= MAX_VIDEO_FRAME_COUNT:
+        raise ValueError(
+            f"evidence.vision.video_frame_count must be between 1 and {MAX_VIDEO_FRAME_COUNT}"
+        )
+
+    model_path_raw = transcription_raw.get("model_path")
+    transcription = TranscriptionConfig(
+        enabled=bool(transcription_raw["enabled"]),
+        backend=str(transcription_raw["backend"]),
+        model_path=_expand(str(model_path_raw)) if model_path_raw else None,
+        language=str(transcription_raw.get("language", "en")),
+        max_audio_seconds=int(transcription_raw.get("max_audio_seconds", 600)),
+        timeout_seconds=int(transcription_raw.get("timeout_seconds", 300)),
+    )
+    if not 1 <= transcription.max_audio_seconds <= 36_000:
+        raise ValueError("evidence.transcription.max_audio_seconds must be between 1 and 36000")
+    if not 1 <= transcription.timeout_seconds <= 3_600:
+        raise ValueError("evidence.transcription.timeout_seconds must be between 1 and 3600")
+    if transcription.model_path is not None and not transcription.model_path.is_absolute():
+        raise ValueError("evidence.transcription.model_path must be an absolute path")
+    if len(transcription.language) > 16:
+        raise ValueError("evidence.transcription.language must be a short language tag")
 
     evidence = EvidenceConfig(
         enabled=bool(evidence_raw["enabled"]),
@@ -529,6 +731,7 @@ def load_config(path: Path | None = None) -> IngestConfig:
         max_text_chars=int(evidence_raw["max_text_chars"]),
         ocr=ocr,
         vision=vision,
+        transcription=transcription,
     )
     if evidence.max_bytes <= 0:
         raise ValueError("evidence.max_bytes must be a positive integer")

@@ -35,6 +35,27 @@ KEYCHAIN_SERVICE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
+def remote_failure_message(stderr: str) -> str:
+    """One line a person can act on when rclone cannot reach the repository.
+
+    rclone's CRITICAL line says *why* -- an expired OAuth grant, a DNS
+    failure, a missing remote -- and hiding it behind one generic sentence
+    turned a credential problem into an apparent network problem during the
+    V1 acceptance pass. The last non-empty stderr line is appended, bounded;
+    an expired/revoked token additionally names the exact interactive
+    command that repairs it, which no unattended job may run on its own.
+    """
+    base = "Google Drive remote gdrive-backup is unavailable or unauthorized"
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    detail = lines[-1][:300] if lines else ""
+    if "invalid_grant" in detail or "token expired" in detail.lower():
+        return (
+            f"{base}: the Google Drive OAuth token is expired or revoked; run "
+            f"`rclone config reconnect {RCLONE_REMOTE}` interactively, then retry ({detail})"
+        )
+    return f"{base}: {detail}" if detail else base
+
+
 class BackupError(RuntimeError):
     """A backup precondition or external backup operation failed."""
 
@@ -359,7 +380,7 @@ class BackupService:
         self.ensure_rclone_keychain()
         result = self._run(["rclone", "lsd", RCLONE_REMOTE])
         if result.returncode != 0:
-            raise BackupError("Google Drive remote gdrive-backup is unavailable or unauthorized")
+            raise BackupError(remote_failure_message(result.stderr))
 
     def ensure_keychain(self) -> None:
         self._require("security")

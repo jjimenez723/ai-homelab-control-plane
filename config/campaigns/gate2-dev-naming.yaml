@@ -1,0 +1,110 @@
+# Gate-2 DEVELOPMENT-split naming-only prompt arms (D-059/D-060).
+#
+# Continues `gate2-dev.yaml`'s experiment for the two prompt changes that only
+# touch semantic naming, so the identical routing arm is not re-run for them:
+#
+#   1.1.0-c  1.1.0-b + guidance for evidence that does not identify the subject
+#   1.1.0-e  1.0.0 with one clause changed: "optional" becomes the condition
+#            the oracle enforces, and nothing else differs from 1.0.0 -- the
+#            minimal form of the same fix arms -a..-d make verbosely
+#   1.1.0-d  1.1.0-c + three few-shot examples that share no entity, date or
+#            wording with any suite item in any split (the run-time guard
+#            `tools.campaign.runner.check_prompt_contamination` proves the
+#            frozen-holdout half of that before any inference runs)
+
+version: 1
+campaign_id: gate2-dev-naming-001
+description: >
+  Dev-split naming-only arms 1.1.0-c and 1.1.0-d on qwen3.5:4b and qwen3.5:9b,
+  suite version 1.1.0.
+
+samples_per_item: 3
+timeout_seconds: 120
+concurrency: 2
+
+suites:
+  - id: acb-v1/semantic-naming
+    split: dev
+    threshold:
+      min_pass_rate: 0.75
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+
+candidates:
+  - name: qwen3.5-4b-p110c
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: &qwen_sampling
+      temperature: 0
+      seed: 42
+      num_ctx: 4096
+      num_predict: 128
+      think: false
+    prompts:
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-c"
+
+  - name: qwen3.5-4b-p110d
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-d"
+
+  - name: qwen3.5-9b-p110c
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-c"
+
+  - name: qwen3.5-9b-p110d
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-d"
+
+  - name: qwen3.5-4b-p110e
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-e"
+
+  - name: qwen3.5-9b-p110e
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-e"

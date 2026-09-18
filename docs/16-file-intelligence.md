@@ -4,9 +4,9 @@ This is the operational half of `tools/ingest/`. `docs/13-dump-first-ingestion.m
 
 Read this before changing anything under `tools/ingest/naming/`, `tools/ingest/triage/`, or `tools/ingest/pipeline.py`. Several things that look like incidental structure are load-bearing safety properties, and the module split is the enforcement mechanism rather than tidiness.
 
-Decisions of record: D-016 (manual-first ingestion), D-019 (the T7 volume-UUID boundary), D-020 (naming vs retention), D-021 (the local ledger), D-022 (a model proposes, trusted code disposes), D-023 (`00-inbox/organized` keeps its name), D-024 (opt-in automation), D-025 (screenshots are configured, never inferred), D-026 (`storage_root_override` needs an explicit flag).
+Decisions of record: D-016 (manual-first ingestion), D-019 (the T7 volume-UUID boundary), D-020 (naming vs retention), D-021 (the local ledger), D-022 (a model proposes, trusted code disposes), D-023 (`00-inbox/organized` keeps its name), D-024 (opt-in automation), D-025 (screenshots are configured, never inferred), D-026 (`storage_root_override` needs an explicit flag), D-057 (evidence reaches naming through a plain-data bridge; the semantic proposer is opt-in and policy-gated), D-063 (the V1 adversarial review: the filename sanitizer filters by Unicode category, the byte ceiling is trimmed to rather than refused, and filename quality is Unicode-aware).
 
-`docs/17-file-evidence.md` is the layer underneath this one: what a file's bytes actually contain (native text, OCR, a vision description). It is perception only — nothing in it reaches any decision described here, and a test enforces that no module under `naming/` or `triage/` imports from `evidence/` (D-029).
+`docs/17-file-evidence.md` is the layer underneath this one: what a file's bytes actually contain (native text, OCR, a vision description, in time a speech transcript). Since **D-057** exactly one decision reads it — the **filename proposal**, and nothing else. Retention triage and ingestion stay evidence-blind, the AST guard forbidding any module under `naming/` or `triage/` from importing `evidence/` is unchanged and unrelaxed, and the crossing happens in one reviewed module outside both packages (`tools/ingest/perception_bridge.py`).
 
 `docs/15-file-intelligence-acceptance-drill.md` is the companion: a ten-minute hand-run drill against a scratch directory and a scratch T7 root that demonstrates the guarantees described here. Run it once before trusting the pipeline with anything that matters.
 
@@ -49,17 +49,79 @@ class NameProposer(Protocol):
 
 A proposer receives `NamingEvidence` and returns a string plus a confidence. The boundary is enforced by **the shape of the data, not by a rule someone has to remember**:
 
-- `NamingEvidence` (`naming/evidence.py`) is a frozen dataclass containing strings, numbers, a dict of measured facts, and one optional PNG byte-string. It carries **no `Path`, no file object, and no callable.** A proposer — including a future model-backed one — therefore has nothing to mutate the filesystem *with*. It is not trusted and then constrained; it is simply not given the means.
+- `NamingEvidence` (`naming/evidence.py`) is a frozen dataclass containing strings, numbers, a dict of measured facts, one optional PNG byte-string, and (since D-057) one optional `PerceivedEvidence` of bounded strings and tuples. It carries **no `Path`, no file object, and no callable.** A proposer — including the model-backed one that now exists — therefore has nothing to mutate the filesystem *with*. It is not trusted and then constrained; it is simply not given the means.
 - The thumbnail is `bytes`, not a path (`media/probe.py::thumbnail_png` writes nothing to disk). A vision model gets the pixels it is meant to look at with no handle to the user's original and no temp file to leak.
 - Evidence is gathered by trusted code *before* any proposer is called, deterministically and read-only.
 - What comes back is validated before it can become a filename (`naming/policy.py::validate_proposal`), and the rename itself is performed by `naming/policy.py::safe_rename`, which takes a **name, not a path**, so a caller cannot use it to relocate a file into another directory. Renaming and moving stay separate powers.
 - `transaction.py::transfer_file` remains the only code in the system that unlinks a source file.
 
-The proposer shipped today is `DeterministicProposer`. It names from facts the file states about itself — a PDF's own title, an image's EXIF description, a zip's contents, a capture date, pixel dimensions — and where it cannot establish a subject it says something factual and generic rather than inventing one. `2026-09-12_web-browser-product-page.png` is deliberately preferred over a confidently wrong client name.
+### What the proposer is handed, since D-057
 
-Swapping in a model-backed proposer changes nothing downstream. No safety property in this document depends on which implementation sits behind the protocol.
+`NamingEvidence` gained one field: `perceived: PerceivedEvidence | None`. That is how a document's own text, OCR off a screenshot's pixels, a vision backend's description and (once the transcript stage lands) speech reach a proposer.
+
+`PerceivedEvidence` is the same kind of thing `NamingEvidence` is, and deliberately so:
+
+- **bounded strings and tuples only** — no `Path`, no callable, no nested perception type. The perception layer's own values are far richer (polygons, per-block confidences, provenance, page regions); none of that crosses. Handing a proposer the geometry would hand it a second, unvalidated way to reason about a file, and every extra field is one more thing a future consumer could mistake for authority.
+- **every excerpt capped at 1500 characters** and re-sanitized at the boundary (control, C1, bidi-override and zero-width characters stripped), so a value built from a cache row or a fixture is safe by construction rather than by the provenance of its input.
+- `sources` says which kinds were **actually present** rather than which stages were attempted, because "OCR ran and found nothing" and "OCR never ran" are different facts and only one means the pixels carry no text.
+
+The conversion lives in **`tools/ingest/perception_bridge.py`**, outside both `naming/` and `triage/`, exactly as `tools/naming_lab/` lives outside them (D-054). That is what keeps the AST guard intact and the crossing reviewable: one module, one import pair, zero filesystem mutation, and a test asserting it is still the only module in `tools/ingest/` importing both sides.
+
+Perception runs **before** naming in `pipeline.py` and is keyed by content hash, so a rename reuses the work on the next run. It cannot make naming fail: an unavailable backend, a disabled evidence layer, or a stage that raises all yield `perceived=None`, and the proposer names from measured facts alone.
+
+### The two proposers
+
+`naming.proposer` chooses. `naming.enabled: false` still wins over both, so turning a model on is two deliberate settings rather than one.
+
+**`DeterministicProposer`** (the default) names from facts the file states about itself — a PDF's own title, an image's EXIF description, a zip's contents, a capture date, pixel dimensions — and now also from evidence it can treat as a *quotation*:
+
+| builder | confidence | evidence |
+|---|---|---|
+| embedded title metadata | 0.92 | `metadata_title` / `container_title` |
+| embedded EXIF/document description | 0.85 | `image_description`, `exif_user_comment` |
+| archive contents | 0.78 | the zip's central directory |
+| **a document's first heading, or the first meaningful line of its own text** | **0.70** | perceived native text / structure |
+| PDF author + page count | 0.72 | metadata |
+| **the title-shaped first line of OCR on a known screen capture** | **0.62** | perceived OCR |
+| camera make/model | 0.62 | EXIF |
+| generic factual fallback | 0.58 | file type and dimensions |
+
+Builder order is "most informative first", which is **not** the same as descending confidence — a document's first heading (0.70) is tried before its author plus page count (0.72), because the heading says what the file is *about* where the author says only who made it. Confidence answers "how sure am I"; order answers "which answer is worth having".
+
+It reads **neither the transcript nor a visual description**. Both are summaries something else wrote *about* the file rather than text the file contains, and `HeuristicVisionBackend` is explicitly a guess from colour distribution and flatness (`docs/17`). Naming a video `hawk-on-a-cedar-fence.mp4` from that would assert certainty the evidence does not carry — the same reasoning that keeps `is_probably_screenshot` out of the generic fallback. OCR is likewise trusted only for a file the *filename or configured folder* already proves is a screen capture, never for a photograph that happens to contain a shop sign.
+
+`2026-09-12_web-browser-product-page.png` is still deliberately preferred over a confidently wrong client name: where perception says nothing usable, the generic factual fallback wins over invention.
+
+**`SemanticProposer`** (`naming/semantic.py`, opt-in) asks a **loopback-only** local model, and may read everything — transcript and visual description included — because everything it produces is a proposal a deterministic policy still has to accept. It is the first production caller of `tools/prompts/production.py::render_for_task_class`, so the prompt it sends is byte-identical to the one the Gate-2 `naming.semantic` suite evaluates (D-041's whole point). The path a raw model string travels:
+
+1. the bounded evidence text is rendered into the active versioned prompt; the only client constructible here is `OllamaTextProvider`, whose `OllamaLocalClient.__init__` refuses any endpoint that is not loopback HTTP — a remote endpoint in config becomes a recorded fallback, not a request, so no document text can leave the machine even if the config says to send it;
+2. the answer is **unwrapped** generously (markdown fences, quotes, a `Filename:` label, a trailing explanation, first line only) and then **judged strictly**: anything carrying a path separator or separator-lookalike, `..`, a leading dot, a control/bidi/zero-width character, a changed extension, or a name over the length cap is *refused* rather than repaired. A name that had to be fixed is a name the model did not produce;
+3. whatever survives goes through `policy.validate_proposal` in `rename.py` exactly as a deterministic proposal does. Step 2 is defense in depth in front of that, never instead of it;
+4. **confidence is derived, never self-reported.** The model outputs only a filename; a score it invented would be worth less than nothing, since a confidently wrong name is the failure mode this system exists to avoid. Base 0.70, minus 0.15 for an all-generic stem, minus 0.10 when no stem word appears anywhere in the evidence, plus 0.10 when two or more do, plus 0.05 for an owner-vocabulary word, clamped to 0.05–0.90. The ceiling sits below `CONFIDENCE_EMBEDDED_TITLE` (0.92) on purpose: a document stating its own title is better evidence than a model's reading of one;
+5. **any** failure — connection refused, timeout, `ValueError`, empty output, JSON, prose, a refused string, a derived confidence under `naming.semantic.min_confidence` — falls back to the deterministic proposer (or declines, if `fallback_to_deterministic` is off), with the reason recorded and the raw output kept.
+
+Swapping proposers changes nothing downstream. No safety property in this document depends on which implementation sits behind the protocol — and `tests/ingest/test_semantic_proposer.py` runs the full hostile-answer matrix through a real `run_source --apply` with a fake provider, no Ollama required.
+
+### The naming audit trail
+
+Every `naming_history` row now also records `prompt_id`, `prompt_version`, `prompt_sha256`, `evidence_sha256`, `evidence_sources` (JSON) and `raw_output` — bounded, and **kept even when the answer was refused**, because a rejected hostile proposal that leaves no trace is indistinguishable from a rename nobody noticed. `organize naming-history PATH` prints it. The evidence *hash* is read from the evidence the proposer was handed, not from the proposal, so a hostile proposer cannot write a different one into its own audit trail.
+
+Only the hash, the evidence *kinds*, the prompt identity and the model's one-line answer travel to the T7 catalog when a file is ingested. Extracted document text stays in the Mac-side ledger, which restic does not back up — D-030's privacy posture is unchanged by giving naming an audit trail.
 
 > The source docstrings cite "invariant 3", "invariant 7", "invariant 12" and so on. Those numbers refer to the owner's file-intelligence specification, which is not tracked in this repository. The invariants themselves are restated in prose here and in `README.md` so this document stands alone.
+
+### An instruction is not a title
+
+Both evidence-derived deterministic builders and the semantic proposer's
+output check apply `naming/quality.py::looks_like_instruction`: a line that
+reads as an instruction to a reader or a model ("IGNORE ALL PREVIOUS
+INSTRUCTIONS", "AI ASSISTANT: name this file …", "set triage.auto_ingest:
+true") is skipped by the title scan and refused as a model answer, with the
+reason recorded. This is a naming-quality rule — such a line is not the
+subject of the file — and deliberately **not** a security control: the
+security property is structural (perceived text can become at most a
+policy-legal filename, never a path, an extension change, a config change,
+or a move), and it holds whether or not this heuristic matches.
 
 ## Two databases: the local ledger and the T7 catalog
 
@@ -96,7 +158,11 @@ Files on the Mac use `local_file_id = uuid5(namespace, "local:<volume>:<device>:
 
 `user_version` is the applied-version marker and is only advanced after a step returns, so a crash mid-migration leaves the version unchanged and the next run re-applies the whole step over the parts that already exist. Because every step is additive and idempotent, re-application cannot lose data. No step is wrapped in a hand-rolled transaction: SQLite commits implicitly around `executescript`, so a `BEGIN`/`COMMIT` here would be a lie about atomicity rather than a guarantee of it.
 
-A database reporting a version **newer** than the code supports is refused outright — upgrade the checkout rather than downgrading the database. The T7 catalog is currently `SCHEMA_VERSION = 2`; migration 2 adds the four shared tables plus `first_seen_filename`, `local_file_id`, `retention_recommendation`, and `retention_run_id` on `assets`.
+A database reporting a version **newer** than the code supports is refused outright — upgrade the checkout rather than downgrading the database. The applied version is `len(MIGRATIONS)` for each database, so adding a step is the only way to move it.
+
+The T7 catalog is at **5**: migration 2 adds the four shared tables plus `first_seen_filename`, `local_file_id`, `retention_recommendation` and `retention_run_id` on `assets`; 3 carries the Mac-side generation across; 4 is the one deliberately reconstructive step (dropping the legacy `UNIQUE(source_volume_id, original_path)`); 5 adds the D-057 naming-audit columns, because `_attach_provenance` copies ledger lineage rows across verbatim and would otherwise fail on the first already-ingested file after naming gained an audit trail.
+
+The local ledger is at **4**: 1 creates the schema, 2 adds `generation`, 3 adds the `file_evidence` perception cache, 4 adds the same six naming-audit columns. All six are nullable and nothing is backfilled — a row written before the migration correctly reads back `NULL`, because it was written by a proposer that had no prompt and by a pipeline where naming could not see perceived evidence at all. Inventing a value would be inventing history.
 
 ## Naming policy
 
@@ -105,7 +171,7 @@ A database reporting a version **newer** than the code supports is refused outri
 1. **A human's name wins, permanently.** If the ledger holds a human-authored name for this file, nothing automatic touches it again — ever, regardless of what a later and better proposer would suggest.
 2. **A settled name is not reconsidered.** If the current filename is one this system already chose or already chose to keep, return without writing a row. Re-recording an unchanged decision on every scan would grow the ledger without adding information.
 3. **Protected extensions are never renamed.** `.app`, `.dmg`, `.pkg`, `.mpkg`, `.framework`, `.kext` — something else on the system finds these by name.
-4. **A useful name is left alone.** `naming/quality.py` answers GOOD or POOR deterministically, from the name alone, before any proposer is consulted. `Fine-Line-Group-2026-SOW.pdf` is a better filename than anything a model will invent for it. POOR means *eligible for a proposal*, not *will be renamed*.
+4. **A useful name is left alone.** `naming/quality.py` answers GOOD or POOR deterministically, from the name alone, before any proposer is consulted. `Fine-Line-Group-2026-SOW.pdf` is a better filename than anything a model will invent for it. POOR means *eligible for a proposal*, not *will be renamed*. Tokenization is Unicode-aware (`[\W_]+`), so this holds for a name in any script: before D-063 it split on `[^A-Za-z0-9]+`, which treated every non-ASCII letter as a separator — `отчет-о-финансовых-результатах.pdf` yielded zero tokens and therefore scored POOR, making an owner-authored name eligible for renaming, while the quality re-check in step 7 simultaneously refused every replacement in the same script. A token of two characters counts as a word when it is East Asian wide or fullwidth, because 報告 is a word in two characters where `ab` is not.
 5. **A question already answered by this proposer version is not re-asked.** A proposer *upgrade* deliberately reopens it.
 6. **Then, and only then, ask for a proposal**, and require it to clear `naming.min_confidence` (default 0.55).
 7. **Validate.** `validate_proposal` rejects anything path-shaped, strips whatever extension the proposal carried and re-attaches the real one from the file on disk, sanitizes the stem, and then **re-runs the quality check on its own output**: a proposal that would still score POOR is refused, because applying it would make the file eligible again next run — a rename loop.
@@ -115,7 +181,11 @@ Every branch, including every decision *not* to rename, is appended to `naming_h
 
 ### Filename legality
 
-`sanitize_stem` removes control characters and zero-width/bidi-override characters (invisible in a filename, and a classic way to make one name look like another), replaces the union of characters forbidden on APFS/HFS+/exFAT/POSIX, collapses separator runs, and strips leading dots and trailing dots and spaces — a name the filesystem would silently alter is a name the ledger would be lying about. A single underscore is preserved after a leading ISO date (`2026-09-12_kitchen-layout`) and nowhere else. The configured `max_filename_length` (default 120) is a readability cap; `MAX_COMPONENT_BYTES = 255` is the hard APFS ceiling underneath it.
+`sanitize_stem` removes every character in Unicode category `Cc`, `Cf`, `Cs` or `Co` — all C0 *and* C1 control characters, every format character (zero-width, bidi override **and** the bidi marks), every lone surrogate, and every private-use character — replaces the union of characters forbidden on APFS/HFS+/exFAT/POSIX, collapses separator runs, and strips leading dots and trailing dots and spaces. A name the filesystem would silently alter, or that a terminal would interpret, or that renders as whatever the reader's font decides, is a name the ledger would be lying about.
+
+The filter is by **category**, not by a list of characters, and D-063 is why: the list version named nine format characters and missed U+200E, U+200F, U+202C, U+00AD and U+2060-U+2064, missed the whole C1 block (U+009B is the byte that starts an 8-bit ANSI escape sequence, and `organize` prints filenames to a terminal), and missed surrogates — which cannot be UTF-8-encoded at all, so one reaching the length check raised `UnicodeEncodeError` past `rename.py`'s handler and produced a rejection with no `naming_history` row. A hand-enumerated attack class is a list of the members somebody thought of.
+
+A single underscore is preserved after a leading ISO date (`2026-09-12_kitchen-layout`) and nowhere else. The configured `max_filename_length` (default 120) is a readability cap counted in **characters**; `MAX_COMPONENT_BYTES = 255` is the hard APFS ceiling underneath it, counted in **bytes**, and `sanitize_stem` trims to it on a character boundary rather than refusing the name. Those two units diverge 3x for CJK and 4x for emoji, so before D-063 a perfectly ordinary Japanese document title cleared the character cap, blew the byte ceiling, and was refused outright.
 
 ### Collision handling
 
@@ -132,7 +202,9 @@ Screenshots are a first-class source for **naming** and are explicitly not a vac
 
 Detection itself is by filename prefix (`screenshot`, `screen shot`, `cleanshot`, and the common localized spellings) — far more reliable than inferring from pixels. The probe's `is_probably_screenshot` (a PNG with no camera EXIF) is explicitly a heuristic and is treated as a secondary cue only: enough to route a file to review, never enough to justify a retention decision on its own.
 
-Retention for screenshots is deliberately unresolved. Telling a disposable UI state from durable design reference requires reading what is *in* the image, which needs OCR and vision. Those now exist as a perception layer (`docs/17-file-evidence.md`) — but perception is not yet allowed to influence a decision (D-029), so screenshots still triage to `REVIEW` at confidence 0.5 and are reported rather than guessed at. That is the same answer as before, now reached with the evidence sitting beside it rather than absent.
+Retention for screenshots is still deliberately unresolved, and D-057 did not change it. Telling a disposable UI state from durable design reference requires reading what is *in* the image — and perception is now allowed to influence the **name** (a screenshot can finally be called `2026-09-12_screen-capture-angel-review-queue.png` instead of `screen-capture-1440x900.png`) while retention still triages to `REVIEW` at confidence 0.5 and is reported rather than guessed at.
+
+That asymmetry is the point rather than an inconsistency. A wrong name costs a confusing filename and is corrected by `organize correct-name`; a wrong retention decision is a step toward a file nobody meant to keep or lose. The two questions have different failure sizes, so they get authority on different schedules.
 
 ## Downloads triage states
 
@@ -211,14 +283,16 @@ in-memory bytes; the only persistence is ledger rows.
 
 Everything else in the new code is read-only by construction. In particular `media/probe.py` opens files and never writes to them, never writes beside them, and never asks a library to expand anything onto disk — ingestion runs against a user's only copy of a file, so a metadata read must not be able to damage it. It also never raises: it is called in a loop over a whole volume of unknown, possibly truncated, possibly hostile files, so one bad file degrades to an `errors` entry rather than ending the run. Optional tooling (`ffprobe`, `pypdf`) is detected rather than required, and a decompression-bomb guard refuses to decode an image declaring an implausible canvas.
 
-`organize correct-name PATH` writes a ledger row and nothing else. It does not rename anything; it records a name that already exists on disk, after which the automatic path leaves that file alone permanently.
+`organize correct-name PATH` writes a ledger row and nothing else. It does not rename anything; it records a name that already exists on disk, after which the automatic path leaves that file alone permanently. `organize naming-history PATH` and `organize evidence PATH` write nothing at all.
 
 ## What is deliberately NOT built
 
 Do not claim, document, or build on any of the following. They do not exist:
 
-- **Semantic or vision-based naming.** No OCR, no image understanding, no content summarization. The proposer is deterministic and names from facts the file states about itself. Recognising what a screenshot actually shows is the worker layer.
-- **Any LLM or model router.** `NameProposer` is a protocol with one deterministic implementation. Nothing calls a model anywhere in `tools/ingest/`.
+- **Perceived evidence reaching retention, ingestion, or automation.** D-057 gave it the *filename* and nothing else. `triage/policy.py` reads none of it, may not import the evidence package, and is handed a `NamingEvidence` with `perceived` stripped off — so a future change that wants retention to read OCR text has to widen that call visibly instead of finding the field already there. Two files differing only in what was perceived about them get the identical retention decision, and that is a test.
+- **A remote or frontier model in the naming path.** The only client `naming/semantic.py` can construct is the loopback-only Ollama adapter. A non-loopback endpoint in config is refused at construction and recorded as a fallback.
+- **Instruction filtering.** Nothing pattern-matches extracted text for hostile phrasing, and no docstring claims otherwise. The defense is structural: a model cannot produce a *path* or a *different file type*, not that it cannot produce a silly name.
+- **Model-chosen dates, paths, or destinations.** The extension comes from the file; `safe_rename` takes a name, not a path; client/project placement is Phase 3.
 - **The worker layer.** No jobs, no queue, no coordinator.
 - **Organized-view materialization.** `00-inbox/organized/` is a flat `<source_class>/` staging tree holding verified, catalog-committed canonical assets — **not** organized output. The name is retained for the reasons in D-023; the semantics are documented rather than implied. Client/project placement is Phase 3.
 - **Destructive duplicate cleanup.** Duplicates are observed and reported. Nothing acts on them.
@@ -240,6 +314,13 @@ All defaults live in `tools/ingest/config.py` so the tool works with no config f
 | `naming.max_filename_length` | `120` | Readability cap; validated to 8–200. |
 | `naming.protected_extensions` | `.app .dmg .pkg .mpkg .framework .kext` | Never renamed. |
 | `naming.vocabulary` | `[]` | Owner's client/project words; presence makes a name count as meaningful. |
+| `naming.proposer` | `deterministic` | `deterministic` \| `semantic`. An unknown value is a load-time error, not a silent fallback. `naming.enabled: false` still wins. |
+| `naming.semantic.model` | `qwen3.5:4b` | An Ollama tag that must already be installed. Nothing here pulls a model. |
+| `naming.semantic.endpoint` | `http://127.0.0.1:11434` | Loopback HTTP only, enforced by `OllamaLocalClient` itself. Anything else becomes a recorded fallback, never a request. |
+| `naming.semantic.timeout_seconds` | `60` | Validated 1–600. |
+| `naming.semantic.num_predict` | `64` | Validated 1–2048. A filename is short. |
+| `naming.semantic.min_confidence` | `0.6` | Against the *derived* confidence; the model never scores itself. |
+| `naming.semantic.fallback_to_deterministic` | `true` | `false` means "a model names it or nothing does". |
 | `triage.enabled` | `true` | |
 | `triage.auto_ingest` | **`false`** | Nothing is ever transferred automatically while this is off. |
 | `triage.min_ingest_confidence` | `0.85` | Second, independent gate. |
@@ -259,6 +340,7 @@ All defaults live in `tools/ingest/config.py` so the tool works with no config f
 ./scripts/organize doctor                       # is this machine configured to run safely
 ./scripts/organize review --limit 40            # files waiting on a human decision
 ./scripts/organize duplicates                   # observed relationships, never acted on
+./scripts/organize naming-history ~/Downloads/whatever.pdf   # why is it called that? read-only
 ./scripts/organize correct-name ~/Downloads/whatever.pdf
 
 ./scripts/render-file-intelligence-launchd ~/Library/LaunchAgents   # render only; safe to inspect
@@ -274,4 +356,5 @@ The Phase 1A ingestion spellings are unchanged: `organize desktop|documents|down
 2. Run `./scripts/organize triage downloads --dry-run` and read the proposals before applying anything. Dry run is the default and writes nothing.
 3. Read `naming/__init__.py`, `triage/__init__.py`, `ledger.py`, and `migrations.py` — their module docstrings carry the reasoning, and they are kept current deliberately.
 4. `tests/ingest/test_mutation_safety.py` is the file to run and extend before touching anything that writes. `tests/ingest/test_naming.py` covers the policy rules.
-5. If you are about to make a proposer more capable, you almost certainly do not need to change anything outside `proposer.py`. If you find yourself wanting to hand it a `Path`, stop: that is D-022, and it needs a new decision entry rather than a widened signature.
+5. If you are about to make a proposer more capable, you almost certainly do not need to change anything outside `proposer.py` or `semantic.py`. If you find yourself wanting to hand it a `Path`, stop: that is D-022, and it needs a new decision entry rather than a widened signature. If you find yourself wanting to `import tools.ingest.evidence` from inside `naming/`, stop too: add to `PerceivedEvidence` and `perception_bridge.py` instead — the AST guard in `tests/ingest/test_evidence_security.py` exists to make that crossing deliberate, and it has no exception list.
+6. `./scripts/organize naming-history PATH` is the first thing to run when a filename looks wrong. It shows what the proposer saw, what it was asked, what it answered, and what policy did with the answer.
