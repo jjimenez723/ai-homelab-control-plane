@@ -19,6 +19,14 @@ from tools.prompts.registry import (
 from tools.prompts.renderer import ContextPack, render
 
 
+# The version each prompt id is frozen at today (D-060). A change here is a
+# deliberate promotion; a change anywhere else fails the tests below.
+ACTIVE_VERSIONS = {
+    "acb-v1-routing-classification": "1.1.0",
+    "acb-v1-semantic-naming": "1.1.0",
+}
+
+
 def _registry() -> PromptRegistry:
     return load_default_registry()
 
@@ -40,7 +48,10 @@ class RegistryIdentityTests(unittest.TestCase):
     def test_active_returns_the_one_active_version(self) -> None:
         version = _registry().active("acb-v1-routing-classification")
         self.assertEqual(version.status, "active")
-        self.assertEqual(version.version, "1.0.0")
+        # The frozen 1.1.0 line (D-060). Asserted as a named constant rather
+        # than a literal so promoting a future version is one edit, and so a
+        # *silent* change of which version is active still fails here.
+        self.assertEqual(version.version, ACTIVE_VERSIONS["acb-v1-routing-classification"])
 
     def test_active_raises_for_a_prompt_id_with_no_active_version(self) -> None:
         registry = PromptRegistry([
@@ -132,7 +143,7 @@ class RenderingDeterminismTests(unittest.TestCase):
         prompt = _registry().active("acb-v1-semantic-naming")
         rendered = render(prompt, task_text="evidence", extra={"original_filename": "IMG_0001.jpg"})
         self.assertEqual(rendered.prompt_id, "acb-v1-semantic-naming")
-        self.assertEqual(rendered.version, "1.0.0")
+        self.assertEqual(rendered.version, ACTIVE_VERSIONS["acb-v1-semantic-naming"])
         self.assertEqual(rendered.tool_schema_version, "none")
         self.assertEqual(len(rendered.sha256), 64)
 

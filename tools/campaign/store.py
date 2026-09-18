@@ -10,9 +10,12 @@ loses at most the one in-flight line (open with line-buffering + `fsync`),
 never a previously recorded measurement.
 
 Result-record schema v2 adds the model's raw text output and provider finish
-reason. Both fields are optional so schema-v1 campaign files remain readable;
-old rows simply expose ``None`` for those fields. Raw output remains local,
-gitignored campaign state rather than a committed artifact.
+reason. Schema v3 (D-059) adds ``thinking_chars`` -- how much reasoning a
+thinking model emitted on the separate channel Ollama returns, which shares the
+output budget with the answer -- and ``num_predict``, the budget that attempt
+actually ran under. Every added field is optional, so schema-v1 and -v2
+campaign files remain readable and old rows simply expose ``None``. Raw output
+remains local, gitignored campaign state rather than a committed artifact.
 
 Resumability policy, from the "infrastructure failure is not model-quality
 failure" invariant this whole task is built around:
@@ -79,6 +82,8 @@ class ResultRecord:
     error: str | None = None
     raw_output: str | None = None
     finish_reason: str | None = None
+    thinking_chars: int | None = None
+    num_predict: int | None = None
 
     def __post_init__(self) -> None:
         if self.status not in RESULT_STATUSES:
@@ -102,7 +107,7 @@ class CorruptResultRecord(ValueError):
         self.reason = reason
 
 
-RESULT_RECORD_SCHEMA_VERSION = 2
+RESULT_RECORD_SCHEMA_VERSION = 3
 
 
 class ResultStore:

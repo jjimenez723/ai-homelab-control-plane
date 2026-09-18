@@ -1,0 +1,146 @@
+# Gate-2 DEVELOPMENT-split prompt experiment (D-059/D-060).
+#
+# The dev split is the only material that may inform prompt design. Each
+# candidate below is one (model, prompt version) arm of a controlled
+# experiment; arms differ from their predecessor in exactly one thing, so a
+# measured difference is attributable to that thing.
+#
+#   1.0.0    baseline -- the versions gate2-validation-001 measured
+#   1.1.0-a  + the naming date rule the oracle actually enforces
+#            + routing label-by-label definitions
+#   1.1.0-b  + naming keep-the-extension rule
+#            + routing precedence rules for the overlapping label pairs
+#
+# Two further naming-only arms (1.1.0-c uncertainty guidance, 1.1.0-d few-shot
+# examples) live in `gate2-dev-naming.yaml` so they do not re-run the identical
+# routing arm three times. `gpt-oss:20b` lives in `gate2-dev-reasoning.yaml`,
+# because its reasoning channel needs a different output budget and mixing that
+# into this comparison would confound a prompt change with a sampling change.
+#
+# Validation and frozen_holdout splits are deliberately absent.
+
+version: 1
+campaign_id: gate2-dev-001
+description: >
+  Controlled dev-split prompt experiment for both Gate-2 suites at suite
+  version 1.1.0: prompt 1.0.0 vs 1.1.0-a vs 1.1.0-b on qwen3.5:4b and
+  qwen3.5:9b.
+
+samples_per_item: 3
+timeout_seconds: 120
+concurrency: 2
+
+suites:
+  - id: acb-v1/routing-classification
+    split: dev
+    threshold:
+      min_pass_rate: 0.80
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+  - id: acb-v1/semantic-naming
+    split: dev
+    threshold:
+      min_pass_rate: 0.75
+      min_confidence: 0.60
+      max_timeout_rate: 0.05
+      max_provider_error_rate: 0.05
+
+candidates:
+  # qwen3.5 declares a `thinking` capability but honours `think: false`
+  # (measured on Ollama 0.33.3), so these are not reasoning candidates and a
+  # 128-token budget is ample for one label or one filename.
+  - name: qwen3.5-4b-p100
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: &qwen_sampling
+      temperature: 0
+      seed: 42
+      num_ctx: 4096
+      num_predict: 128
+      think: false
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.0.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.0.0"
+
+  - name: qwen3.5-4b-p110a
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.1.0-a"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-a"
+
+  - name: qwen3.5-4b-p110b
+    model: qwen3.5:4b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.1.0-b"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-b"
+
+  - name: qwen3.5-9b-p100
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.0.0"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.0.0"
+
+  - name: qwen3.5-9b-p110a
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.1.0-a"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-a"
+
+  - name: qwen3.5-9b-p110b
+    model: qwen3.5:9b
+    runtime: ollama
+    endpoint: http://127.0.0.1:11434
+    tool_schema_version: none
+    reasoning: false
+    sampling: *qwen_sampling
+    prompts:
+      acb-v1/routing-classification:
+        prompt_id: acb-v1-routing-classification
+        prompt_version: "1.1.0-b"
+      acb-v1/semantic-naming:
+        prompt_id: acb-v1-semantic-naming
+        prompt_version: "1.1.0-b"
