@@ -60,6 +60,17 @@ fi
 
 ROOT="${ROOT%/}"
 
+# Fail closed on an explicit /Volumes path before checking whether it exists.
+# macOS always provides /Volumes, but CI and other hosts may not. The identity
+# rule is about the requested destination, so a caller naming /Volumes without
+# an expected UUID is a security refusal (exit 3), not a missing-path error.
+# The resolved-path check below remains necessary to catch symlinks and "..".
+if [[ -z "$EXPECT_UUID" && ( "$ROOT" == /Volumes || "$ROOT" == /Volumes/* ) ]]; then
+  echo "ERROR: $ROOT is a mounted-volume path, so --expect-uuid is required (D-019)." >&2
+  echo "       A volume name is not an identity. Pass t7.volume_uuid from config/ingest.yaml." >&2
+  exit 3
+fi
+
 if [[ ! -d "$ROOT" ]]; then
   echo "ERROR: root does not exist: $ROOT" >&2
   exit 2
