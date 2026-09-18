@@ -59,6 +59,36 @@ DEFAULTS: dict[str, Any] = {
         # Words the owner's own projects/clients use. Present in a filename,
         # they are strong evidence the name is already meaningful.
         "vocabulary": [],
+        # Which proposer answers "what should this be called?" (D-057).
+        # "deterministic" is the default and names only from measured facts
+        # and quoted evidence. "semantic" asks a loopback-only local model
+        # through the same versioned prompt the Gate-2 naming suite
+        # evaluates, and still passes every answer through the identical
+        # filename policy -- see `naming/semantic.py`.
+        "proposer": "deterministic",
+        "semantic": {
+            # Ollama model tag. Must already be installed locally; nothing
+            # here pulls a model.
+            "model": "qwen3.5:4b",
+            # Loopback-only, enforced by `OllamaLocalClient` itself. A
+            # non-loopback endpoint is refused at the moment the client is
+            # constructed, which this proposer degrades into a recorded
+            # fallback rather than a crash.
+            "endpoint": "http://127.0.0.1:11434",
+            "timeout_seconds": 60,
+            # A filename is short; generating more tokens than this only
+            # buys an explanation nothing reads.
+            "num_predict": 64,
+            # Below this *derived* confidence (see `semantic.py`'s header on
+            # how it is computed -- the model never scores itself) the answer
+            # is discarded and the deterministic proposer answers instead.
+            "min_confidence": 0.6,
+            # When the model is unreachable, times out, or produces something
+            # unusable, fall back to the deterministic proposer rather than
+            # leaving the file unnamed. Turning this off means "a model names
+            # it or nothing does".
+            "fallback_to_deterministic": True,
+        },
     },
     "triage": {
         "enabled": True,
@@ -251,6 +281,34 @@ class SourcesConfig:
     screenshots: ScreenshotsConfig = field(default_factory=ScreenshotsConfig)
 
 
+# Proposer implementations `naming.proposer` may name. Refused at load time
+# rather than silently falling back, for the same reason an unknown evidence
+# backend is: an operator who typed `semantics` meant to enable a model, and
+# quietly running the deterministic proposer instead would hide that.
+VALID_NAME_PROPOSERS = frozenset({"deterministic", "semantic"})
+
+
+@dataclass(frozen=True)
+class SemanticNamingConfig:
+    """The opt-in model-backed proposer's settings (D-057).
+
+    Inert unless `naming.proposer == "semantic"`. `endpoint` is not validated
+    here: `tools.models.ollama_local.OllamaLocalClient` is the single place
+    that decides what a permissible endpoint is (loopback HTTP only), and
+    re-implementing that rule in config would create a second definition of
+    it that could drift. `naming/semantic.py` constructs the client inside a
+    guard, so a non-loopback endpoint becomes a recorded fallback with a
+    stated reason instead of an unhandled error mid-run.
+    """
+
+    model: str = "qwen3.5:4b"
+    endpoint: str = "http://127.0.0.1:11434"
+    timeout_seconds: int = 60
+    num_predict: int = 64
+    min_confidence: float = 0.6
+    fallback_to_deterministic: bool = True
+
+
 @dataclass(frozen=True)
 class NamingConfig:
     enabled: bool = True
@@ -259,6 +317,11 @@ class NamingConfig:
     max_filename_length: int = 120
     protected_extensions: frozenset[str] = frozenset({".app", ".dmg", ".pkg", ".mpkg", ".framework", ".kext"})
     vocabulary: tuple[str, ...] = ()
+    # "deterministic" | "semantic". `naming.enabled` keeps its own meaning:
+    # false disables naming entirely (a `DisabledProposer`), whichever
+    # proposer is named here.
+    proposer: str = "deterministic"
+    semantic: SemanticNamingConfig = field(default_factory=SemanticNamingConfig)
 
 
 @dataclass(frozen=True)
@@ -461,6 +524,31 @@ def load_config(path: Path | None = None) -> IngestConfig:
     )
 
     naming_raw = merged["naming"]
+    proposer_name = str(naming_raw.get("proposer", "deterministic"))
+    if proposer_name not in VALID_NAME_PROPOSERS:
+        raise ValueError(
+            f"naming.proposer must be one of {sorted(VALID_NAME_PROPOSERS)}, got {proposer_name!r}"
+        )
+    semantic_raw = naming_raw.get("semantic") or {}
+    if not isinstance(semantic_raw, dict):
+        raise ValueError("naming.semantic must be a mapping")
+    semantic = SemanticNamingConfig(
+        model=str(semantic_raw.get("model", "qwen3.5:4b")),
+        endpoint=str(semantic_raw.get("endpoint", "http://127.0.0.1:11434")),
+        timeout_seconds=int(semantic_raw.get("timeout_seconds", 60)),
+        num_predict=int(semantic_raw.get("num_predict", 64)),
+        min_confidence=float(semantic_raw.get("min_confidence", 0.6)),
+        fallback_to_deterministic=bool(semantic_raw.get("fallback_to_deterministic", True)),
+    )
+    if not semantic.model.strip():
+        raise ValueError("naming.semantic.model must name an installed local model tag")
+    if not 1 <= semantic.timeout_seconds <= 600:
+        raise ValueError("naming.semantic.timeout_seconds must be between 1 and 600")
+    if not 1 <= semantic.num_predict <= 2048:
+        raise ValueError("naming.semantic.num_predict must be between 1 and 2048")
+    if not 0.0 <= semantic.min_confidence <= 1.0:
+        raise ValueError("naming.semantic.min_confidence must be between 0 and 1")
+
     naming = NamingConfig(
         enabled=bool(naming_raw["enabled"]),
         source_classes=frozenset(naming_raw["source_classes"]),
@@ -468,6 +556,8 @@ def load_config(path: Path | None = None) -> IngestConfig:
         max_filename_length=int(naming_raw["max_filename_length"]),
         protected_extensions=frozenset(ext.lower() for ext in naming_raw["protected_extensions"]),
         vocabulary=tuple(str(word) for word in naming_raw.get("vocabulary") or ()),
+        proposer=proposer_name,
+        semantic=semantic,
     )
     if not 0.0 <= naming.min_confidence <= 1.0:
         raise ValueError("naming.min_confidence must be between 0 and 1")
