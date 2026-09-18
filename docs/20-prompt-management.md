@@ -166,18 +166,30 @@ runtime adapter, kept as a named seam separate from semantic content), and
 classification` and `acb-v1-semantic-naming`, both `version: "1.0.0"`).
 
 `tools/prompts/production.py::render_for_task_class` is the one path both
-an ACB-v1 suite runner and a future production caller render through —
-proven identical by `tests/test_prompt_registry.py::SharedPathTests`, not
-merely asserted. There is still no production caller of
-`classification`/`routing`/`naming.semantic` (D-051), so this seam is
-currently exercised only by evaluation; it exists so a production caller,
-when built, has no reason to duplicate prompt construction.
+an ACB-v1 suite runner and a production caller render through — proven
+identical by `tests/test_prompt_registry.py::SharedPathTests`, not merely
+asserted.
+
+**`naming.semantic` now has that production caller**:
+`tools/ingest/naming/semantic.py::SemanticProposer`, opt-in via
+`naming.proposer: "semantic"` (D-057). That retires D-051's "still never
+exercised by a production caller" for this task class and makes the shared
+path load-bearing rather than aspirational — editing
+`library.py::SEMANTIC_NAMING_V1` now changes both what the Gate-2 suite
+measures and what the file-intelligence pipeline sends, which is exactly the
+property D-041 exists to guarantee. Bumping that prompt's version therefore
+also reopens every naming question the previous version declined, because
+`SemanticProposer.model_version` folds in the proposer version that the
+ledger's "already answered" check keys on.
+
+`classification` and `routing` still have no production caller — they belong
+to the attended-autonomous routing work (D-051), not to file intelligence.
 
 **The canonical/production track split (section 5) is not built.** Only one
 track exists today — the canonical one, a simple closed-label/property
 contract applied identically to every candidate, with no few-shot and no
-per-model tuning. A production-optimized track is future work once a
-production caller and real measured evidence exist to justify one.
+per-model tuning. A production-optimized track is future work once real
+measured evidence from that production caller justifies one.
 
 Existing evaluation prompts for the Legacy 20
 (`tools/bench/harness.py:benchmark_prompt()`) are **unchanged by this

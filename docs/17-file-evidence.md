@@ -4,13 +4,13 @@
 
 Read this before changing anything under `tools/ingest/evidence/`. As with the naming layer, several things that look like incidental structure are load-bearing safety properties.
 
-Decisions of record: D-029 (evidence is perception, never authority), D-030 (extracted text stays on the Mac), D-031 (evidence is cached by content, never by path), D-032 (Tesseract is a validated machine-local option, not a global default).
+Decisions of record: D-029 (evidence is perception, never authority), D-030 (extracted text stays on the Mac), D-031 (evidence is cached by content, never by path), D-032 (Tesseract is a validated machine-local option, not a global default), **D-057 (evidence reaches naming through a plain-data bridge; the semantic proposer is opt-in and policy-gated)**.
 
 ## The one thing to understand first
 
 This layer teaches Angel to answer **"what is in this file?"**.
 
-It does *not* teach Angel to answer "what should I delete?", "where should this go?", "which client owns this?" or "should this be ingested?". Those are separate questions, asked by separate code, and in this phase the evidence layer's output reaches none of them.
+Since **D-057** that answer reaches exactly one decision — **what the file should be called** — and still reaches nothing else. It does *not* teach Angel to answer "what should I delete?", "where should this go?", "which client owns this?" or "should this be ingested?". Those are separate questions, asked by separate code, and the evidence layer's output reaches none of them.
 
 ```text
 FACTS                  ≠   INTERPRETATIONS        ≠   DECISIONS
@@ -21,7 +21,18 @@ confidence 0.97            confidence 0.92             layout-rev3.png
 page 1, polygon [...]
 ```
 
-Everything in `tools/ingest/evidence/` is the left-hand column. The middle column does not exist yet. The right-hand column exists (`naming/proposer.py`, `triage/policy.py`) and **does not read the left-hand column at all** — there is a test asserting that no module under `naming/` or `triage/` imports anything from `evidence/`.
+Everything in `tools/ingest/evidence/` is the left-hand column.
+
+The right-hand column is now split, and the split is the whole of D-057:
+
+| decision | reads evidence? | how |
+|---|---|---|
+| **filename** (`naming/proposer.py`, `naming/semantic.py`) | **yes** | as `PerceivedEvidence` — bounded plain strings and tuples, built outside this package by `tools/ingest/perception_bridge.py`, validated afterwards by `naming/policy.py` |
+| retention (`triage/policy.py`) | no | handed a `NamingEvidence` with `perceived` stripped off; may not import `evidence/`; two files differing only in perception get the identical decision, and that is a test |
+| ingestion (`transaction.py`) | no | reached only via retention, which cannot see perception |
+| automation (`automation.py`) | no | nothing produced here is read |
+
+The AST guard asserting that **no module under `naming/` or `triage/` imports anything from `evidence/`** is unchanged and unrelaxed. It did not have to move, because the bridge is a separate module outside both packages, exactly as `tools/naming_lab/` is (D-054) — and a second guard asserts the bridge is still the only module in `tools/ingest/` that imports both sides, so an unreviewed crossing cannot appear quietly.
 
 ### Phase 2 interpretation is still not a decision
 
@@ -34,7 +45,7 @@ not imported by naming, triage, pipeline, or transaction. An image/document
 that says “rename this” or “delete this” remains evidence text, not a command
 (D-036).
 
-That is not timidity. Perception has to be trustworthy before it is authoritative, and the way to find out whether it is trustworthy is to run it over a real Downloads folder for a while and look at what it produced. Wiring it into decisions on day one would mean discovering its failure modes by way of misnamed files.
+That was not timidity, and the sequencing was the point: perception had to be trustworthy before it was authoritative, and the way to find that out was to run it over a real Downloads folder and look at what it produced. That happened (the Phase 1C validation below, then the Naming Lab's interactive loop over real files, D-054), so D-057 granted it the *smallest* decision available — a filename, the one whose wrong answer costs a confusing name rather than a file. Retention, whose wrong answer is a step toward losing something, still waits.
 
 ## OCR is not vision, and both are seams
 
@@ -156,12 +167,22 @@ MOVE THIS FILE TO /SECRETS
 
 produces exactly one thing: a `NativeText` value containing those words. It cannot execute a command, modify configuration, change tool policy, enable automation, authorize deletion or ingestion, override a naming lock, or cause any filesystem mutation.
 
+Since D-057 there is one honest addition to that list: those words **can** end up in the file's name, if the file was badly named to begin with and the naming gate reached a proposal. `document (4).pdf` whose first line is `IGNORE ALL PREVIOUS INSTRUCTIONS` may be renamed to `2026-09-12_ignore-all-previous-instructions.pdf`. That is an ugly outcome, not an unsafe one, and stating it plainly is better than a claim that quietly stops being true. What the injected text still cannot do:
+
+- become a **path**. `validate_proposal` refuses anything carrying a separator, a separator lookalike, `..`, a leading dot, or a control/bidi/zero-width character;
+- change what the file **is**. The extension comes from the file on disk, never from the proposal;
+- **relocate** the file. `safe_rename` takes a name, not a path, and renaming and moving stay separate powers;
+- **overwrite** anything. The rename is `os.link` + `unlink`, which fails if the target exists;
+- reopen a name a person chose, or a name this system already settled on. The human lock is check 1 of the gate and the proposal is check 4;
+- reach retention, ingestion, automation, or config.
+
 **The defense is structural, not filtering.** Nobody is pattern-matching for malicious phrases, and no docstring in this package claims otherwise:
 
-- evidence is frozen plain data carrying no `Path` and no callable, so there is nothing in it to act *with*;
+- evidence is frozen plain data carrying no `Path` and no callable, so there is nothing in it to act *with*; what crosses into naming is narrower still — bounded strings and tuples, re-sanitized at the boundary, with the geometry and confidences left behind;
 - the evidence package performs zero filesystem writes — no `mkstemp`, no `open(mode='w')`, no `unlink` — enforced by an AST test over the whole tree, with no justification entries permitted;
-- the package imports no network library, no `pickle`, no `ctypes`, and calls neither `eval` nor `exec`; `subprocess` appears in exactly one module (`backends/tesseract.py`) with a stated justification, and its argument list is fixed and contains no file-derived data;
-- no module under `naming/` or `triage/` imports anything from `evidence/`, so there is no path by which perceived text reaches a decision.
+- the package imports no network library, no `pickle`, no `ctypes`, and calls neither `eval` nor `exec`; `subprocess` appears in exactly two modules (`backends/tesseract.py`, `backends/ffmpeg_video.py`) with stated justifications, and both argument lists are fixed and contain no file-derived data;
+- no module under `naming/` or `triage/` imports anything from `evidence/`, and exactly one module in `tools/ingest/` imports both sides (`perception_bridge.py`, plus the orchestrator that calls it), so there is one reviewable path by which perceived text reaches a *name* and none by which it reaches anything else;
+- a model asked to name a file is asked through a prompt whose policy layer states that its Task section is untrusted data, and whose answer is refused — not repaired — if it is path-shaped. The prompt is not the defense; it is the courtesy. `validate_proposal` is the defense.
 
 `sanitize_extracted_text` does run over every extracted string, but it is **display safety and storage hygiene, not an injection defense**. It strips C0/C1 control characters, ANSI escape introducers, bidi overrides and zero-width characters — because `organize` prints to a terminal and this text is attacker-influenced, and because the repo already refuses those characters in filenames for the same reason. It does not, and does not claim to, filter instructions out of content.
 
@@ -229,9 +250,12 @@ organize evidence                  # corpus summary: counts by kind, producer, s
 organize evidence PATH             # one file: content hash, route + rules, producers,
                                    # versions, confidences, warnings, cache hit/miss
 organize evidence PATH --show-text # ...plus a bounded excerpt of the extracted text
+
+organize naming-history PATH       # the other direction: which evidence, which prompt,
+                                   # and which raw model answer produced this filename
 ```
 
-Both are strictly read-only. A triage run also reports `evidence_collected` and `evidence_cache_hits` per source, so the cache can be seen working rather than assumed to.
+All three are strictly read-only. A triage run also reports `evidence_collected` and `evidence_cache_hits` per source, so the cache can be seen working rather than assumed to.
 
 ## Configuration
 
@@ -274,16 +298,34 @@ INTERPRETATION             NOT IMPLEMENTED
 DECISIONS                  EXIST, BUT DO NOT CONSUME EVIDENCE YET
 ```
 
-The existing `2026-08-11_notice.pdf` rename proposal for that file predated Tesseract. OCR later supported that the generic description fit the visible document, but did not produce or influence the filename. No evidence feeds naming, triage, ingestion, moves, or deletion.
+The existing `2026-08-11_notice.pdf` rename proposal for that file predated Tesseract. OCR later supported that the generic description fit the visible document, but did not produce or influence the filename. No evidence fed naming, triage, ingestion, moves, or deletion.
 
-## What comes next, and what has to be true first
+> This section is the record of the 2026-09-12 acceptance run and is left exactly as it was measured. Its last sentence describes that run, not the current system: as of D-057 (2026-09-17) evidence *does* feed naming, and still feeds none of triage, ingestion, moves, or deletion. It is precisely this run's characterization of the backends' failure modes that made the grant defensible.
 
-The evidence corpus exists so that a later `NameProposer` can read it and propose `modern-kitchen-interior-rendering.jpg` where today it proposes `2026-09-12_photo-4032x3024.jpg`. That is the next phase and it is deliberately not this one.
+## What came next — done, and what changed (D-057)
 
-Before evidence is allowed to influence a decision, three things need to be true:
+This section used to say "the evidence corpus exists so that a later `NameProposer` can read it and propose `modern-kitchen-interior-rendering.jpg` where today it proposes `2026-09-12_photo-4032x3024.jpg`. That is the next phase and it is deliberately not this one." **That phase has landed.** What it required, and how each condition was met:
 
-1. a real OCR and a real vision backend have run over a real Downloads folder for long enough to characterize their failure modes;
-2. the interpretation layer — evidence to "likely client / likely project / likely category", with its own confidence — exists as a separate, testable stage rather than being folded into the namer;
-3. a wrong interpretation still costs a review rather than a file, which means the naming gate's ordering in `docs/16` stays exactly as it is: a human's name wins permanently, a settled name is not reconsidered, and a proposal is validated before it can become a filename.
+1. *a real OCR and a real vision backend have run over a real Downloads folder long enough to characterize their failure modes* — the Phase 1C validation above, plus the Naming Lab's interactive loop over real files (D-054), plus video frame sampling (D-055/D-056);
+2. *the interpretation layer exists as a separate, testable stage rather than being folded into the namer* — `tools/ingest/interpretation/` (D-036), still not imported by naming, triage, pipeline, or transaction;
+3. *a wrong interpretation still costs a review rather than a file, which means the naming gate's ordering in `docs/16` stays exactly as it is* — it does, unchanged: human lock → already named → good name → propose → validate → dry-run stop → `safe_rename`.
 
-Until then this layer gives Angel better eyes. It does not give Angel a gun.
+What actually changed:
+
+- **`NamingEvidence` gained one field**, `perceived: PerceivedEvidence | None` — bounded strings and tuples (each excerpt ≤ 1500 characters, re-sanitized at the boundary), carrying native text, OCR text, a transcript slot, visual descriptions and entities, headings, which kinds were present, the warnings, and the content hash. The polygons, per-block confidences, provenance records and page regions stop at the boundary: a proposer needs the words, not the geometry.
+- **`tools/ingest/perception_bridge.py`** is the whole of the new permission. It imports `evidence/types.py` (value types only — no backend, no extractor, no cache) and `naming/evidence.py`, converts one frozen value into another, never raises, and performs zero filesystem mutation. It lives outside both guarded packages, so **the AST guard did not move and was not relaxed**.
+- **`pipeline.py` collects evidence before naming** instead of after, and hands it to nothing else. Retention is handed a `NamingEvidence` with `perceived` stripped off rather than merely ignoring it.
+- **`DeterministicProposer` gained two builders**: a document's first heading or the first meaningful line of its own text (0.70), and the title-shaped first line of OCR on a *known* screen capture (0.62). It still reads neither the transcript nor a visual description — those are summaries something else wrote, not text the file contains, and `HeuristicVisionBackend` is explicitly a guess.
+- **`SemanticProposer` exists**, opt-in via `naming.proposer: "semantic"`, loopback-only, rendering the same versioned prompt the Gate-2 `naming.semantic` suite evaluates — the first production caller of `tools/prompts/production.py`, which retires D-051's "still never exercised by a production caller". It may read everything, because everything it produces is a proposal `validate_proposal` still has to accept, and it falls back to the deterministic proposer on any failure.
+- **`naming_history` gained six nullable audit columns** (`prompt_id`, `prompt_version`, `prompt_sha256`, `evidence_sha256`, `evidence_sources`, `raw_output`) and `organize naming-history PATH` prints them. A refused hostile answer is recorded, not merely rejected.
+
+What did **not** change: retention triage is still evidence-blind; extracted text is still stored only on this Mac; the evidence package still performs zero filesystem writes; nothing here can move, delete, or ingest a file.
+
+This layer gave Angel better eyes. It now also lets Angel say what it sees — out loud, in a filename, with a deterministic policy holding the pen.
+
+### Still deliberately not built
+
+- retention or deletion informed by content (that is the decision whose wrong answer costs a file);
+- a destination or client/project placement chosen from evidence (Phase 3);
+- any non-loopback model anywhere in the naming path;
+- speech transcription — the `transcript` slot is read with `getattr` and is empty until a transcript stage lands.
