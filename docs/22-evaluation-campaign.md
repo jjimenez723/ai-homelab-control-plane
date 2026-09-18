@@ -35,9 +35,10 @@ this conversation, this session, or any AI agent present.
 * `config/campaigns/gate2.yaml` — the one shipped profile.
 * `scripts/angel-eval` — the thin wrapper (`python -m tools.campaign.cli`).
 
-Nothing in this pass has run the real Gate-2 campaign. The committed
-validation profile now names the four local candidates already established
-by Phase 2 history: `qwen2.5:0.5b`, `qwen3.5:4b`, `qwen3.5:9b`, and
+**Superseded as of 2026-09-18:** the real Gate-2 campaigns have now been run
+(see "Campaigns actually run" below). What follows described the state before
+that. The committed validation profile names the four local candidates already
+established by Phase 2 history: `qwen2.5:0.5b`, `qwen3.5:4b`, `qwen3.5:9b`, and
 `gpt-oss:20b`. On a real run, a missing manifest-approved Ollama tag is
 pulled automatically through the loopback Ollama API, then its actual local
 digest and quantization are resolved and pinned into the work-unit
@@ -299,14 +300,118 @@ exactly this.
 
 ## What this document does not claim
 
-Gate 2 remains **RED**. The runner can now auto-stage the approved validation
-candidate set and schedule it without intentional memory overcommit, but no
-real measured campaign has been run and this pass did not populate
-`config/certifications.yaml`, and did not touch `config/certifications.
-example.yaml`'s empty-list invariant (`tests/test_autonomous_routing.py`
-still asserts it). The one command to start the real, unattended Gate-2
-qualification campaign once candidates are staged is:
+This document describes a runner, not a verdict. It does not say whether any
+model is good enough to route: that is `docs/19-model-evaluation.md` §13 (the
+measured results), `docs/25-gate2-naming-audit.md` (whether the measurement
+means anything), and `PLAN.md`'s clause table (the gate itself, maintained by
+the integrator).
+
+Two things this runner still does not do. It never downloads a model that is
+not an explicitly manifest-approved tag, and it never turns a smoke run into
+evidence. And `config/certifications.example.yaml` remains the empty list
+`tests/test_autonomous_routing.py` asserts -- a real certification lives in
+the gitignored, machine-specific `config/certifications.yaml` (D-060), because
+a certification names the exact local model digest measured on one host.
+
+The commands that ran the campaigns below, in order:
 
 ```bash
-./scripts/angel-eval campaign --profile gate2
+./scripts/angel-eval campaign --profile gate2-dev              # dev split only
+./scripts/angel-eval campaign --profile gate2-dev-naming       # dev split only
+./scripts/angel-eval campaign --profile gate2-dev-reasoning    # dev split only
+# ... freeze the winning prompt versions in tools/prompts/library.py ...
+./scripts/angel-eval campaign --profile gate2-validation-002   # comparison
+./scripts/angel-eval campaign --profile gate2-holdout --strict # certification
 ```
+
+## Reasoning models (D-059)
+
+A thinking model's reasoning arrives on a separate channel and is billed
+against the same output budget as its answer. Getting that wrong is not a
+subtle inaccuracy: `gate2-validation-001` ran `gpt-oss:20b` at
+`num_predict: 64` and recorded 95-100 % `truncated` on both suites, measuring
+the budget rather than the model.
+
+Measured on this machine (Ollama 0.33.3, M4 Pro):
+
+| Model | `think: false` honoured? | At `num_predict: 64` | At 512 |
+|---|---|---|---|
+| `gpt-oss:20b` | **no** -- accepted and ignored, reasons anyway | `response: ""`, `done_reason: "length"`, all 64 tokens spent thinking | answers correctly in 76 tokens |
+| `qwen3.5:4b`, `qwen3.5:9b` | yes -- empty `thinking`, 3-token answers | answers correctly | answers correctly |
+
+So a candidate declares what it is, and the runner refuses configurations that
+cannot measure it:
+
+```yaml
+  - name: gpt-oss-20b-p110
+    model: gpt-oss:20b
+    reasoning: true          # runtime emits a reasoning channel sharing the budget
+    sampling:
+      num_predict: 1024      # >= 512 is enforced when reasoning: true
+      think: low             # passed through verbatim; Ollama's own effort level
+```
+
+* `reasoning` is part of the candidate identity and therefore of the
+  configuration fingerprint: a reasoning candidate measured at a
+  non-reasoning budget is a different (and, as above, meaningless)
+  measurement, so it gets different work-unit ids.
+* `sampling.think` accepts exactly Ollama's own values (`false`, `true`,
+  `"low"`, `"medium"`, `"high"`) and is passed through, never coerced to a
+  bool. "We asked it not to think" is never assumed to have worked.
+* `sampling.num_predict` is per candidate. With `reasoning: true`,
+  `tools/campaign/manifest.py` **refuses** any value below
+  `OllamaTextProvider.REASONING_MIN_NUM_PREDICT` (512, the measured floor), so
+  the original defect cannot be re-run by accident.
+* Only the answer channel is ever scored. `thinking` is recorded as
+  `thinking_chars` (result-record schema v3) alongside the attempt's own
+  `num_predict`, so "spent the whole budget reasoning" is a distinguishable
+  recorded fact rather than an unexplained empty answer.
+* `truncated` stays a first-class terminal status and now outranks whatever
+  the verifier would otherwise have complained about: a model that never
+  finished writing was not measured on the capability, so its half-written
+  answer is not reported as a wrong extension or an unknown label.
+
+Re-measured on the dev split with nothing else changed, `gpt-oss:20b` went from
+unmeasurable to 0.579 routing / 0.857 naming at the *same* prompt 1.0.0, and to
+0.842 / 1.000 at prompt 1.1.0.
+
+## Two guards that run before any inference
+
+Both were previously either test-only or left to whoever wrote the manifest:
+
+* **Contamination.** `check_prompt_contamination` runs
+  `tools.bench.suite.assert_no_holdout_leak` over the exact prompt versions a
+  campaign will send, on `--dry-run` and on a real run, before a model is
+  staged or loaded. D-052 wrote that guard as a run-time check but it only ever
+  ran in tests, against whichever version was `active`; a campaign may pin any
+  version, including a draft carrying few-shot examples.
+* **Shared model tags.** Two candidates that share one Ollama model tag are
+  never resident at once. A prompt-variant experiment has several candidates
+  over one model, and each candidate batch unloads that tag when it finishes —
+  which would have evicted a concurrent sibling's weights mid-batch. Enforced
+  in the scheduler, not in the manifest.
+
+## Campaigns actually run
+
+| Campaign | Split | Records | Profile |
+|---|---|---:|---|
+| `gate2-validation-001` (2026-09-15) | validation | 660 | `gate2` |
+| `gate2-dev-001` (2026-09-18) | dev | 594 | `gate2-dev` |
+| `gate2-dev-naming-001` | dev | 252 | `gate2-dev-naming` |
+| `gate2-dev-reasoning-001` | dev | 198 | `gate2-dev-reasoning` |
+| `gate2-validation-002` | validation | 825 | `gate2-validation-002` |
+| `gate2-holdout-001` | frozen_holdout | 165 | `gate2-holdout` |
+
+All six live in `.state/campaigns/<campaign_id>/` (gitignored, D-035), each
+with `results.jsonl`, `manifest_fingerprint.txt`, `resolved_candidates.json`,
+a regenerable `report/`, and a `failure-analysis/` where one was produced.
+`gate2-validation-001`'s records are never rewritten: suite 1.1.0 and prompt
+1.1.0 produce different configuration fingerprints and therefore different
+work-unit ids, so the 1.0 measurement stands as what it was. One consequence
+of adding `reasoning` to the candidate identity is that `gate2.yaml`'s manifest
+fingerprint moved, so `gate2-validation-001` can no longer be *resumed* under
+its own id -- correct, since the configuration it measured no longer exists.
+
+Results, thresholds and the certification they produced are in
+`docs/19-model-evaluation.md` §13; the audit that had to happen first is
+`docs/25-gate2-naming-audit.md`.

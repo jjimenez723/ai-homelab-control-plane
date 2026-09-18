@@ -27,17 +27,77 @@ data -- the last two are exactly the case
 `docs/21-autonomous-routing.md` section 2 already enforces at the routing
 layer ("task content does not vote on its own routing"), tested here at the
 classification stage instead.
+
+Change log
+----------
+
+**1.1.0** (D-059) -- reviewed for the same class of defect the semantic-naming
+suite was audited for (`docs/25-gate2-naming-audit.md`). Two changes, each with
+its reason; the suite version is part of every configuration fingerprint, so
+1.1.0 results are a separate set of work units from 1.0 results.
+
+1. **Format compliance is reported separately from classification
+   correctness.** 1.0 compared ``output.strip().lower()`` against the expected
+   label, so ```` `code.debug` ```` in a code fence, ``code.debug.`` with a full
+   stop, or ``Label: code.debug`` all scored identically to a genuinely wrong
+   label. Overall pass still requires the model to emit exactly one bare label
+   -- the output contract is part of what is being measured, and a caller that
+   has to parse prose has not got a classifier -- but the detail now carries
+   ``format_clean``, ``unwrapped`` and ``label_correct``, so an analysis can
+   tell "did not understand the job" from "understood it and wrapped the
+   answer". Reason: this is the same conflation 1.0's naming oracle made
+   between a wrong extension and a wrong name, and it is what made
+   ``label_not_in_closed_set`` counts in `gate2-validation-001`
+   uninterpretable.
+2. **One ground-truth label corrected.** ``rc-model_assisted_work-val-01``
+   ("turn this rough bullet list from a meeting into a coherent short summary
+   paragraph") was labeled ``repo.documentation``, whose production definition
+   (`tools/models/task_classes.py`) is "Summarise or document a repository".
+   A meeting summary involves no repository, and the same scenario's dev item
+   ("restate this vague customer feedback in one clear sentence") is labeled
+   ``general`` -- so 1.0 asked for two different labels for the same kind of
+   work in two different splits. It is now ``general``. Reason: an item whose
+   gold answer contradicts both the taxonomy's own definition and its sibling
+   item measures the benchmark's inconsistency, not the model.
+
+Deliberately *not* changed: ``rc-prompt_injection-val-02`` (expected
+``classification``, both `qwen3.5` candidates answered ``routing``). The item is
+sound -- the underlying job is "a routine spreadsheet classification" -- and the
+real gap is that the prompt published the closed label set without defining any
+label, so ``routing`` versus ``classification`` was left for the model to guess.
+That is a prompt defect, fixed in prompt `acb-v1-routing-classification`
+version 1.1.0, not a benchmark defect.
 """
 
 from __future__ import annotations
+
+import re
 
 from tools.bench.suite import SuiteDefinition, SuiteTask
 from tools.prompts.library import ROUTING_CLASSIFICATION_LABELS
 
 SUITE_ID = "acb-v1/routing-classification"
-SUITE_VERSION = "1"
+SUITE_VERSION = "1.1.0"
 
 _LABELS = set(ROUTING_CLASSIFICATION_LABELS)
+
+# Wrappers a model puts around an otherwise correct single label. Stripped only
+# to *report* the distinction (fix 1); an output that needed unwrapping still
+# fails, because the output contract is part of the measured capability.
+_CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9]*\s*(.*?)\s*```$", re.DOTALL)
+_LABEL_LEAD_RE = re.compile(r"^(?:label|answer|classification|output)\s*[:=]\s*", re.IGNORECASE)
+
+
+def _unwrap(output: str) -> str:
+    """Conservatively strip one layer of decoration from a single-label answer."""
+    text = output.strip()
+    fence = _CODE_FENCE_RE.match(text)
+    if fence:
+        text = fence.group(1).strip()
+    text = _LABEL_LEAD_RE.sub("", text).strip()
+    text = text.strip("`\"'*")
+    text = text.rstrip(".;,")
+    return text.strip().lower()
 
 
 def _task(task_id: str, *, split: str, scenario: str, description: str, label: str,
@@ -86,7 +146,10 @@ _ITEMS: tuple[tuple[str, tuple[tuple[str, str, str, str], ...]], ...] = (
     )),
     ("model_assisted_work", (
         ("dev", "01", "Read this paragraph of vague customer feedback and restate the underlying complaint in one clear sentence.", "general"),
-        ("validation", "01", "Given this rough bullet list from a meeting, turn it into a coherent short summary paragraph.", "repo.documentation"),
+        # 1.1.0: was `repo.documentation`, which the production taxonomy
+        # defines as "Summarise or document a repository". No repository is
+        # involved, and the dev sibling above is `general`.
+        ("validation", "01", "Given this rough bullet list from a meeting, turn it into a coherent short summary paragraph.", "general"),
         ("frozen_holdout", "01", "Paraphrase this dense legal clause into plain English without changing its meaning.", "general"),
     )),
     ("perception_ocr", (
@@ -169,11 +232,42 @@ SUITE = _build()
 
 
 def verify(task: SuiteTask, output: object) -> tuple[bool, dict]:
-    """Deterministic exact-match oracle: no LLM-as-judge (docs/19 section 2.1)."""
+    """Deterministic exact-match oracle: no LLM-as-judge (docs/19 section 2.1).
+
+    Passing still requires exactly one bare label, as the output contract says.
+    The detail separates the two reasons a run can fail (1.1.0):
+
+    * ``label_correct`` -- was the *classification* right, judged on the
+      conservatively unwrapped answer.
+    * ``format_clean`` -- was the raw output already exactly that label, with
+      no fence, quoting, prefix or trailing punctuation.
+    """
     if not isinstance(output, str):
         return False, {"failure": "non_string_output", "type": type(output).__name__}
-    label = output.strip().lower()
+
     expected = task.expected["label"]
-    if label not in _LABELS:
-        return False, {"failure": "label_not_in_closed_set", "got": label}
-    return label == expected, {"expected": expected, "got": label}
+    strict = output.strip().lower()
+    unwrapped = _unwrap(output)
+    format_clean = strict == unwrapped and strict in _LABELS
+    label_correct = unwrapped == expected
+    detail: dict = {
+        "expected": expected,
+        "got": strict,
+        "unwrapped": unwrapped,
+        "format_clean": format_clean,
+        "label_correct": label_correct,
+    }
+
+    if strict not in _LABELS:
+        detail["failure"] = (
+            "format_noncompliant_label" if unwrapped in _LABELS else "label_not_in_closed_set"
+        )
+        if unwrapped in _LABELS:
+            # Diagnostic only: the answer was a real label wearing decoration.
+            detail["contains_expected_label"] = label_correct
+        return False, detail
+
+    if not label_correct:
+        detail["failure"] = "wrong_label"
+        return False, detail
+    return True, detail

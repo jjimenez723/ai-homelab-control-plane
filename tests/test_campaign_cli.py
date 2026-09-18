@@ -53,11 +53,35 @@ class AuditCliTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / "gate2-contract-audit.md").exists())
             payload = json.loads((Path(tmp) / "gate2-contract-audit.json").read_text(encoding="utf-8"))
             self.assertFalse(payload["frozen_holdout_content_included"])
-            self.assertGreater(payload["summary"]["errors"], 0)
+            # The 1.0 contract errors this used to assert are fixed (D-059);
+            # what must still hold is that the audit ran real checks and says
+            # which, so a silently empty audit cannot look like a clean one.
+            self.assertEqual(payload["summary"]["errors"], 0)
+            self.assertIn("frozen_holdout_guard_clean", payload["summary"]["checks_run"])
+            self.assertGreater(len(payload["summary"]["checks_run"]), 3)
 
-    def test_audit_strict_exits_nonzero_while_current_contract_has_errors(self) -> None:
+    def test_audit_strict_exits_zero_while_the_contract_is_clean(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             code = cli.main(["audit", "--out", tmp, "--strict"])
+            self.assertEqual(code, 0)
+
+    def test_audit_strict_exits_nonzero_when_a_contract_error_exists(self) -> None:
+        from tools.bench import gate2_audit
+        from tools.bench.gate2_audit import AuditFinding
+
+        real = gate2_audit.generate_gate2_audit
+
+        def with_one_error(**kwargs):
+            audit = real(**kwargs)
+            finding = AuditFinding(severity="error", check="injected_for_test",
+                                   suite_id="acb-v1/semantic-naming", detail="d")
+            audit["findings"].insert(0, finding.as_dict())
+            audit["summary"]["errors"] += 1
+            return audit
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(cli, "generate_gate2_audit", with_one_error):
+                code = cli.main(["audit", "--out", tmp, "--strict"])
             self.assertEqual(code, 1)
 
     def test_frozen_holdout_requires_explicit_acknowledgement(self) -> None:

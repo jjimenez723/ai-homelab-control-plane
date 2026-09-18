@@ -57,6 +57,12 @@ class Candidate:
     quantization: str | None = None
     sampling: dict[str, Any] | None = None
     augmentation_version: str = "none"
+    reasoning: bool = False
+    """Whether this model's runtime emits a separate reasoning channel that
+    shares the output budget (D-059). Part of the identity because it changes
+    what ``num_predict`` has to be for the answer to survive at all -- a
+    reasoning candidate measured at a non-reasoning budget is a different
+    (and, as `gate2-validation-001` showed, meaningless) measurement."""
 
     def candidate_identity(self) -> dict[str, Any]:
         """The model/runtime-only identity, independent of any suite."""
@@ -66,6 +72,7 @@ class Candidate:
             "tool_schema_version": self.tool_schema_version,
             "sampling": dict(sorted((self.sampling or {}).items())),
             "augmentation_version": self.augmentation_version,
+            "reasoning": self.reasoning,
         }
 
 

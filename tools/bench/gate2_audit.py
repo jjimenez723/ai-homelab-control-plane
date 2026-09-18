@@ -24,11 +24,15 @@ from typing import Any, Iterable
 
 from tools.bench.acb_v1 import routing_classification as routing
 from tools.bench.acb_v1 import semantic_naming as naming
-from tools.bench.suite import SuiteTask
+from tools.bench.suite import ContaminationError, SuiteTask, assert_no_holdout_leak
 from tools.prompts.library import ROUTING_CLASSIFICATION_LABELS
 from tools.prompts.registry import PromptVersion, load_default_registry
 
-AUDIT_SCHEMA_VERSION = 1
+# v2 (D-059): adds answer/few-shot/holdout leakage checks, live oracle
+# false-negative and false-positive probes, extension-separation, expectation
+# groundedness, uncertainty guidance, and scenario/label balance -- the audit
+# dimensions `docs/25-gate2-naming-audit.md` enumerates.
+AUDIT_SCHEMA_VERSION = 2
 DEFAULT_SPLITS: tuple[str, ...] = ("dev", "validation")
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
@@ -214,6 +218,366 @@ def _audit_naming_contract(tasks: list[SuiteTask], prompt: PromptVersion) -> lis
     return findings
 
 
+# ---------------------------------------------------------------------------
+# D-059 additions: the audit dimensions `docs/25-gate2-naming-audit.md` names.
+# Every check below is deterministic and runs against the live suite/prompt
+# objects, so the audit is a regression guard, not a snapshot of one review.
+# ---------------------------------------------------------------------------
+
+_UNCERTAINTY_WORDS = ("unclear", "uncertain", "unknown", "not legible", "insufficient",
+                      "cannot be identified", "no clear", "ambiguous")
+
+# Words a prompt must be able to use to state its own contract. Their presence
+# in a template is scaffolding, not an expected answer leaked into it.
+_PROMPT_SCAFFOLD_WORDS = frozenset({
+    "contract", "proposal", "policy", "instruction", "instructions", "output",
+    "filename", "evidence", "context", "extension", "organization", "person",
+    "classification", "label", "naming", "routing", "general", "document",
+})
+
+
+def _prompt_material(prompt: PromptVersion) -> list[str]:
+    return [prompt.policy_template, prompt.role_template, prompt.task_template,
+            prompt.output_schema, prompt.notes or ""]
+
+
+def _normalize(text: str) -> str:
+    return " ".join(str(text).split()).strip().lower()
+
+
+def _audit_prompt_leakage(prompt: PromptVersion, tasks: list[SuiteTask], suite_id: str,
+                          *, text_fields: tuple[str, ...]) -> list[AuditFinding]:
+    """Answer leakage and few-shot contamination, checked in both directions.
+
+    Two separate risks, both of which would silently inflate a score:
+
+    * a *task's own text* appearing in the prompt (an item the model is graded
+      on has been shown to it as an example);
+    * an *answer* appearing in the prompt (an allowed date or a distinctive
+      required-concept word baked into the template).
+
+    Checked over every reviewed split, not only frozen_holdout -- the run-time
+    guard `tools.bench.suite.assert_no_holdout_leak` already covers holdout,
+    and dev contamination is still a measurement defect even though it is not
+    a holdout breach.
+    """
+    findings: list[AuditFinding] = []
+    blob = _normalize("\n".join(_prompt_material(prompt)))
+    if not blob:
+        return findings
+
+    for task in tasks:
+        for field in text_fields:
+            value = task.input.get(field)
+            if not value:
+                continue
+            needle = _normalize(str(value))
+            if len(needle) > 30 and needle in blob:
+                findings.append(AuditFinding(
+                    severity="error", check="prompt_contains_suite_item_text",
+                    suite_id=suite_id, task_id=task.id,
+                    detail=(f"The {field!r} of a graded {task.split} item appears verbatim in the "
+                            "prompt template, so the model is shown an item it is scored on."),
+                ))
+
+        for date in task.expected.get("allowed_dates", ()):
+            if str(date) in blob:
+                findings.append(AuditFinding(
+                    severity="error", check="prompt_contains_expected_answer",
+                    suite_id=suite_id, task_id=task.id,
+                    detail=f"The prompt template contains this item's expected date {date!r}.",
+                ))
+        for concept in task.expected.get("required_concept_sets", ()):
+            for word in concept:
+                lowered = str(word).lower()
+                if len(lowered) < 5 or lowered in _PROMPT_SCAFFOLD_WORDS:
+                    # A prompt necessarily uses words like "output contract" and
+                    # "proposal" to state its own contract; those collisions are
+                    # scaffolding, not an answer leaked into the template.
+                    continue
+                if re.search(rf"\b{re.escape(lowered)}\b", blob):
+                    findings.append(AuditFinding(
+                        severity="warning", check="prompt_contains_expected_answer",
+                        suite_id=suite_id, task_id=task.id,
+                        detail=(f"The prompt template contains the required-concept word "
+                                f"{word!r} for a graded item."),
+                    ))
+        label = task.expected.get("label")
+        if isinstance(label, str) and label not in ROUTING_CLASSIFICATION_LABELS:
+            findings.append(AuditFinding(
+                severity="error", check="expected_label_outside_closed_set",
+                suite_id=suite_id, task_id=task.id,
+                detail=f"Expected label {label!r} is not in the published closed label set.",
+            ))
+    return findings
+
+
+def _audit_few_shot(prompt: PromptVersion, suites: dict[str, Any]) -> list[AuditFinding]:
+    """Whether a prompt carrying examples declares and isolates them."""
+    findings: list[AuditFinding] = []
+    material = "\n".join(_prompt_material(prompt))
+    looks_like_examples = "example" in material.lower() and "\n" in material
+    if prompt.example_set_version and not looks_like_examples:
+        findings.append(AuditFinding(
+            severity="warning", check="example_set_declared_but_absent",
+            suite_id="-", detail=(f"{prompt.prompt_id}@{prompt.version} declares example_set_version "
+                                  f"{prompt.example_set_version!r} but its templates contain no examples."),
+        ))
+    if looks_like_examples and not prompt.example_set_version:
+        findings.append(AuditFinding(
+            severity="warning", check="examples_without_example_set_version",
+            suite_id="-", detail=(f"{prompt.prompt_id}@{prompt.version} appears to contain few-shot "
+                                  "examples but declares no example_set_version, so the example set "
+                                  "is not separately versioned or pinnable."),
+        ))
+    if not prompt.example_set_version:
+        return findings
+    # A declared example set must not quote any suite item, in any split.
+    for suite_id, definition in suites.items():
+        for task in definition.tasks:
+            for field in ("description", "evidence_text"):
+                value = task.input.get(field)
+                if not value:
+                    continue
+                needle = _normalize(str(value))
+                if len(needle) > 30 and needle in _normalize(material):
+                    findings.append(AuditFinding(
+                        severity="error", check="few_shot_contamination",
+                        suite_id=suite_id, task_id=task.id,
+                        detail=(f"A few-shot example in {prompt.prompt_id}@{prompt.version} quotes "
+                                f"a {task.split} suite item."),
+                    ))
+    return findings
+
+
+def _reference_answer(task: SuiteTask) -> str:
+    """A deliberately obvious correct answer, built only from the item's own expectations.
+
+    If this does not pass, the item has no reachable passing answer and the
+    defect is in the benchmark, not in any model. Built from the expectation
+    fields alone -- never from an observed model output, so this check cannot
+    become a way of tuning the oracle to whatever a candidate happened to say.
+    """
+    parts: list[str] = []
+    for concept in task.expected.get("required_concept_sets", ()):
+        if concept:
+            parts.append(str(concept[0]))
+    minimum = int(task.expected.get("min_evidence_words", 0) or 0)
+    if minimum:
+        parts.extend(naming.evidence_content_words(str(task.input.get("evidence_text", "")))[:minimum])
+    if not parts:
+        parts.append("document")
+    stem = "-".join(parts)
+    allowed = tuple(task.expected.get("allowed_dates", ()))
+    if allowed and task.expected.get("require_date", False):
+        stem = f"{allowed[0]}_{stem}"
+    extension = Path(str(task.input["original_filename"])).suffix.lower()
+    return stem + extension
+
+
+def _audit_naming_oracle_behaviour(tasks: list[SuiteTask]) -> list[AuditFinding]:
+    """Live probes of the oracle: false negatives, false positives, extension split."""
+    findings: list[AuditFinding] = []
+    for task in tasks:
+        reference = _reference_answer(task)
+        passed, detail = naming.verify(task, reference)
+        if not passed:
+            findings.append(AuditFinding(
+                severity="error", check="semantic_false_negative",
+                suite_id=naming.SUITE_ID, task_id=task.id,
+                detail=(f"An answer assembled only from this item's own expectations "
+                        f"({reference!r}) is rejected by the oracle: "
+                        f"{detail.get('failure')!r}. The item has no reachable passing answer."),
+            ))
+
+        # False positive: the original name, unchanged, must never pass.
+        original = str(task.input["original_filename"])
+        passed_original, _ = naming.verify(task, original)
+        if passed_original:
+            findings.append(AuditFinding(
+                severity="error", check="semantic_false_positive",
+                suite_id=naming.SUITE_ID, task_id=task.id,
+                detail=f"The unchanged original filename {original!r} passes the oracle.",
+            ))
+        # False positive: a contentless generic name must never pass.
+        generic = "document" + Path(original).suffix.lower()
+        passed_generic, _ = naming.verify(task, generic)
+        if passed_generic:
+            findings.append(AuditFinding(
+                severity="error", check="semantic_false_positive",
+                suite_id=naming.SUITE_ID, task_id=task.id,
+                detail=f"A contentless name {generic!r} passes the oracle.",
+            ))
+
+        # Extension handling must be reported separately from semantics.
+        wrong_extension = str(Path(reference).with_suffix(".zzz"))
+        ext_passed, ext_detail = naming.verify(task, wrong_extension)
+        if ext_passed:
+            findings.append(AuditFinding(
+                severity="error", check="extension_not_enforced",
+                suite_id=naming.SUITE_ID, task_id=task.id,
+                detail=f"A proposal with the wrong extension ({wrong_extension!r}) passes.",
+            ))
+        elif not ext_detail.get("semantic_pass", False):
+            findings.append(AuditFinding(
+                severity="error", check="extension_conflated_with_semantics",
+                suite_id=naming.SUITE_ID, task_id=task.id,
+                detail=("A proposal that is semantically correct but has the wrong extension is "
+                        "not reported as semantically correct, so a formatting mistake and a "
+                        "comprehension failure are indistinguishable in the result records."),
+            ))
+    return findings
+
+
+def _audit_naming_expectation_sanity(tasks: list[SuiteTask]) -> list[AuditFinding]:
+    """Synonyms, entity contradictions, unrealistic evidence, leakage-check sanity."""
+    findings: list[AuditFinding] = []
+    for task in tasks:
+        evidence = str(task.input.get("evidence_text", "")).lower()
+        original = str(task.input.get("original_filename", "")).lower()
+        visible = f"{evidence}\n{original}"
+
+        for concept in task.expected.get("required_concept_sets", ()):
+            if not any(str(word).lower() in visible for word in concept):
+                findings.append(AuditFinding(
+                    severity="error", check="concept_set_not_evidence_grounded",
+                    suite_id=naming.SUITE_ID, task_id=task.id,
+                    detail=(f"No synonym in required concept {list(concept)} appears in the "
+                            "evidence or original filename the model is shown, so the "
+                            "expectation cannot be met from the evidence supplied."),
+                ))
+            if len(concept) == 1 and len(str(concept[0])) >= 5:
+                findings.append(AuditFinding(
+                    severity="info", check="single_surface_concept",
+                    suite_id=naming.SUITE_ID, task_id=task.id,
+                    detail=(f"Required concept {list(concept)} accepts one surface form. Stem and "
+                            "phrase matching widen it, but a genuine synonym "
+                            "(a second word for the same thing) would widen it further."),
+                ))
+
+        forbidden = {str(word).lower() for word in task.expected.get("forbidden_tokens", ())}
+        for concept in task.expected.get("required_concept_sets", ()):
+            overlap = forbidden & {str(word).lower() for word in concept}
+            if overlap:
+                findings.append(AuditFinding(
+                    severity="error", check="forbidden_token_contradicts_required_concept",
+                    suite_id=naming.SUITE_ID, task_id=task.id,
+                    detail=f"Token(s) {sorted(overlap)} are both required and forbidden.",
+                ))
+        for word in sorted(forbidden):
+            for concept in task.expected.get("required_concept_sets", ()):
+                for required in concept:
+                    lowered = str(required).lower()
+                    if lowered != word and (word in lowered or lowered in word):
+                        findings.append(AuditFinding(
+                            severity="warning", check="forbidden_token_overlaps_required_concept",
+                            suite_id=naming.SUITE_ID, task_id=task.id,
+                            detail=(f"Forbidden token {word!r} shares a surface with required "
+                                    f"concept word {required!r}; a correct answer could trip the "
+                                    "prohibition if matching is ever widened."),
+                        ))
+
+        for fragment in task.expected.get("forbidden_substrings", ()):
+            if str(fragment).lower() not in visible:
+                findings.append(AuditFinding(
+                    severity="warning", check="leakage_check_not_grounded",
+                    suite_id=naming.SUITE_ID, task_id=task.id,
+                    detail=(f"Forbidden substring {fragment!r} does not appear in the evidence or "
+                            "original filename, so the leakage check cannot fire for this item."),
+                ))
+    return findings
+
+
+def _audit_uncertainty_guidance(prompt: PromptVersion, definition: Any,
+                                suite_id: str) -> list[AuditFinding]:
+    """A suite with ambiguous items whose prompt says nothing about uncertainty."""
+    ambiguous = [t for t in definition.tasks
+                 if "ambiguous" in t.scenario or t.scenario == "ambiguous_asset"]
+    if not ambiguous:
+        return []
+    material = "\n".join(_prompt_material(prompt)).lower()
+    if any(word in material for word in _UNCERTAINTY_WORDS):
+        return []
+    return [AuditFinding(
+        severity="warning", check="no_uncertainty_guidance_in_prompt",
+        suite_id=suite_id,
+        detail=(f"{len(ambiguous)} item(s) present deliberately ambiguous or illegible evidence, "
+                "but the prompt gives the model no instruction for what to do when the evidence "
+                "does not identify the subject. The oracle still grades those items."),
+    )]
+
+
+def _audit_balance(definition: Any, suite_id: str) -> list[AuditFinding]:
+    """Scenario and label imbalance across splits, reported rather than assumed away."""
+    findings: list[AuditFinding] = []
+    for split in ("dev", "validation", "frozen_holdout"):
+        counts: dict[str, int] = {}
+        for task in definition.by_split(split):
+            counts[task.scenario] = counts.get(task.scenario, 0) + 1
+        if not counts:
+            continue
+        low, high = min(counts.values()), max(counts.values())
+        if high > low:
+            heavy = sorted(name for name, n in counts.items() if n == high)
+            findings.append(AuditFinding(
+                severity="info", check="scenario_imbalance",
+                suite_id=suite_id,
+                detail=(f"split {split!r} carries {low}-{high} items per scenario; "
+                        f"scenario(s) {heavy} carry the most, so a single pass rate over the split "
+                        "weights them more heavily than the rest."),
+            ))
+    labels: dict[str, int] = {}
+    for task in definition.tasks:
+        label = task.expected.get("label")
+        if isinstance(label, str):
+            labels[label] = labels.get(label, 0) + 1
+    if labels:
+        total = sum(labels.values())
+        for label, count in sorted(labels.items()):
+            if count / total >= 0.20:
+                findings.append(AuditFinding(
+                    severity="info", check="label_frequency_skew",
+                    suite_id=suite_id,
+                    detail=(f"label {label!r} is the answer for {count} of {total} items "
+                            f"({count / total:.0%}); a model that always answers it scores that "
+                            "much without classifying anything."),
+                ))
+        unused = [name for name in ROUTING_CLASSIFICATION_LABELS if name not in labels]
+        if unused:
+            findings.append(AuditFinding(
+                severity="info", check="label_never_correct",
+                suite_id=suite_id,
+                detail=(f"label(s) {unused} are published in the closed set but are never the "
+                        "correct answer for any item, so the suite does not measure them."),
+            ))
+    return findings
+
+
+def _audit_contamination_guard(suites: dict[str, Any],
+                               prompts: dict[str, PromptVersion]) -> list[AuditFinding]:
+    """Run the real run-time guard and record its verdict as a finding."""
+    findings: list[AuditFinding] = []
+    fields = {naming.SUITE_ID: ("evidence_text",), routing.SUITE_ID: ("description",)}
+    for suite_id, definition in suites.items():
+        prompt = prompts[suite_id]
+        try:
+            assert_no_holdout_leak(definition, prompt_material=_prompt_material(prompt),
+                                   fields=fields[suite_id])
+        except ContaminationError as exc:
+            findings.append(AuditFinding(
+                severity="error", check="frozen_holdout_leak", suite_id=suite_id,
+                detail=str(exc),
+            ))
+        else:
+            findings.append(AuditFinding(
+                severity="info", check="frozen_holdout_guard_clean", suite_id=suite_id,
+                detail=(f"tools.bench.suite.assert_no_holdout_leak passes for "
+                        f"{prompt.prompt_id}@{prompt.version}: no frozen_holdout item's text "
+                        "appears in the prompt material."),
+            ))
+    return findings
+
+
 def generate_gate2_audit(*, splits: tuple[str, ...] = DEFAULT_SPLITS) -> dict[str, Any]:
     """Return a JSON-serializable, read-only audit of the Gate-2 contract."""
     unknown = set(splits) - {"dev", "validation", "frozen_holdout"}
@@ -226,8 +590,23 @@ def generate_gate2_audit(*, splits: tuple[str, ...] = DEFAULT_SPLITS) -> dict[st
     routing_tasks = _selected(routing.SUITE.tasks, splits)
     naming_tasks = _selected(naming.SUITE.tasks, splits)
 
+    suites = {routing.SUITE_ID: routing.SUITE, naming.SUITE_ID: naming.SUITE}
+    prompts = {routing.SUITE_ID: routing_prompt, naming.SUITE_ID: naming_prompt}
+
     findings = _audit_routing_prompt(routing_prompt)
     findings.extend(_audit_naming_contract(naming_tasks, naming_prompt))
+    findings.extend(_audit_prompt_leakage(routing_prompt, routing_tasks, routing.SUITE_ID,
+                                          text_fields=("description",)))
+    findings.extend(_audit_prompt_leakage(naming_prompt, naming_tasks, naming.SUITE_ID,
+                                          text_fields=("evidence_text",)))
+    findings.extend(_audit_few_shot(routing_prompt, suites))
+    findings.extend(_audit_few_shot(naming_prompt, suites))
+    findings.extend(_audit_contamination_guard(suites, prompts))
+    findings.extend(_audit_naming_oracle_behaviour(naming_tasks))
+    findings.extend(_audit_naming_expectation_sanity(naming_tasks))
+    findings.extend(_audit_uncertainty_guidance(naming_prompt, naming.SUITE, naming.SUITE_ID))
+    findings.extend(_audit_balance(routing.SUITE, routing.SUITE_ID))
+    findings.extend(_audit_balance(naming.SUITE, naming.SUITE_ID))
     findings.sort(key=lambda finding: (
         {"error": 0, "warning": 1, "info": 2}.get(finding.severity, 9),
         finding.suite_id,
@@ -250,6 +629,12 @@ def generate_gate2_audit(*, splits: tuple[str, ...] = DEFAULT_SPLITS) -> dict[st
             "naming_items": len(naming_tasks),
             "errors": sum(1 for finding in findings if finding.severity == "error"),
             "warnings": sum(1 for finding in findings if finding.severity == "warning"),
+            "infos": sum(1 for finding in findings if finding.severity == "info"),
+            "suite_versions": {
+                routing.SUITE_ID: routing.SUITE_VERSION,
+                naming.SUITE_ID: naming.SUITE_VERSION,
+            },
+            "checks_run": sorted({finding.check for finding in findings}),
         },
         "prompts": {
             routing.SUITE_ID: _prompt_snapshot(routing_prompt),

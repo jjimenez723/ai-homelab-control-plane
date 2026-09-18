@@ -21,6 +21,9 @@ from tools.campaign.execution import WorkUnit, build_provider, enumerate_work_un
 from tools.campaign.fingerprint import Candidate
 from tools.campaign.manifest import CampaignManifest
 from tools.campaign.store import ResultRecord, ResultStore
+from tools.campaign.suites import suite as lookup_suite
+from tools.bench.suite import assert_no_holdout_leak
+from tools.prompts.registry import load_default_registry
 
 DEFAULT_STATE_ROOT = Path(".state/campaigns")
 _APPROX_BYTES_PER_RECORD = 900
@@ -47,6 +50,38 @@ def resolved_candidates_path(campaign_id: str, *, root: Path = DEFAULT_STATE_ROO
 
 def result_store_path(campaign_id: str, *, root: Path = DEFAULT_STATE_ROOT) -> Path:
     return state_dir(campaign_id, root=root) / "results.jsonl"
+
+
+_HOLDOUT_GUARD_FIELDS: dict[str, tuple[str, ...]] = {
+    "acb-v1/semantic-naming": ("evidence_text",),
+    "acb-v1/routing-classification": ("description",),
+}
+
+
+def check_prompt_contamination(manifest: CampaignManifest) -> None:
+    """Refuse a campaign whose pinned prompts quote frozen-holdout content.
+
+    `tools.bench.suite.assert_no_holdout_leak` was written as a run-time guard
+    (D-052) but was only ever exercised by tests against whichever prompt
+    happened to be `active`. A campaign may pin any version -- including a draft
+    experiment arm carrying few-shot examples -- so the guard runs here, over
+    the exact prompt versions this campaign will send, before any inference
+    (D-059). Enumeration and dry-run are checked too: contamination is a
+    property of the configuration, not of having spent GPU time on it.
+    """
+    registry = load_default_registry()
+    for candidate in manifest.candidates:
+        for suite_id, prompt_ref in candidate.prompts.items():
+            fields = _HOLDOUT_GUARD_FIELDS.get(suite_id)
+            if fields is None:
+                continue
+            prompt = registry.get(prompt_ref.prompt_id, prompt_ref.prompt_version)
+            assert_no_holdout_leak(
+                lookup_suite(suite_id),
+                prompt_material=[prompt.policy_template, prompt.role_template,
+                                 prompt.task_template, prompt.output_schema],
+                fields=fields,
+            )
 
 
 def check_manifest_drift(manifest: CampaignManifest, *, root: Path = DEFAULT_STATE_ROOT,
@@ -92,6 +127,7 @@ class DryRunReport:
 
 def dry_run(manifest: CampaignManifest, *, root: Path = DEFAULT_STATE_ROOT) -> DryRunReport:
     """Static enumeration only. Never touches a provider, pulls, loads, or infers."""
+    check_prompt_contamination(manifest)
     units = enumerate_work_units(manifest)
     store = ResultStore(result_store_path(manifest.campaign_id, root=root))
     done = store.completed_work_unit_ids()
@@ -384,6 +420,8 @@ def run_campaign(
 ) -> CampaignRunSummary:
     # Refuse source-manifest drift before a changed manifest can trigger new downloads.
     check_manifest_drift(manifest, root=root, allow_manifest_change=allow_manifest_change)
+    # And refuse a contaminated prompt before any model is staged or loaded.
+    check_prompt_contamination(manifest)
     store = ResultStore(result_store_path(manifest.campaign_id, root=root))
 
     staged, availability = _stage_candidates(manifest, auto_pull=auto_pull)
@@ -431,11 +469,27 @@ def run_campaign(
     def _fits(item: StagedCandidate) -> bool:
         return memory_budget is None or used_memory + item.estimated_resident_bytes <= memory_budget
 
+    def _tag_free(item: StagedCandidate, active_items: list[StagedCandidate]) -> bool:
+        """Never run two candidates that share one Ollama model tag at once.
+
+        A prompt-variant experiment has several candidates over the *same*
+        model, and each candidate batch preloads with `keep_alive: -1` and
+        unloads when it finishes -- so a concurrent sibling would have its
+        resident weights evicted mid-batch by the first one to finish (D-059).
+        Enforced here rather than left to whoever writes the manifest.
+        """
+        return all(other.resolved.model != item.resolved.model for other in active_items)
+
     with ThreadPoolExecutor(max_workers=max_parallel) as pool:
         active: dict[Any, StagedCandidate] = {}
         while queue or active:
             while queue and len(active) < max_parallel:
-                fit_index = next((i for i, item in enumerate(queue) if _fits(item)), None)
+                active_items = list(active.values())
+                fit_index = next(
+                    (i for i, item in enumerate(queue)
+                     if _fits(item) and _tag_free(item, active_items)),
+                    None,
+                )
                 if fit_index is None:
                     if active:
                         break

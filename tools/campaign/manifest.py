@@ -23,6 +23,7 @@ import yaml
 
 from tools.campaign.fingerprint import Candidate, PromptRef, sha256_of
 from tools.campaign.suites import UnknownSuite, suite as lookup_suite
+from tools.models.ollama_local import THINK_VALUES, OllamaTextProvider
 from tools.prompts.registry import UnknownPrompt, load_default_registry
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -95,6 +96,27 @@ def _load_candidate(raw: dict[str, Any], *, index: int) -> Candidate:
     prompts_raw = _require(raw, "prompts", where)
     if not isinstance(prompts_raw, dict) or not prompts_raw:
         raise ManifestError(f"{where}.prompts must be a non-empty mapping of suite_id -> prompt ref")
+    reasoning = bool(raw.get("reasoning", False))
+    sampling = dict(raw.get("sampling") or {})
+    think = sampling.get("think", False)
+    if think not in THINK_VALUES:
+        raise ManifestError(
+            f"{where}.sampling.think must be one of {list(THINK_VALUES)} (Ollama's own values), "
+            f"got {think!r}"
+        )
+    num_predict = int(sampling.get("num_predict", OllamaTextProvider.DEFAULT_NUM_PREDICT))
+    if reasoning and num_predict < OllamaTextProvider.REASONING_MIN_NUM_PREDICT:
+        # D-059: gate2-validation-001 measured gpt-oss:20b at num_predict 64
+        # and recorded 95-100% truncation, because a reasoning model's thinking
+        # and its answer share this one budget. Refusing the manifest is the
+        # only way that defect cannot be re-run by accident.
+        raise ManifestError(
+            f"{where} declares reasoning: true but sampling.num_predict is {num_predict}; "
+            f"a reasoning candidate needs at least "
+            f"{OllamaTextProvider.REASONING_MIN_NUM_PREDICT} output tokens because its "
+            "reasoning channel shares the budget with its answer"
+        )
+
     prompts: dict[str, PromptRef] = {}
     registry = load_default_registry()
     for suite_id, prompt_raw in prompts_raw.items():
@@ -116,8 +138,9 @@ def _load_candidate(raw: dict[str, Any], *, index: int) -> Candidate:
         prompts=prompts,
         model_digest=raw.get("model_digest"),
         quantization=raw.get("quantization"),
-        sampling=dict(raw.get("sampling") or {}),
+        sampling=sampling,
         augmentation_version=str(raw.get("augmentation_version", "none")),
+        reasoning=reasoning,
     )
 
 

@@ -18,7 +18,48 @@ from typing import Any, Iterable
 from tools.campaign.runner import DEFAULT_STATE_ROOT, result_store_path
 from tools.campaign.store import ResultRecord, ResultStore
 
-ANALYSIS_SCHEMA_VERSION = 1
+ANALYSIS_SCHEMA_VERSION = 2
+
+# Where a failure category most likely *originates*. A hint for triage, never a
+# verdict: the same reason can have more than one cause, and only two of these
+# loci can ever be established mechanically (`infrastructure` and `verifier`,
+# both of which are recorded statuses rather than inferences).
+#
+# The distinction this exists to support is the one D-059's audit turns on:
+# a benchmark result is only evidence about a model once the contract, the
+# budget and the oracle have been ruled out as the cause.
+ATTRIBUTION_HINTS: dict[str, str] = {
+    # The model understood the job and got the answer wrong.
+    "wrong_label": "model",
+    "missing_required_concept": "model",
+    "forbidden_token_present": "model",
+    "unsupported_or_hallucinated_date": "model",
+    "insufficient_evidence_grounding": "model",
+    "missing_required_date": "model_or_prompt_contract",
+    "leakage": "model",
+    # The answer was right or unknowable, but the published output contract was
+    # not obeyed -- a prompt/format question, not a capability one.
+    "format_noncompliant_label": "prompt_contract",
+    "label_not_in_closed_set": "prompt_contract",
+    "wrong_extension": "prompt_contract",
+    "policy_rejected": "prompt_contract_or_model",
+    "non_string_output": "prompt_contract",
+    # The model never finished answering: a sampling-budget fact.
+    "empty_output": "sampling_budget",
+    "truncated": "sampling_budget",
+    # Recorded, not inferred.
+    "verifier_error": "verifier",
+    "timeout": "infrastructure",
+    "provider_unavailable": "infrastructure",
+    "provider_error": "infrastructure",
+    "sandbox_error": "infrastructure",
+}
+
+
+def attribution_hint(failure_reason: str) -> str:
+    if failure_reason == "pass":
+        return "pass"
+    return ATTRIBUTION_HINTS.get(failure_reason, "unclassified")
 
 
 def _failure_reason(record: ResultRecord) -> str:
@@ -61,6 +102,7 @@ def _record_view(record: ResultRecord) -> dict[str, Any]:
         "status": record.status,
         "passed": record.passed,
         "failure_reason": _failure_reason(record),
+        "attribution_hint": attribution_hint(_failure_reason(record)),
         "output": output,
         "output_provenance": provenance,
         "raw_output_available": record.raw_output is not None,
@@ -99,6 +141,12 @@ def generate_failure_analysis(
     for (candidate, suite_id), group in sorted(by_cell.items()):
         statuses = Counter(record.status for record in group)
         reasons = Counter(_failure_reason(record) for record in group if record.status != "verified_pass")
+        attributions = Counter(
+            attribution_hint(_failure_reason(record)) for record in group
+            if record.status != "verified_pass")
+        scenarios = Counter(
+            record.scenario for record in group if record.status != "verified_pass")
+        thinking = [r.thinking_chars for r in group if r.thinking_chars]
         raw_available = sum(record.raw_output is not None for record in group)
         recoverable = sum(_recover_output(record)[0] is not None for record in group)
         cells.append({
@@ -107,6 +155,10 @@ def generate_failure_analysis(
             "attempts": len(group),
             "status_counts": dict(sorted(statuses.items())),
             "failure_reason_counts": dict(sorted(reasons.items())),
+            "attribution_hint_counts": dict(sorted(attributions.items())),
+            "failures_by_scenario": dict(sorted(scenarios.items())),
+            "attempts_with_reasoning_output": len(thinking),
+            "max_thinking_chars": max(thinking) if thinking else 0,
             "raw_output_available": raw_available,
             "raw_output_missing": len(group) - raw_available,
             "some_output_recoverable": recoverable,
@@ -127,6 +179,9 @@ def generate_failure_analysis(
             "For old routing rows, verifier detail may recover the normalized predicted label.",
             "For some old naming rows, verifier detail may contain a normalized/validated filename; this is not the original raw model text.",
             "This report never re-runs inference and never changes stored verdicts.",
+            "attribution_hint is a triage hint, not a verdict: only `verifier` and "
+            "`infrastructure` are recorded facts; `model` versus `prompt_contract` is an "
+            "inference from the failure category and should be checked against the raw output.",
         ],
         "cells": cells,
         "records": [_record_view(record) for record in filtered],
@@ -156,6 +211,18 @@ def to_markdown(analysis: dict[str, Any]) -> str:
             f"| {cell['candidate']} | {cell['suite_id']} | {cell['attempts']} | "
             f"{cell['raw_output_available']} | {cell['some_output_recoverable']} | {reasons} |"
         )
+
+    lines += [
+        "",
+        "## Failure attribution hints",
+        "",
+        "| Candidate | Suite | Attribution hints | Failing scenarios |",
+        "|---|---|---|---|",
+    ]
+    for cell in analysis["cells"]:
+        hints = ", ".join(f"{k}={v}" for k, v in cell.get("attribution_hint_counts", {}).items()) or "none"
+        scenarios = ", ".join(f"{k}={v}" for k, v in cell.get("failures_by_scenario", {}).items()) or "none"
+        lines.append(f"| {cell['candidate']} | {cell['suite_id']} | {hints} | {scenarios} |")
 
     lines += ["", "## Attempt-level records", ""]
     for record in analysis["records"]:

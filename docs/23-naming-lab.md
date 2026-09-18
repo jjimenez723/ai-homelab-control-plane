@@ -196,11 +196,18 @@ that is implemented **inside `tools/naming_lab/` only**:
 The known Gate-2 semantic-naming defects (date-prompt mismatch, supported
 dates absent from `allowed_dates`, filename-regex-only date detection,
 rigid lexical concept sets, extension mismatch conflated with end-to-end
-failure) are recorded here as **known and deliberately deferred**, not
-silently preserved. The Lab's own `document_dates.py`/`grammar.py` fix the
-same class of problem for its own scoring, and are the reference design a
-future dedicated pass should graduate into `tools/bench/acb_v1/` and
-`tools/ingest/naming/policy.py` once validated.
+failure) were recorded here as **known and deliberately deferred**, not
+silently preserved. The Lab's own `document_dates.py`/`grammar.py` fixed the
+same class of problem for its own scoring and were the reference design for
+the dedicated pass that has since happened.
+
+**All five were fixed on 2026-09-18 (D-059)**, as a versioned bump of
+`tools/bench/acb_v1/semantic_naming.py` to suite version `1.1.0`, with the
+change log in that module's docstring and a written reason per item in
+`docs/25-gate2-naming-audit.md` §3. `tools/ingest/naming/policy.py`'s
+production `YYYY-MM-DD_` grammar is still **not** changed, and the Lab's
+`YY_MMDD` grammar remains Lab-only: that half of this section's scope
+boundary stands exactly as written.
 
 ## Launching the Lab
 

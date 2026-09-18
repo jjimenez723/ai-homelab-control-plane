@@ -874,14 +874,140 @@ that executes a suite against a set of candidate configurations,
 checkpointing and resuming without an AI agent supervising it, is
 documented in `docs/22-evaluation-campaign.md`.
 
-**None of this certifies a model.** No suite has been run against a staged
-candidate in this pass; `config/certifications.example.yaml` stays the
-empty list `tests/test_autonomous_routing.py` requires until a real,
-measured result exists. Gate 2 remains **RED** for exactly the reason
-`PLAN.md`'s clause table already gives: clauses 2 (prompts versioned) and 5
-(suites exist) move from "no" to "yes" as of D-052; clauses 4 (evaluator
-cross-validated) and 6 (measured certifications) do not — §6's Inspect AI
+**As of D-052 this certified no model**, and that remained true until
+2026-09-18: no suite had been run against a staged candidate.
+Section 13 below records what happened when it was. The paragraph that
+followed here read, correctly at the time: "Gate 2 remains **RED** ...
+clauses 2 (prompts versioned) and 5 (suites exist) move from 'no' to 'yes'
+as of D-052; clauses 4 (evaluator cross-validated) and 6 (measured
+certifications) do not" -- §6's Inspect AI
 compatibility finding and the independent-implementation fallback are
 recorded in `tools/bench/cross_validation.py` and `docs/22-evaluation-
-campaign.md`, and clause 6 waits on an actual campaign run against staged
-candidates, which this pass deliberately does not perform.
+campaign.md`, and clause 6 waited on an actual campaign run against staged
+candidates. That run has now happened (§13); clause 6's status is a matter
+for `PLAN.md`'s own clause table, which the integrator maintains.
+
+## 13. Measured Gate-2 results (D-059, D-060, 2026-09-18)
+
+The suites of §12 have now been run for real, against staged local candidates,
+with the harness defects the first run exposed repaired first. Four campaigns,
+all on one M4 Pro 48 GB with loopback Ollama 0.33.3, all records append-only in
+`.state/campaigns/<campaign_id>/results.jsonl`:
+
+| Campaign | Split | What it was for |
+|---|---|---|
+| `gate2-validation-001` (2026-09-15, 660 records) | validation | The first real run. Its numbers are preserved verbatim and are the measurement of the 1.0 configuration; three of its four headline figures turned out to be measuring the harness, which is what `docs/25-gate2-naming-audit.md` audits. |
+| `gate2-dev-001`, `gate2-dev-naming-001`, `gate2-dev-reasoning-001` (2026-09-18, 1,044 records) | **dev only** | The controlled prompt experiment. Eight prompt arms, one change per arm. |
+| `gate2-validation-002` (2026-09-18, 825 records) | validation | The comparison run at suite 1.1.0 / prompt 1.1.0, plus a prompt-1.0.0 control on the same model. |
+| `gate2-holdout-001` (2026-09-18, 165 records) | frozen_holdout | Certification, one finalist, serialized (D-053). |
+
+### 13.1 Validation results (suite 1.1.0, 5 samples per item)
+
+`acb-v1/routing-classification`, 19 items × 5 samples = 95 attempts; threshold
+0.80 point estimate with a Wilson lower bound ≥ 0.60:
+
+| Candidate | Prompt | Pass rate | 95 % CI | Qualifies |
+|---|---|---:|---|---|
+| `qwen3.5:9b` | 1.1.0 | **1.000** | [0.961, 1.000] | yes |
+| `qwen3.5:4b` | 1.1.0 | 0.947 | [0.883, 0.977] | yes |
+| `gpt-oss:20b` | 1.1.0 | 0.842 | [0.756, 0.902] | yes |
+| `qwen3.5:9b` | 1.0.0 (control) | 0.632 | [0.531, 0.722] | no |
+| `qwen2.5:0.5b` | 1.1.0 | 0.053 | [0.023, 0.117] | no |
+
+`acb-v1/semantic-naming`, 14 items × 5 samples = 70 attempts; threshold 0.75:
+
+| Candidate | Prompt | Pass rate | 95 % CI | Qualifies |
+|---|---|---:|---|---|
+| `gpt-oss:20b` | 1.1.0 | **1.000** | [0.948, 1.000] | yes |
+| `qwen3.5:9b` | 1.1.0 | 0.929 | [0.843, 0.969] | yes |
+| `qwen3.5:4b` | 1.1.0 | 0.714 | [0.599, 0.807] | no |
+| `qwen3.5:9b` | 1.0.0 (control) | 0.714 | [0.599, 0.807] | no |
+| `qwen2.5:0.5b` | 1.1.0 | 0.429 | [0.319, 0.545] | no |
+
+Zero infrastructure failures, zero truncations, and zero of 33 multiply-sampled
+items flipped verdict across 5 samples for any candidate — at temperature 0 with
+a fixed seed, this runtime is behaving deterministically, which is recorded as
+an observation, not claimed as a guarantee (D-049).
+
+### 13.2 What changed the numbers
+
+Three separate causes, measured separately, in decreasing size of effect:
+
+1. **Harness defects (D-059).** The naming oracle rejected evidence-supported
+   dates, matched "synonym" sets by exact token equality, and reported every
+   empty answer as a wrong extension; `gpt-oss:20b` was run at an output budget
+   its reasoning consumed entirely. On the dev split, fixing the suite alone
+   moved `qwen3.5:4b` naming from 0.214 (validation, suite 1.0) to 0.714 (dev,
+   suite 1.1.0) *with the unchanged 1.0.0 prompt*, and moved `gpt-oss:20b` from
+   unmeasurable to 0.857 naming / 0.579 routing with that same prompt.
+2. **The prompt (D-060).** On the *same* model, same suite version and same
+   split, prompt 1.1.0 versus 1.0.0 is 1.000 versus 0.632 on routing and 0.929
+   versus 0.714 on naming. The routing half of that gain is one specific thing:
+   1.0.0 published fifteen label names and defined none of them.
+3. **The model.** Only after the first two are held fixed does the remaining
+   spread mean anything: 0.053 (`qwen2.5:0.5b`) to 1.000 (`qwen3.5:9b`) on
+   routing is a real capability difference, and it is the one number of the
+   three that says anything about which model to use.
+
+This ordering is the point of §9's raw-baseline-versus-production-capability
+distinction, arrived at the hard way: for three of four candidates in
+`gate2-validation-001`, the measurement was not yet about the model.
+
+### 13.3 Frozen holdout and certification
+
+One finalist only, per D-040/D-053 — a holdout run is certification, not a
+bakeoff. `qwen3.5:9b` + prompt 1.1.0 + suite 1.1.0, serialized:
+
+| Suite | Pass rate | 95 % CI | Threshold | Qualifies |
+|---|---:|---|---:|---|
+| `acb-v1/routing-classification` | 0.895 | [0.817, 0.942] | 0.80 | yes |
+| `acb-v1/semantic-naming` | 1.000 | [0.948, 1.000] | 0.75 | yes |
+
+Measured envelope: p95 latency 1.74 s (routing) and 2.36 s (naming); resident
+footprint 5,498,564,770 bytes read from Ollama `/api/ps` under this exact
+configuration, not estimated; 0 infrastructure failures; 0 truncations.
+Recorded as two certifications (`classification`, `naming.semantic`) in
+`config/certifications.yaml` — see D-060 for the full records and for why the
+`routing` task class is deliberately *not* certified from this suite, and
+`docs/21-autonomous-routing.md` for what a certification does and does not
+license.
+
+`gpt-oss:20b` also satisfied both validation thresholds and was deliberately
+not taken to the holdout: spending holdout items on a second candidate would
+have left nothing clean to certify against. It remains a validation-qualified
+candidate at roughly 2.5× the resident footprint.
+
+### 13.4 What is still failing, and where it points
+
+Every remaining failure at the frozen configuration, with the locus the
+analysis assigns it (`tools/bench/gate2_failure_analysis.py::attribution_hint`
+— a triage hint, not a verdict):
+
+* `qwen3.5:9b` routing, holdout: 2 of 19 items, both `model`. One labels a
+  physically impossible request `escalation_required` rather than
+  `unsupported` (a possible-but-unauthorised versus impossible distinction);
+  one answers with the modality of the attached material instead of the job's
+  own task class. Both 5 of 5 samples — consistent, not noise.
+* `qwen3.5:9b` naming, validation: 1 of 14 items, `prompt_contract_or_model`.
+  On the deliberately unidentifiable asset it returns the original filename
+  unchanged, which the production quality gate rejects as not an improvement.
+  The evidence does support a name (`blurred outdoor scene`); whether declining
+  to rename is the *better* production behaviour is an open question this suite
+  currently answers "no" (§13.5).
+* `qwen3.5:4b` naming: drops the client name on two items whose evidence names
+  it, which is the difference between 0.714 and qualifying.
+* `qwen2.5:0.5b`: answered `general` for almost everything on routing (0.053).
+  §2.4's SLM research track has its answer for this role: not at this size.
+
+### 13.5 Open questions this run raises
+
+* The `ambiguous_asset` scenario now scores evidence groundedness, and the
+  finalist's one remaining naming failure is declining to rename such a file at
+  all. Production may well prefer that. If so the *suite* is wrong there, not
+  the model — but that is a benchmark-design decision for a later pass, with
+  its own version bump, not an adjustment to make a number look better.
+* `routing` remains unmeasured (the label is the correct answer for none of the
+  57 items) and therefore uncertified.
+* Both splits are 19 and 14 items. The Wilson intervals are honest about that:
+  the finalist's holdout routing interval is [0.817, 0.942], so "0.895" should
+  be read as "somewhere above 0.8", not as a third decimal place.

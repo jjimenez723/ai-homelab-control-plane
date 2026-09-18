@@ -196,24 +196,53 @@ class OllamaLocalClient:
         return value
 
 
+THINK_VALUES: tuple[object, ...] = (False, True, "low", "medium", "high")
+
+
 class OllamaTextProvider:
-    """The single loopback Ollama adapter used by evaluation and routing."""
+    """The single loopback Ollama adapter used by evaluation and routing.
+
+    Reasoning models (D-059): Ollama returns a model's reasoning in a separate
+    ``thinking`` field and its answer in ``response``, and the two share one
+    ``num_predict`` budget. Two consequences this adapter makes explicit rather
+    than leaving a caller to discover:
+
+    * ``think`` is passed through verbatim, including Ollama's effort levels
+      (``"low"``/``"medium"``/``"high"``), not coerced to a bool. Some models
+      cannot have reasoning disabled at all -- measured on this machine,
+      Ollama 0.33.3 accepts ``think: false`` for ``gpt-oss:20b`` and reasons
+      anyway -- so "we asked it not to think" is never assumed to have worked.
+    * ``generate`` returns ``thinking`` and ``thinking_chars`` alongside
+      ``output``. Only ``output`` is ever scored; the reasoning channel is
+      recorded so a truncation can be attributed to reasoning that consumed
+      the whole budget instead of being read as a wrong answer.
+    """
 
     name = "ollama"
     DEFAULT_NUM_PREDICT = 64
+    # The smallest output budget a reasoning candidate may be measured at.
+    # gate2-validation-001 ran `gpt-oss:20b` at 64 and recorded 95-100%
+    # truncation: its reasoning alone spent the entire budget before the
+    # answer began. Measured floor, not a guess -- see docs/22.
+    REASONING_MIN_NUM_PREDICT = 512
 
     def __init__(self, endpoint: str, model: str, *,
                  capabilities: tuple[str, ...] = ("text_generation", "structured_output"),
                  num_predict: int = DEFAULT_NUM_PREDICT, num_ctx: int | None = None,
-                 seed: int | None = None, think: bool = False, temperature: float = 0.0):
+                 seed: int | None = None, think: bool | str | None = False,
+                 temperature: float = 0.0, reasoning: bool = False):
         self.client = OllamaLocalClient(endpoint)
         self.model = model
         self.capabilities = capabilities
         self.num_predict = int(num_predict)
         self.num_ctx = num_ctx
         self.seed = seed
+        if think not in THINK_VALUES:
+            raise ValueError(
+                f"think must be one of {THINK_VALUES!r} (Ollama's own values), got {think!r}")
         self.think = think
         self.temperature = temperature
+        self.reasoning = bool(reasoning)
         self._managed_keep_alive: int | None = None
 
     @property
@@ -262,7 +291,8 @@ class OllamaTextProvider:
         return options
 
     def generate(self, prompt: str, *, context_tokens: int | None = None, timeout_seconds: int | None = None,
-                 num_predict: int | None = None, think: bool | None = None, **_unused: Any) -> dict[str, Any]:
+                 num_predict: int | None = None, think: bool | str | None = None,
+                 **_unused: Any) -> dict[str, Any]:
         options = self.sampling(num_predict=num_predict, context_tokens=context_tokens)
         body: dict[str, Any] = {
             "model": self.model, "prompt": prompt, "stream": False,
@@ -272,11 +302,21 @@ class OllamaTextProvider:
             body["keep_alive"] = self._managed_keep_alive
         outer = self.client._json(
             "/api/generate", payload=body, timeout_seconds=max(1, timeout_seconds or 120))
+        thinking = outer.get("thinking")
+        thinking_text = str(thinking) if thinking else ""
         return {
+            # Only the answer channel is ever scored. Reasoning is recorded
+            # separately so a model that thought its whole budget away is not
+            # confused with one that answered wrongly (D-059).
             "output": str(outer.get("response", "")).strip(),
+            "thinking": thinking_text,
+            "thinking_chars": len(thinking_text),
+            "think_requested": body["think"],
+            "reasoning_declared": self.reasoning,
             "finish_reason": str(outer.get("done_reason")) if outer.get("done_reason") is not None else None,
             "input_tokens": outer.get("prompt_eval_count"),
             "output_tokens": outer.get("eval_count"),
+            "num_predict": options["num_predict"],
             "prefill_seconds": (outer.get("prompt_eval_duration") or 0) / 1e9,
             "generation_seconds": (outer.get("eval_duration") or 0) / 1e9,
             "runtime_model": outer.get("model"),
