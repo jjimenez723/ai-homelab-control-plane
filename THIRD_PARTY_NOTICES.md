@@ -65,3 +65,12 @@ derivative works and carry no Apache header.
 | `ppocr/utils/utility.py::binarize_img()` | `tools/ingest/evidence/preprocess.py` | Six lines wrapping OpenCV's Otsu threshold. Angel computes Otsu from Pillow's 256-bin histogram in pure Python. Too small to be worth the coupling or the attribution. |
 | `ppocr/utils/utility.py::alpha_to_color()` | `tools/ingest/evidence/preprocess.py` | Standard alpha compositing against a solid background. Pillow does it directly. |
 | `tools/infer/utility.py::slice_generator()`, `merge_fragmented()` | not implemented | Large-image tiling with detection results mapped back to global coordinates. Genuinely valuable for architectural plans and very large scans, but no Angel fixture demonstrates the need yet, and adding it before the normalized evidence architecture exists would be optimizing a stage that has not been measured. Recorded as deferred work in `docs/17-file-evidence.md`. |
+
+## Well-known algorithms implemented from their published description
+
+Not adapted from any project's source, and listed only so a reader who
+recognizes the technique knows where it came from and that nothing was copied.
+
+| Technique | Angel module | Note |
+|---|---|---|
+| Average hash (aHash) perceptual image hash | `tools/ingest/evidence/backends/ffmpeg_video.py::average_hash` | The classical published construction -- greyscale, resize to 8x8, one bit per pixel against the mean of those 64 -- written directly in Pillow in about a dozen lines. No code from `imagehash`, `pHash`, or any other implementation was consulted or copied, and neither is a dependency. Used only to decide whether two sampled video frames are the same picture; the exact grid size and Hamming threshold Angel uses are documented in `docs/17-file-evidence.md`. |
