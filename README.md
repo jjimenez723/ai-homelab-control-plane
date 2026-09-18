@@ -92,7 +92,8 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── 19-model-evaluation.md                # ACB-v1 capability suites + the Legacy 20 canary's role
 │   ├── 20-prompt-management.md               # prompt registry, composition layers, eval/production parity
 │   ├── 21-autonomous-routing.md              # the gates and the test matrix for attended-autonomous runs
-│   └── 22-evaluation-campaign.md             # angel-eval: the unattended Gate-2 campaign runner
+│   ├── 22-evaluation-campaign.md             # angel-eval: the unattended Gate-2 campaign runner
+│   └── 28-application-spec.md                # the canonical app-spec schema, pipeline, and agent-brief contract
 ├── data/
 │   ├── video-learning-queue.yaml
 │   └── ui-library-registry.yaml
@@ -108,10 +109,14 @@ Version 0 should distribute **jobs**, not model tensors:
 │   ├── project-manifest.yaml
 │   ├── client-manifest.yaml
 │   ├── media-sidecar.example.json
-│   └── node-manifest.yaml
+│   ├── node-manifest.yaml
+│   └── app-spec/
+│       ├── schema-v1.json     # canonical application specification schema (JSON Schema 2020-12)
+│       └── examples/          # squad-quit, nurse-shift, single-player-game, multiplayer-game
 ├── tools/
 │   ├── backup.py          # restic/rclone backup engine (locking, preflight, status)
 │   ├── backup_cli.py      # the backup/check/restore/retention entry points
+│   ├── appspec/           # app-spec schema loader, validator, agent-brief CLI (docs/28)
 │   ├── social_video_learn.py
 │   ├── social_video_queue.py
 │   ├── router/            # the three routing gates: authorization, privacy, certification
@@ -141,6 +146,7 @@ Version 0 should distribute **jobs**, not model tensors:
 │       └── media/         # heic.py (derivatives), probe.py (deterministic facts)
 ├── tests/
 │   ├── ingest/            # fault-injection + mutation-safety suite
+│   ├── test_appspec.py               # schema, examples, semantic checks, CLI, jsonschema_subset (docs/28)
 │   ├── test_fixture_runner.py       # adversarial: verdict integrity + sandbox isolation
 │   ├── test_autonomous_routing.py   # the attended-autonomous decision matrix (docs/21)
 │   ├── test_runner_collection.py    # guards against tests that exist but never run

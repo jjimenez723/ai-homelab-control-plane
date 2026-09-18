@@ -1,0 +1,416 @@
+# Nurse Shift — nursing-shift productivity app for per-diem/multi-hospital
+# nursing work. Fictional product used only as a representative example
+# spec for docs/28-application-spec.md and tools/appspec. Validate with:
+#   python -m tools.appspec validate templates/app-spec/examples/nurse-shift.yaml
+
+spec_version: "1.0"
+app_id: nurse-shift
+name: Nurse Shift
+product_intent:
+  problem: >-
+    Per-diem and travel nurses working across multiple hospital systems juggle separate scheduling
+    portals, paper handoff notes, and manual timesheet reconciliation, which costs time and creates
+    handoff errors at shift boundaries.
+  value_proposition: >-
+    One app that aggregates open shifts across a nurse's registered facilities, gives a structured
+    digital handoff at shift change, and reconciles worked hours against facility timesheets automatically.
+  non_goals:
+    - Not an EHR or clinical charting system; no patient clinical records are stored.
+    - Not a payroll processor; timesheet data is reconciled, not paid out, by this app.
+    - No facility-side staffing/scheduling administration in v1 -- nurse-facing only.
+
+target_users:
+  - id: per-diem-nurse
+    name: Per-Diem Nurse
+    description: A nurse who picks up shifts across multiple registered hospital facilities.
+    needs:
+      - See open shifts across all registered facilities in one list.
+      - Give and receive a structured handoff at shift change in under 3 minutes.
+      - Confirm worked hours match what the facility will pay for.
+  - id: charge-nurse
+    name: Charge Nurse
+    description: The shift lead who assigns/approves shift coverage on the unit.
+    needs:
+      - Approve or reject a per-diem nurse's shift claim.
+      - See handoff completion status across the outgoing shift's assigned nurses.
+platforms:
+  - ios
+  - android
+  - web
+
+workflows:
+  - id: claim-shift
+    name: Claim an open shift
+    actor: per-diem-nurse
+    goal: Find and claim an open shift at a registered facility.
+    steps:
+      - id: browse-open-shifts
+        description: Browse open shifts across registered facilities, filtered by unit/date.
+        screen_ref: shift-board
+      - id: claim-open-shift
+        description: Claim a shift, pending charge-nurse approval.
+        screen_ref: shift-detail
+      - id: receive-approval
+        description: Receive approval/rejection notification.
+        screen_ref: shift-board
+  - id: handoff
+    name: Structured shift handoff
+    actor: per-diem-nurse
+    goal: Give or receive a structured handoff at shift change.
+    steps:
+      - id: open-handoff-form
+        description: Open the structured handoff form for the ending shift.
+        screen_ref: handoff-screen
+      - id: complete-handoff-sections
+        description: Complete situation/background/assessment/recommendation sections.
+        screen_ref: handoff-screen
+      - id: acknowledge-handoff
+        description: Incoming nurse acknowledges receipt of the handoff.
+        screen_ref: handoff-screen
+  - id: reconcile-hours
+    name: Reconcile worked hours
+    actor: per-diem-nurse
+    goal: Confirm logged hours match the facility's recorded timesheet for a shift.
+    steps:
+      - id: view-logged-hours
+        description: View clock-in/clock-out times logged for a completed shift.
+        screen_ref: timesheet-screen
+      - id: compare-facility-record
+        description: Compare against the facility's submitted timesheet record.
+        screen_ref: timesheet-screen
+      - id: flag-discrepancy
+        description: Flag a discrepancy for facility review if hours do not match.
+        screen_ref: timesheet-screen
+entities:
+  - id: nurse
+    name: Nurse
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: full_name, type: string, required: true, pii: true, phi: false }
+      - { name: license_number, type: string, required: true, pii: true, phi: false, description: "State nursing license number." }
+      - { name: registered_facility_ids, type: array, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: facility
+    name: Facility
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: facility_name, type: string, required: true, pii: false, phi: false }
+      - { name: timezone, type: string, required: true, pii: false, phi: false }
+    identifiers: [id]
+  - id: shift
+    name: Shift
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: facility_id, type: reference, required: true, pii: false, phi: false }
+      - { name: unit, type: string, required: true, pii: false, phi: false }
+      - { name: starts_at, type: datetime, required: true, pii: false, phi: false }
+      - { name: ends_at, type: datetime, required: true, pii: false, phi: false }
+      - { name: status, type: enum, required: true, pii: false, phi: false, description: "open, claimed, approved, completed." }
+      - { name: claimed_by_nurse_id, type: reference, required: false, pii: false, phi: false }
+    identifiers: [id]
+  - id: handoff_note
+    name: Handoff Note
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: shift_id, type: reference, required: true, pii: false, phi: false }
+      - { name: outgoing_nurse_id, type: reference, required: true, pii: false, phi: false }
+      - { name: incoming_nurse_id, type: reference, required: false, pii: false, phi: false }
+      - { name: clinical_summary, type: string, required: true, pii: false, phi: true, description: "Structured SBAR clinical handoff content; contains patient-condition context." }
+      - { name: acknowledged_at, type: datetime, required: false, pii: false, phi: false }
+    identifiers: [id]
+  - id: timesheet_entry
+    name: Timesheet Entry
+    fields:
+      - { name: id, type: uuid, required: true, pii: false, phi: false }
+      - { name: shift_id, type: reference, required: true, pii: false, phi: false }
+      - { name: clock_in, type: datetime, required: true, pii: false, phi: false }
+      - { name: clock_out, type: datetime, required: false, pii: false, phi: false }
+      - { name: facility_reported_hours, type: number, required: false, pii: false, phi: false }
+      - { name: discrepancy_flagged, type: boolean, required: true, pii: false, phi: false }
+    identifiers: [id]
+
+relationships:
+  - id: rel-facility-shifts
+    from_entity: facility
+    to_entity: shift
+    type: one_to_many
+    description: A facility offers many shifts.
+  - id: rel-shift-handoff
+    from_entity: shift
+    to_entity: handoff_note
+    type: one_to_one
+    description: A shift has at most one structured handoff note.
+  - id: rel-shift-timesheet
+    from_entity: shift
+    to_entity: timesheet_entry
+    type: one_to_one
+    description: A shift has at most one timesheet entry.
+  - id: rel-nurse-shifts
+    from_entity: nurse
+    to_entity: shift
+    type: one_to_many
+    description: A nurse may claim many shifts over time.
+permissions:
+  - id: perm-nurse-claim-shift
+    role: nurse
+    entity: shift
+    actions: [read, list, update]
+  - id: perm-nurse-own-handoff
+    role: nurse
+    entity: handoff_note
+    actions: [create, read, update]
+  - id: perm-nurse-own-timesheet
+    role: nurse
+    entity: timesheet_entry
+    actions: [read, update]
+  - id: perm-charge-nurse-approve-shift
+    role: charge_nurse
+    entity: shift
+    actions: [read, list, update, approve]
+  - id: perm-charge-nurse-view-handoff
+    role: charge_nurse
+    entity: handoff_note
+    actions: [read, list]
+
+authentication:
+  methods: [password, sso]
+  mfa_required: true
+  session:
+    strategy: jwt
+    expiry: "12h"
+authorization:
+  model: rbac
+  roles:
+    - { id: nurse, name: Nurse, description: Per-diem or staff nurse claiming and working shifts. }
+    - { id: charge_nurse, name: Charge Nurse, description: Approves shift claims and reviews handoff completion for a unit. }
+    - { id: facility_admin, name: Facility Admin, description: Manages facility/unit configuration; read-mostly in v1. }
+
+backend_profile:
+  id: nursing-shift-productivity
+  overrides:
+    handoff_form_template: sbar
+    timesheet_reconciliation_window_days: 14
+persistence:
+  datastore: postgres
+  entities: [nurse, facility, shift, handoff_note, timesheet_entry]
+
+realtime:
+  enabled: true
+  channels:
+    - { id: shift-board-updates, name: Shift board live updates, kind: broadcast }
+    - { id: handoff-channel, name: Per-shift handoff channel, kind: private }
+offline:
+  supported: true
+  strategy: read_only_cache
+
+notifications:
+  channels: [push, email, in_app]
+  triggers:
+    - id: nt-shift-approved
+      event: shift.approved
+      channel: push
+      description: Notify the nurse when their shift claim is approved.
+    - id: nt-handoff-pending
+      event: shift.ending_soon
+      channel: push
+      description: Prompt the outgoing nurse to start the handoff form 15 minutes before shift end.
+    - id: nt-timesheet-discrepancy
+      event: timesheet_entry.discrepancy_flagged
+      channel: email
+      description: Notify facility admin of a flagged hours discrepancy.
+storage_media:
+  providers: [none]
+  types: []
+
+privacy:
+  data_classes:
+    - id: pd-nurse-license
+      entity: nurse
+      field: license_number
+      classification: confidential
+      pii: true
+      phi: false
+      retention: "Retained for the duration of registration plus 7 years for licensing audit."
+    - id: pd-nurse-name
+      entity: nurse
+      field: full_name
+      classification: confidential
+      pii: true
+      phi: false
+      retention: "Retained while account is active."
+    - id: pd-handoff-clinical-summary
+      entity: handoff_note
+      field: clinical_summary
+      classification: restricted
+      pii: false
+      phi: true
+      retention: "Retained 6 years per facility clinical-documentation policy; encrypted at rest."
+analytics:
+  events:
+    - id: ev-shift-claimed
+      name: Shift Claimed
+      trigger: A nurse claims an open shift.
+      properties: [nurse_id, facility_id, shift_id]
+    - id: ev-handoff-completed
+      name: Handoff Completed
+      trigger: Incoming nurse acknowledges a handoff note.
+      properties: [shift_id, outgoing_nurse_id, incoming_nurse_id]
+    - id: ev-timesheet-discrepancy
+      name: Timesheet Discrepancy Flagged
+      trigger: A timesheet_entry is flagged for discrepancy.
+      properties: [shift_id]
+
+integrations:
+  - id: int-facility-timesheet-feed
+    provider: Facility payroll/timesheet export (per-facility, file or API varies)
+    purpose: Import facility-reported worked hours for reconciliation against logged clock-in/out.
+screens:
+  - id: shift-board
+    name: Shift Board
+    workflow_refs: [claim-shift]
+    entities_shown: [shift, facility]
+  - id: shift-detail
+    name: Shift Detail
+    workflow_refs: [claim-shift]
+    entities_shown: [shift]
+  - id: handoff-screen
+    name: Handoff
+    workflow_refs: [handoff]
+    entities_shown: [handoff_note, shift]
+  - id: timesheet-screen
+    name: Timesheet
+    workflow_refs: [reconcile-hours]
+    entities_shown: [timesheet_entry, shift]
+  - id: profile
+    name: Profile
+    workflow_refs: []
+    entities_shown: [nurse]
+
+navigation:
+  entry_screen: shift-board
+  edges:
+    - { from: shift-board, to: shift-detail, trigger: "tap a shift" }
+    - { from: shift-detail, to: shift-board, trigger: "claim submitted" }
+    - { from: shift-board, to: handoff-screen, trigger: "shift ending soon prompt" }
+    - { from: handoff-screen, to: timesheet-screen, trigger: "handoff acknowledged" }
+    - { from: timesheet-screen, to: shift-board, trigger: "reconciliation complete" }
+    - { from: shift-board, to: profile, trigger: "tap profile tab" }
+    - { from: profile, to: shift-board, trigger: "tap shifts tab" }
+design_system:
+  stack: react-next-web-and-expo
+  library_ref: tamagui
+  tokens:
+    - color.role.urgent
+    - color.role.approved
+    - spacing.scale
+    - type.scale
+    - focus.ring
+
+apis:
+  - id: api-list-open-shifts
+    name: List open shifts
+    kind: rest_endpoint
+    method: GET
+    path: /v1/shifts?status=open
+    request_shape:
+      - { name: facility_ids, type: array }
+    response_shape:
+      - { name: items, type: array }
+  - id: api-claim-shift
+    name: Claim shift
+    kind: rest_endpoint
+    method: POST
+    path: /v1/shifts/{shift_id}/claim
+    request_shape:
+      - { name: shift_id, type: uuid }
+    response_shape:
+      - { name: status, type: string }
+  - id: api-submit-handoff
+    name: Submit handoff note
+    kind: rest_endpoint
+    method: POST
+    path: /v1/shifts/{shift_id}/handoff
+    request_shape:
+      - { name: shift_id, type: uuid }
+      - { name: clinical_summary, type: string }
+    response_shape:
+      - { name: id, type: uuid }
+      - { name: acknowledged_at, type: datetime }
+  - id: api-reconcile-timesheet
+    name: Reconcile timesheet entry
+    kind: callable_function
+    request_shape:
+      - { name: shift_id, type: uuid }
+    response_shape:
+      - { name: discrepancy_flagged, type: boolean }
+      - { name: variance_minutes, type: integer }
+acceptance_criteria:
+  - id: ac-claim-shift-pending-approval
+    workflow_ref: claim-shift
+    given: A nurse is registered with a facility that has an open shift
+    when: The nurse claims the shift
+    then: The shift status becomes claimed and the charge nurse sees it awaiting approval
+  - id: ac-handoff-requires-acknowledgement
+    workflow_ref: handoff
+    given: An outgoing nurse has submitted a complete handoff note for an ending shift
+    when: The incoming nurse opens and acknowledges the handoff
+    then: The handoff_note.acknowledged_at is set and the shift is marked handoff-complete
+  - id: ac-timesheet-discrepancy-flagged
+    workflow_ref: reconcile-hours
+    given: Logged clock-in/out hours differ from the facility-reported hours by more than 15 minutes
+    when: The nurse opens the timesheet reconciliation screen
+    then: The timesheet_entry is flagged discrepancy_flagged=true and a notification is sent to the facility admin
+
+tests:
+  - id: test-claim-shift-unit
+    type: unit
+    acceptance_criteria_refs: [ac-claim-shift-pending-approval]
+    description: Unit test for shift-claim status transition open -> claimed.
+  - id: test-handoff-ack-integration
+    type: integration
+    acceptance_criteria_refs: [ac-handoff-requires-acknowledgement]
+    description: Integration test that acknowledging a handoff sets acknowledged_at and updates shift status.
+  - id: test-timesheet-discrepancy-unit
+    type: unit
+    acceptance_criteria_refs: [ac-timesheet-discrepancy-flagged]
+    description: Unit test for the >15-minute variance discrepancy rule.
+  - id: test-claim-to-handoff-e2e
+    type: e2e
+    acceptance_criteria_refs: [ac-claim-shift-pending-approval, ac-handoff-requires-acknowledgement]
+    description: End-to-end walk from claiming a shift through a completed acknowledged handoff.
+deployment:
+  environments:
+    - { id: dev, name: Development, purpose: development }
+    - { id: staging, name: Staging, purpose: staging }
+    - { id: prod, name: Production, purpose: production }
+  ci: GitHub Actions; lint, unit, integration per PR; staged rollout to one pilot facility before wider deploy.
+  secrets_policy: >-
+    Facility integration credentials live in the platform's managed secret store, scoped per
+    facility; this spec records no literal secret values.
+
+observability:
+  logging: Structured JSON logs; clinical handoff content excluded from log bodies (D-030-style boundary).
+  metrics: [shift_claim_to_approval_latency, handoff_completion_rate, timesheet_discrepancy_rate]
+  alerts: [handoff_completion_rate_drop, timesheet_discrepancy_rate_spike]
+migrations:
+  - id: mig-0001-initial-schema
+    description: Create nurse, facility, shift, handoff_note, and timesheet_entry tables.
+  - id: mig-0002-handoff-clinical-summary-encryption
+    description: Add column-level encryption for handoff_note.clinical_summary.
+
+implementation_constraints:
+  stack_pins:
+    - "next >= 14"
+    - "expo >= 51"
+  forbidden_dependencies:
+    - "any general-purpose EHR/clinical-charting SDK (out of scope per non_goals)"
+  budgets:
+    max_app_size_mb: 100
+    max_p95_latency_ms: 500
+open_questions:
+  - id: oq-multi-facility-license-check
+    question: How is license validity checked per state when a nurse claims a shift at an out-of-state facility?
+    owner: compliance
+  - id: oq-handoff-template-per-facility
+    question: Do facilities need a configurable handoff template, or is one SBAR template sufficient for v1?
+    owner: product
