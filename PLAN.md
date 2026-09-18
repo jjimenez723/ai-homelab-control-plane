@@ -155,15 +155,15 @@ which workload." D-039 through D-044 and `docs/19-model-evaluation.md` /
 - [x] 2026-09-14 Give the coordinator ledger a durable derived copy in UUID-verified Angel `40-ai/evaluation/telemetry/` (D-050). It was gitignored, outside the restic source, and therefore in no backup at all.
 - [x] 2026-09-15 Implement the D-041 versioned prompt registry (D-052): `tools/prompts/` (`registry.py`, `renderer.py`, `adapters.py`, `library.py`, `production.py`), immutability enforced by a recorded content-fingerprint lock per version, deterministic rendering proven byte-identical for identical inputs, and one shared render path (`render_for_task_class`) for both a suite runner and a future production caller (`tests/test_prompt_registry.py`, 23 tests). Two prompts exist so far, `acb-v1-routing-classification` and `acb-v1-semantic-naming`, both `version: "1.0.0"`; the Legacy-20 canary's own literal prompts are deliberately left untouched (D-040 freezes it).
 - [x] 2026-09-15 Build the autonomous evaluation-campaign runner (D-052, `docs/22-evaluation-campaign.md`): `tools/campaign/` + `./scripts/angel-eval`. Declarative manifest (`config/campaigns/gate2.yaml`); a configuration fingerprint over model/digest/quant/runtime/prompt-id-version/suite-version/tool-schema-version/sampling; work-unit identity `campaign + configuration fingerprint + suite + item + sample index`; an append-only JSONL result store that never rewrites a prior line; an 11-state status taxonomy separating verified outcomes from infrastructure failure (`timeout`/`provider_unavailable`/`provider_error`/`sandbox_error`/`verifier_error` are retried on resume, never counted against a candidate); `--dry-run` (pure enumeration, zero inference), `--smoke` (one item per candidate/suite pair), full unattended runs, and automatic resume with `ManifestDrift` refusing a changed manifest under the same `campaign_id`; Wilson-interval and exact-paired-sign-test statistics (`tools/campaign/statistics.py`); JSON+Markdown reports regenerated from disk alone, no model access or prior session needed. 73 tests across manifest/fingerprint/store/execution/runner/report/CLI. Never downloads a model — an unavailable candidate is skipped (or fails the run under `--strict`), and staging one stays a separate, explicit action.
-- [ ] Run the real Gate-2 campaign (`./scripts/angel-eval campaign --profile gate2`) against staged candidates and populate `config/certifications.yaml` from the result — not performed by this pass; see the two items above for what exists to run it with.
+- [x] 2026-09-15 / 2026-09-18 Run the real Gate-2 campaign against staged candidates and populate `config/certifications.yaml` from the result. `gate2-validation-001` (09-15, prompt 1.0.0) measured every candidate below threshold and revealed that `gpt-oss:20b` had never been measured at all (95–100 % truncation from `num_predict: 64` against a reasoning model). The V1 pass (D-059/D-060) fixed the harness (reasoning budgets, separate `thinking`, per-candidate `num_predict`), fixed the five deferred suite defects as **suite 1.1.0**, ran controlled dev-split-only prompt experiments (seven arms, 1,044 records), froze **prompt 1.1.0** for both suites, ran `gate2-validation-002` (825 records, 5 samples/item) and the serialized frozen-holdout `gate2-holdout-001` for the single finalist. **`qwen3.5:9b` + prompt 1.1.0: holdout routing 0.895 [0.817, 0.942] ≥ 0.80, naming 1.000 [0.948, 1.000] ≥ 0.75**, zero infrastructure failures, zero truncations, zero verdict flips. Two certifications (`classification`, `naming.semantic`) are recorded in the gitignored `config/certifications.yaml` with measured p95 latency and resident memory; `config/models.yaml` (gitignored) now names `capable-local = qwen3.5:9b`, and the router selects it for both task classes and refuses it for prompt 1.0.0 (verified 09-18). `routing` is deliberately not certified (its suite never asks for a routing decision). `docs/30-gate2-naming-audit.md`.
 - [ ] Benchmark real coding models against `code-01`..`code-05` using the trusted fixture runner (Phase 4/5 gate, not Gate 2) now that real execution evidence is possible. Note D-047 changed the fixtures' semantics, so D-046's code-task numbers are not a comparable baseline.
 - [ ] Benchmark SLM → small → capable → boundary-sized candidates **per task class** against ACB-v1 suites, using production-capability-benchmark configurations (D-044) rather than raw-model baselines (none run yet; no new model bakeoff is in scope for this documentation pass).
-- [ ] Certify model-role configurations (`model + quant + runtime + prompt_version + tool_schema_version + capability`) from production-capability-benchmark results (D-042, D-044).
+- [x] 2026-09-18 Certify model-role configurations (`model + quant + runtime + prompt_version + tool_schema_version + capability`) from production-capability-benchmark results (D-042, D-044). One configuration certified for two capabilities (above); `gpt-oss:20b` also cleared both validation thresholds (routing 0.842, naming 1.000) and was deliberately not spent on the holdout. `qwen2.5:0.5b` and `qwen3.5:4b` do not qualify for naming.
 - [x] 2026-09-14 Build router behavior (`tools/router/router.py` `_candidates()`) from measured certifications instead of tier/capability/context match alone (D-051). The mechanism exists and is exhaustively tested; it currently selects nothing, because nothing is certified. Populating it is the item above.
-- [~] Report capability/cost/latency/escalation evidence per suite/task class, extending `tools/report` beyond its current aggregate cost/latency/escalation view. **Partly done (D-048, 2026-09-14):** `quality_by_task_class` reports attempts, verified pass/fail, unverified count, verification coverage, and verified success rate per task class. What remains is per-*suite* reporting, which needs suites to exist.
-- [ ] Satisfy the revised Gate 2 below honestly — not by loosening it.
+- [x] 2026-09-18 Report capability/cost/latency/escalation evidence per suite/task class: `quality_by_task_class` in `tools/report` (D-048) plus per-suite campaign reports (`tools/campaign/report.py`) over the six real campaigns.
+- [x] 2026-09-18 Satisfy the revised Gate 2 below honestly — not by loosening it. Thresholds unchanged (0.80 / 0.75); suite and prompt changes are versioned (1.1.0) with a written reason per defect; nothing was tuned against the frozen holdout; the contamination guard runs before inference over the pinned versions.
 
-**Gate 2 (revised 2026-09-12; clause status re-verified against code 2026-09-15): RED.**
+**Gate 2 (revised 2026-09-12; re-verified against measured campaigns 2026-09-18): GREEN.**
 
 Clause-by-clause, so "RED" says *which* parts are missing rather than only that something is:
 
@@ -172,51 +172,15 @@ Clause-by-clause, so "RED" says *which* parts are missing rather than only that 
 | 1 | benchmark definitions are versioned | **yes for the two Gate-2 suites** (D-052) — `phase2_tasks.json` (Legacy 20) plus `acb-v1/routing-classification` and `acb-v1/semantic-naming` (`tools/bench/acb_v1/`), all versioned |
 | 2 | prompts are versioned | **yes** (D-052) — `tools/prompts/`, two prompts at `version: "1.0.0"`, immutability-locked. The Legacy-20 canary's own literal prompts are deliberately left as they were (D-040) |
 | 3 | a frozen canary exists | **yes** — the Legacy 20. Its holdout value was degraded by D-046 using six of its items as prompt material; repaired by D-049. The two new suites each also carry their own `frozen_holdout` split (D-052) |
-| 4 | evaluator cross-validated against a second implementation | **partial** (D-052) — `inspect_ai` is not installable in this environment (no `pip` in the venv), recorded as evidence rather than worked around; a from-scratch independent second implementation of both suites' oracles agrees with the primary one on representative/adversarial cases (`tests/test_cross_validation.py`). Not a migration; suite oracles remain authoritative |
-| 5 | routing/classification **and** semantic naming suites with measured production-capability results | **suites exist, no measured results yet** (D-052) — 57 + 42 tasks with deterministic oracles and dev/validation/holdout splits; the campaign runner to produce measured results exists (`tools/campaign/`) but has not been run against a staged candidate |
-| 6 | certifications with measured reliability/resource envelopes | **no** — the record type, loader, and expiry/pinning rules exist (D-051), and the runner that would produce evidence for one exists (D-052); `config/certifications.example.yaml` is still empty because no campaign has actually been run |
-| 7 | router decisions consult certified capability data | **yes, mechanically** (D-051) — and it correctly selects nothing today |
+| 4 | evaluator cross-validated against a second implementation | **yes** (D-052, D-059) — `inspect_ai` is not installable in this environment (no `pip` in the venv), recorded rather than worked around; the from-scratch independent second implementation of both suites' oracles was updated for suite 1.1.0 and re-proven to agree (20 naming + 6 routing cases, `tests/test_cross_validation.py`); `angel-eval audit --strict` runs every audit dimension deterministically and exits 0 |
+| 5 | routing/classification **and** semantic naming suites with measured production-capability results | **yes** (D-060) — suites 1.1.0, prompt 1.1.0 rendered through the shared production path; `gate2-validation-002` (5 candidates) and `gate2-holdout-001` (finalist): routing 0.895, naming 1.000 on the frozen holdout |
+| 6 | certifications with measured reliability/resource envelopes | **yes** (D-060) — two records in the gitignored `config/certifications.yaml` (`classification`, `naming.semantic`; p95 1.74 s / 2.36 s; resident 5.50 GB measured from `/api/ps`; expiry 2027-03-18; known failure modes listed); the committed example stays empty by test |
+| 7 | router decisions consult certified capability data | **yes, operationally** (D-051, D-060) — with `config/models.yaml` naming `capable-local = qwen3.5:9b`, the router selects it for `classification`/`naming.semantic` at prompt 1.1.0, refuses it at 1.0.0 ("configuration differs from the measured one"), and selects nothing for `routing` (verified 2026-09-18) |
 | 8 | unsupported work escalates correctly | **yes** — enforced and exhaustively tested (`tests/test_autonomous_routing.py`); still never exercised by a production caller |
-| 9 | reporting surfaces quality, cost, latency, escalation | **partial** (D-048, D-052) — per-task-class quality, verified vs. unverified separated, CLI fixed; per-suite campaign reporting now exists (`tools/campaign/report.py`: Wilson CIs, latency, cost/resources, reliability, per-item consistency) but has no real run to report on yet |
+| 9 | reporting surfaces quality, cost, latency, escalation | **yes** (D-048, D-052, D-060) — per-task-class quality in `tools/report`; per-suite campaign reports with Wilson CIs, latency, resources, reliability, per-item consistency, cross-model disagreement, and machine-produced failure-category attribution over six real campaigns (2,694 records) |
 | 10 | models gain no unverified authority | **yes** — filesystem/naming/triage was already structurally enforced; the code-verification hole (D-047) and the telemetry hole (D-048) are now closed |
 
-Clauses 1, 2, and 3 are satisfied; clauses 4 and 9 are partially satisfied
-(machinery and cross-validation exist; no real measured run has used them
-yet); the remaining critical path is clauses 5 and 6 together — **running
-the actual campaign against a staged candidate and recording its result as
-a certification** — since both now have every prerequisite built and
-neither has been executed.
-
-Gate 2 passes when: benchmark
-definitions are versioned (true today for both Gate-2 suites); prompts are
-versioned (true today — D-052); a frozen canary exists (true today — the
-Legacy 20, plus each new suite's own holdout); evaluator correctness has
-been independently cross-validated against a second implementation (an
-independent implementation exists and agrees on representative cases,
-D-052 — not Inspect AI, which is not installable in this environment, a
-finding recorded rather than assumed); the V0-required production roles
-have role-specific evaluation suites with measured
-**production-capability-benchmark** results, per D-044 — a raw-model
-baseline is diagnostic information, never Gate 2 evidence, however good it
-looks — for Gate 2 specifically, that minimum is **routing/classification
-and semantic naming**, the two capabilities Phase 3's client/project/tag
-inference actually needs, not the full taxonomy in
-`docs/19-model-evaluation.md` §2.1 (tool-calling, coding, and orchestration
-suites gate Phase 4/5, not Phase 2) — **the suites and the runner to
-measure them exist (D-052); no measured result exists yet**; enabled
-model-role configurations have measured reliability/resource envelopes
-recorded as certifications (not yet — no campaign has been run); router
-decisions consult certified capability data rather than parameter count
-alone; unsupported work escalates correctly (true today, operationally, per
-D-033 and `tools/router/router.py`); reporting surfaces quality, cost,
-latency, and escalation (cost/latency/escalation are already reported;
-capability-specific quality is per-task-class today and per-suite once a
-campaign runs, D-052); and models gain no unverified authority (true today,
-unconditionally — D-022, D-028, D-036, D-038). The
-original 2026-09-12 measurement (4/20, 4/20, 0/20) remains historical,
-raw-baseline-shaped evidence and does not by itself satisfy or block any
-clause above — a better-sounding architecture does not turn this gate
-green; only measured, verifier-backed production-capability results do.
+All ten clauses are satisfied as of 2026-09-18. What Gate 2 does **not** say: that the certified configuration is good at anything other than the two capabilities measured, that `gpt-oss:20b` is certified (it qualified on validation and was not taken to holdout), that the splits are large (19/14 items per split — the certification's confidence intervals are honest about that), or that a production caller other than the opt-in semantic naming proposer exists yet. Fine-tuning is **not** justified on this evidence: the measured order of what mattered was harness (0.214 → 0.714 with the prompt unchanged), then prompt (0.632 → 1.000 on identical weights), then model; the residual holdout failures are taxonomy-boundary cases. The historical 2026-09-12 numbers (4/20, 4/20, 0/20) and `gate2-validation-001` remain on disk, untouched, as the raw-baseline record.
 
 ## Phase 3 — Catalog pilot on one client (days 21–45)
 
