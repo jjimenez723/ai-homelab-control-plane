@@ -58,7 +58,9 @@ so the machine does not sleep on battery while a development session is open.
   → "Indexing enabled"). Disabling it needs an interactive `sudo mdutil -i
   off /Volumes/Angel`, which this non-interactive pass cannot run; it is
   recorded as an owner action in PLAN.md Phase 1. Time Machine already
-  excludes the volume (`tmutil isexcluded` → `[Excluded]`).
+  excludes the volume (`tmutil isexcluded` → `[Excluded]`). The T7's USB link
+  was repaired after this audit: `ioreg` now reports 10 Gb/s USB 3.x; the old
+  34–39 MB/s write probes were USB 2.0 measurements.
 
 ## Recommendations outside Angel's authority (owner decisions)
 
