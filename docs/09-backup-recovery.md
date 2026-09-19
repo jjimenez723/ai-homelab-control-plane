@@ -121,18 +121,19 @@ security add-generic-password -U -a "$USER" -s ai-homelab-rclone-config -w
 
 After the remote and Keychain report are green, run `./scripts/backup-t7-init` to verify the existing pinned repository, then `./scripts/backup-t7 --preflight`. This workflow deliberately cannot create or reinitialize a missing repository; changing the repository requires an explicit reviewed code change. Review the preflight output and obtain explicit approval before running the first `./scripts/backup-t7` upload.
 
-## Status (re-verified 2026-09-18 during the V1 completion pass)
+## Current status (re-verified 2026-09-18 after the OAuth production repair)
 
 | Item | State on 2026-09-18 |
 |---|---|
-| Source volume | mounted, UUID matches; **2.2 GiB** on the volume after the D-061 layout migration (14 bare repository mirrors, one archive, READMEs, manifest, exported knowledge and skills) — none of which is in any snapshot yet |
-| Last successful backup | snapshot `968cce99`, 2026-09-15 02:15 (62.5 KiB, pre-layout) |
+| Source volume | mounted, UUID matches; **2.2 GiB** on the volume after the D-061 layout migration (14 bare repository mirrors, one archive, READMEs, manifest, exported knowledge and skills) |
+| Latest production-OAuth backup | snapshot `0f39da9f` (2026-09-18 14:54 EDT, tag `oauth-production-validation`, 2.051 GiB) |
 | 09-16, 09-17 scheduled runs | exit 1 at the UUID check — Angel was unplugged at 02:15; correct, not a fault |
-| 09-18 manual run | **failed before restic ran**: rclone reports `invalid_grant: maybe token expired?` — the Google Drive OAuth refresh token for `gdrive-backup` is expired or revoked. `backup-t7-check` and `restore-t7-drill` fail the same way, so nothing on the volume can be verified or restored until it is repaired |
-| Repair | **owner action, interactive:** `rclone config reconnect gdrive-backup:` (browser OAuth), then `./scripts/backup-t7 --preflight`, `./scripts/backup-t7 --tag post-layout-v1`, `./scripts/backup-t7-check`, `./scripts/restore-t7-drill`. The tooling now prints this instruction verbatim instead of the earlier generic "unavailable or unauthorized" |
+| OAuth state | **In production** in Google Auth Platform for GCP project `angel-508305`; existing custom `gdrive-backup` remote remains on `drive.file` and points to `AI-Homelab-Backups/T7-restic`. Branding/privacy pages are hosted at `https://angel-508305.web.app/`. |
+| Restore drill | `restore-t7-drill` after reconnect restored snapshot `0f39da9f`, verified the marker by hash, and recorded `restore_drill_status: success` with restic exit 0. |
+| Integrity check | Latest completed normal check: 2026-09-18 14:07 EDT, green before the production reconnect. A post-reconnect 5% read pass loaded all 13 index files but was bounded after slow Google Drive reads; it reported no integrity error before interruption. |
 | Tests | `tests/test_backup.py` (36) and `tests/test_backup_recovery_safety.py` green; a `--preflight` still validates the source, exclusions, and Keychain items |
 
-Until the reconnect happens the D-061 mirrors exist only on the T7 (their commits also exist on GitHub, but local-only branches do not), so the volume is temporarily a single copy for that material. This is the second time the first real test of the off-site chain was a credential problem rather than a data problem — the D-004 independent failure domain remains the fix.
+The Google Drive OAuth repair is now complete. The D-004 independent failure domain remains outstanding: Dell/B2 append-only backup has not been provisioned.
 
 ## Status (verified 2026-09-12 on `mac-m4pro`)
 
