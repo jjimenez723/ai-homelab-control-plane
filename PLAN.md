@@ -186,12 +186,11 @@ All ten clauses are satisfied as of 2026-09-18. What Gate 2 does **not** say: th
 
 ## Phase 3 — Catalog pilot on one client (days 21–45)
 
-- [ ] Pick one small client shoot (≤ 500 files). Run metadata → keyframes → VLM tags → canonical-name proposal → embeddings.
-- [ ] Human-label 100 assets as the canary set; store in `corrections` table.
-- [ ] Materialize the derived view only when useful using verified ordinary copies or catalog-backed references; never use hardlinks. `clonefile`/`cp -c` works again under D-019 but stays unused until a decision adopts it. `--dry-run` first; report additional disk usage; abort if > 20% of proposals change between runs.
-- [ ] Search CLI: `tools/search "vertical countertop install clips"` returns ranked assets from sqlite-vec.
+- [~] 2026-09-20 Implemented the additive semantic contract, canonical client/project manifests, prompt `phase3-semantic-classification@1.0.0`, catalog migration 7, deterministic Gate 3 evaluator, human correction locks, and the additive `acb-v1/semantic-catalog` suite. The real ≤500-file shoot and 100-asset frozen canary remain open.
+- [~] 2026-09-20 Implemented content-addressed SQLite embeddings (`angel-hash-embedding@1.0.0`), `tools/search`, and deterministic acceptance-test helpers. A real pilot search drill remains open.
+- [~] 2026-09-20 Implemented dry-run-first, 20%-drift-gated derived-view planning and ordinary verified copies. No hardlinks or clonefile are used. T7-backed materialization and the second-run acceptance remain open.
 
-**Gate 3:** precision of client/project inference ≥ 95% and of tags ≥ 80% on the canary set; a deliberate model swap to a worse model is caught by the canary diff; view regeneration is idempotent (second run makes zero changes).
+**Gate 3:** precision of client/project inference ≥ 95% and of tags ≥ 80% on the canary set; a deliberate model swap to a worse model is caught by the canary diff; view regeneration is idempotent (second run makes zero changes). The gate is not claimed green until the real pilot evidence exists.
 
 ## Phase 4 — First Linux worker (days 30–60)
 

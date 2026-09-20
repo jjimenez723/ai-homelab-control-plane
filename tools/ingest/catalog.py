@@ -26,11 +26,17 @@ from tools.ingest.schema_sql import (
     MEDIA_METADATA_SQL,
     NAMING_HISTORY_SQL,
 )
+from tools.semantic.schema import SEMANTIC_SCHEMA_SQL
+from tools.semantic.ids import (
+    embedding_id_for,
+    semantic_classification_id_for,
+    semantic_correction_id_for,
+)
 
 # Sidecar schema version. V3 records the content-aware asset identity model:
 # blobs are content identity; assets are source occurrences and paths may be
 # reused by multiple generations of bytes.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 7
 
 # Transfer state machine. Ordered roughly by progress; retries resume from
 # wherever the previous attempt stopped instead of restarting blindly.
@@ -291,12 +297,24 @@ def _migration_5_naming_audit(conn: sqlite3.Connection) -> None:
         add_column_if_missing(conn, "naming_history", column, "TEXT")
 
 
+def _migration_6_semantic_catalog(conn: sqlite3.Connection) -> None:
+    """Phase 3 semantic state, embeddings, and derived-view audit tables."""
+    conn.executescript(SEMANTIC_SCHEMA_SQL)
+
+
+def _migration_7_semantic_metadata(conn: sqlite3.Connection) -> None:
+    """Carry deterministic media facets used by search filters."""
+    add_column_if_missing(conn, "semantic_classifications", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+
+
 MIGRATIONS = (
     _migration_1_phase_1a,
     _migration_2_file_intelligence,
     _migration_3_generation,
     _migration_4_reusable_source_paths,
     _migration_5_naming_audit,
+    _migration_6_semantic_catalog,
+    _migration_7_semantic_metadata,
 )
 
 
@@ -371,6 +389,15 @@ class Catalog(LedgerTables):
     def get_asset(self, asset_id: str) -> Asset | None:
         row = self._conn.execute("SELECT * FROM assets WHERE asset_id = ?", (asset_id,)).fetchone()
         return Asset(dict(row)) if row is not None else None
+
+    def assets(self, *, transfer_state: str | None = None) -> list[Asset]:
+        if transfer_state is None:
+            rows = self._conn.execute("SELECT * FROM assets ORDER BY asset_id").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM assets WHERE transfer_state = ? ORDER BY asset_id", (transfer_state,)
+            ).fetchall()
+        return [Asset(dict(row)) for row in rows]
 
     def get_asset_for_source_content(
         self, source_volume_id: str, original_path: str, sha256: str
@@ -492,6 +519,242 @@ class Catalog(LedgerTables):
         columns = ", ".join(f"{key} = ?" for key in fields)
         values = list(fields.values()) + [asset_id]
         self._conn.execute(f"UPDATE assets SET {columns} WHERE asset_id = ?", values)
+
+    # -- Phase 3 semantic catalog ------------------------------------------
+
+    def record_semantic_classification(self, asset_id: str, proposal: dict[str, Any]) -> str:
+        """Append a validated semantic proposal; never replace prior truth."""
+        asset = self.get_asset(asset_id)
+        if asset is None:
+            raise KeyError(f"unknown asset: {asset_id}")
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM semantic_classifications WHERE asset_id = ?", (asset_id,)
+        ).fetchone()[0]
+        human_locked = bool(self.semantic_corrections(asset_id))
+        classification_id = semantic_classification_id_for(asset_id, count)
+        self._conn.execute(
+            """
+            INSERT INTO semantic_classifications(
+                classification_id, asset_id, sha256, client_id, client_confidence,
+                project_id, project_confidence, subject, tags, tag_confidences,
+                metadata_json,
+                model_id, model_digest, prompt_id, prompt_version, prompt_sha256,
+                evidence_sha256, validator, raw_output, human_review_state,
+                human_corrected, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                classification_id, asset_id, asset.row["sha256"] or "",
+                proposal.get("client_id"), float(proposal.get("client_confidence", 0.0)),
+                proposal.get("project_id"), float(proposal.get("project_confidence", 0.0)),
+                proposal.get("subject"), json.dumps(sorted(proposal.get("tags", []))),
+                json.dumps(proposal.get("tag_confidences", {}), sort_keys=True),
+                json.dumps(proposal.get("metadata", {}), sort_keys=True),
+                str(proposal.get("model_id", "unknown")), proposal.get("model_digest"),
+                str(proposal.get("prompt_id", "")), str(proposal.get("prompt_version", "")),
+                str(proposal.get("prompt_sha256", "")), str(proposal.get("evidence_sha256", "")),
+                str(proposal.get("validator", "")), str(proposal.get("raw_output", ""))[:20_000],
+                str(proposal.get("human_review_state", "review_required")), int(human_locked), now_iso(),
+            ),
+        )
+        return classification_id
+
+    @staticmethod
+    def _decode_semantic(row: dict[str, Any]) -> dict[str, Any]:
+        row["tags"] = tuple(json.loads(row.get("tags") or "[]"))
+        row["tag_confidences"] = json.loads(row.get("tag_confidences") or "{}")
+        row["metadata"] = json.loads(row.get("metadata_json") or "{}")
+        return row
+
+    def semantic_history(self, asset_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM semantic_classifications WHERE asset_id = ? ORDER BY rowid", (asset_id,)
+        ).fetchall()
+        return [self._decode_semantic(dict(row)) for row in rows]
+
+    def semantic_corrections(self, asset_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM semantic_corrections WHERE asset_id = ? ORDER BY rowid", (asset_id,)
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["new_value"] = json.loads(item["new_value"])
+            except (TypeError, json.JSONDecodeError):
+                pass
+            try:
+                item["old_value"] = json.loads(item["old_value"]) if item["old_value"] is not None else None
+            except (TypeError, json.JSONDecodeError):
+                pass
+            result.append(item)
+        return result
+
+    def latest_semantic_classification(self, asset_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM semantic_classifications WHERE asset_id = ? ORDER BY rowid DESC LIMIT 1",
+            (asset_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        result = self._decode_semantic(dict(row))
+        corrections = {}
+        for correction in self.semantic_corrections(asset_id):
+            corrections[correction["field"]] = correction["new_value"]
+        for field, value in corrections.items():
+            result[field] = value
+        result["human_corrections"] = corrections
+        result["human_corrected"] = bool(corrections)
+        return result
+
+    def record_semantic_correction(
+        self, asset_id: str, *, field: str, value: Any, corrected_by: str,
+        reason: str = "", created_at: str | None = None,
+    ) -> str:
+        allowed = {"client_id", "project_id", "subject", "tags", "placement"}
+        if field not in allowed:
+            raise ValueError(f"semantic corrections cannot lock field {field!r}")
+        if self.get_asset(asset_id) is None:
+            raise KeyError(f"unknown asset: {asset_id}")
+        if not corrected_by.strip():
+            raise ValueError("corrected_by is required")
+        current = self.latest_semantic_classification(asset_id)
+        old_value = None if current is None else current.get(field)
+        if field == "tags":
+            if not isinstance(value, (list, tuple, set)):
+                raise ValueError("tags correction must be a sequence")
+            value = tuple(sorted({str(tag).strip().lower().replace(" ", "-").replace("_", "-") for tag in value}))
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM semantic_corrections WHERE asset_id = ?", (asset_id,)
+        ).fetchone()[0]
+        correction_id = semantic_correction_id_for(asset_id, field, count)
+        self._conn.execute(
+            """
+            INSERT INTO semantic_corrections(
+                correction_id, asset_id, field, old_value, new_value,
+                corrected_by, reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                correction_id, asset_id, field,
+                json.dumps(old_value, sort_keys=True, default=list) if old_value is not None else None,
+                json.dumps(value, sort_keys=True, default=list), corrected_by, reason,
+                created_at or now_iso(),
+            ),
+        )
+        return correction_id
+
+    def get_embedding(
+        self, asset_id: str, *, input_sha256: str, model_id: str, model_version: str,
+        schema_version: str,
+    ) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM embeddings
+            WHERE asset_id = ? AND input_sha256 = ? AND model_id = ?
+              AND model_version = ? AND schema_version = ?
+            """,
+            (asset_id, input_sha256, model_id, model_version, schema_version),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["vector"] = tuple(json.loads(result.pop("vector_json")))
+        return result
+
+    def record_embedding(
+        self, asset_id: str, *, content_sha256: str, input_sha256: str, model_id: str,
+        model_version: str, model_digest: str | None, schema_version: str,
+        vector: tuple[float, ...],
+    ) -> str:
+        embedding_id = embedding_id_for(asset_id, input_sha256, model_id, model_version, schema_version)
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO embeddings(
+                embedding_id, asset_id, content_sha256, input_sha256, model_id,
+                model_version, model_digest, schema_version, dimensions,
+                vector_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                embedding_id, asset_id, content_sha256, input_sha256, model_id,
+                model_version, model_digest, schema_version, len(vector),
+                json.dumps(list(vector), separators=(",", ":")), now_iso(),
+            ),
+        )
+        return embedding_id
+
+    def embedding_rows(self, *, model_id: str, model_version: str, schema_version: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT e.*, a.final_path, a.final_filename, a.mime, a.size, a.sha256
+            FROM embeddings e JOIN assets a ON a.asset_id = e.asset_id
+            WHERE e.model_id = ? AND e.model_version = ? AND e.schema_version = ?
+              AND e.rowid IN (
+                SELECT MAX(rowid) FROM embeddings
+                WHERE model_id = ? AND model_version = ? AND schema_version = ?
+                GROUP BY asset_id
+              )
+            ORDER BY e.asset_id
+            """,
+            (model_id, model_version, schema_version, model_id, model_version, schema_version),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_view_run(self, run_id: str, *, scope: str, dry_run: bool, drift_fraction: float | None,
+                        drift_aborted: bool, summary: dict[str, Any]) -> None:
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO organized_view_runs(
+                run_id, scope, dry_run, drift_fraction, drift_aborted, summary, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, scope, int(dry_run), drift_fraction, int(drift_aborted),
+             json.dumps(summary, sort_keys=True), now_iso()),
+        )
+
+    def record_view_proposal(self, run_id: str, *, asset_id: str, client_id: str | None,
+                             project_id: str | None, relative_path: str | None,
+                             tags: tuple[str, ...], action: str, reason: str,
+                             estimated_bytes: int) -> None:
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO organized_view_proposals(
+                run_id, asset_id, client_id, project_id, relative_path, tags,
+                action, reason, estimated_bytes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, asset_id, client_id, project_id, relative_path, json.dumps(list(tags)),
+             action, reason, int(estimated_bytes), now_iso()),
+        )
+
+    def latest_view_proposals(self, scope: str) -> list[dict[str, Any]]:
+        run = self._conn.execute(
+            "SELECT run_id FROM organized_view_runs WHERE scope = ? ORDER BY rowid DESC LIMIT 1", (scope,)
+        ).fetchone()
+        if run is None:
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM organized_view_proposals WHERE run_id = ? ORDER BY asset_id", (run["run_id"],)
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["tags"] = tuple(json.loads(item["tags"] or "[]"))
+            result.append(item)
+        return result
+
+    def record_materialization(self, *, asset_id: str, relative_path: str,
+                               source_sha256: str, destination_sha256: str, bytes_count: int) -> None:
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO materializations(
+                asset_id, relative_path, source_sha256, destination_sha256,
+                bytes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (asset_id, relative_path, source_sha256, destination_sha256, bytes_count, now_iso()),
+        )
 
     def begin_immediate(self) -> None:
         self._conn.execute("BEGIN IMMEDIATE")
@@ -627,6 +890,11 @@ class Catalog(LedgerTables):
                 "run_id": asset.row["retention_run_id"],
             },
             "media_metadata": self.get_media_metadata(asset_id, "asset"),
+            "semantic": {
+                "current": self.latest_semantic_classification(asset_id),
+                "history": self.semantic_history(asset_id),
+                "corrections": self.semantic_corrections(asset_id),
+            },
         }
         # Atomic, like the status file: a sidecar is the durable copy of a
         # catalog row, and a process killed mid-write must not be able to

@@ -98,6 +98,9 @@ Rules:
 - `clonefile`/`cp -c` is technically available again under D-019, but the derived view does not use it until a decision explicitly adopts it;
 - a copy must be treated as a derivative, never as the sole canonical original;
 - dry-run must report the estimated additional disk usage before materializing a large copied view;
+- Phase 3 records client/project/tag proposals and materializations in the catalog,
+  aborts when proposal drift exceeds 20%, and requires an explicit apply path;
+- see `docs/31-phase3-semantic-catalog.md` for the semantic schema and pilot gate.
 - view regeneration remains idempotent and hash-aware.
 
 After hashing, legacy-dump protection is enforced by checksum manifests, catalog state, backup policy, and application-level refusal to mutate legacy originals. APFS makes `chflags`/POSIX read-only bits meaningful again, but they remain a defence in depth rather than the mechanism of record.

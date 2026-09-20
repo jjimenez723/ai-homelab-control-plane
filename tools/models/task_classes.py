@@ -59,6 +59,12 @@ TASK_CLASSES: dict[str, TaskClass] = {
         "acb-v1/routing-classification", True, "low",
         "Assign one label from a closed, versioned taxonomy.",
     ),
+    "classification.semantic_catalog": TaskClass(
+        "classification.semantic_catalog", ("text_generation", "structured_output"),
+        None, False, "low",
+        "Infer canonical client/project identities and bounded semantic tags. "
+        "Phase 3 is attended until its additive capability suite is certified.",
+    ),
     "routing": TaskClass(
         "routing", ("text_generation", "structured_output"),
         "acb-v1/routing-classification", True, "medium",

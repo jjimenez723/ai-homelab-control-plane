@@ -19,16 +19,19 @@ from typing import Any, Callable
 
 from tools.bench.acb_v1 import routing_classification as _rc
 from tools.bench.acb_v1 import semantic_naming as _sn
+from tools.bench.acb_v1 import semantic_catalog as _sc
 from tools.bench.suite import SuiteDefinition, SuiteTask
 
 SUITES: dict[str, SuiteDefinition] = {
     _rc.SUITE_ID: _rc.SUITE,
     _sn.SUITE_ID: _sn.SUITE,
+    _sc.SUITE_ID: _sc.SUITE,
 }
 
 VERIFIERS: dict[str, Callable[[SuiteTask, Any], tuple[bool, dict]]] = {
     _rc.SUITE_ID: _rc.verify,
     _sn.SUITE_ID: _sn.verify,
+    _sc.SUITE_ID: _sc.verify,
 }
 
 
@@ -40,9 +43,14 @@ def _naming_input(task: SuiteTask) -> tuple[str, dict[str, str]]:
     return task.input["evidence_text"], {"original_filename": task.input["original_filename"]}
 
 
+def _semantic_catalog_input(task: SuiteTask) -> tuple[str, dict[str, str]]:
+    return task.input["description"], {}
+
+
 INPUT_ADAPTERS: dict[str, Callable[[SuiteTask], tuple[str, dict[str, str]]]] = {
     _rc.SUITE_ID: _routing_input,
     _sn.SUITE_ID: _naming_input,
+    _sc.SUITE_ID: _semantic_catalog_input,
 }
 
 

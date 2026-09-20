@@ -1,6 +1,9 @@
 schema_version: 1
 project_id: example-project
-name: Example Project
+client_id: example-client
+display_name: Example Project
+date: 2026-01-01
+aliases: []
 class: product # product | client-system | research | internal-tool
 status: active # idea | active | paused | archived
 repository:

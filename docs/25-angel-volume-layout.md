@@ -21,6 +21,10 @@ all of them and is idempotent — a second run changes nothing, and a README a
 human has edited is never overwritten (it writes `<file>.new` beside it and
 reports the divergence).
 
+Phase 3's `20-clients/` tree is a derived organized view over catalog-backed
+canonical assets. It is populated only by the explicit, drift-gated view
+materializer; the canonical verified bytes remain in `00-inbox/organized/`.
+
 ## Identity before any write
 
 The volume's identity of record is its **APFS Volume UUID**, held once in the

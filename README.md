@@ -213,7 +213,7 @@ The first milestone is intentionally boring:
 2. prepare the empty T7 — **done** (erased and recreated as APFS Encrypted 2026-09-11, D-019; `scripts/bootstrap-t7.sh` scaffold created);
 3. create a protected `00-inbox/legacy-dump/` landing zone — **done** (the directory tree exists; the protection is enforced in the application layer, not by `chflags`);
 4. dump existing repos/media/client work with minimal manual sorting — **not started**;
-5. let the ingestion service inventory, hash, classify, tag, and propose organization without deleting originals — **done for the day-to-day path only**: walking, hashing, deterministic media probing, filename proposals, and IGNORE/REVIEW/INGEST retention triage all work and never delete an original. A perception layer now also reads what is *in* a file — native text, OCR blocks with geometry and confidence, and a vision description — but it is deliberately **not** an input to any decision yet (D-029), so **AI naming and classification are still not built**: the proposer remains deterministic and names from facts the file states about itself, and no client/project inference exists. A model router *does* now exist (`tools/router/`, Phase 2) with authorization/privacy/certification gates and an exhaustive decision matrix (D-051, `docs/21-autonomous-routing.md`) -- but nothing is certified, so certification-gated work escalates rather than running, and the router is not wired to naming or triage. Bulk inventory of a legacy dump is also still to do;
+5. let the ingestion service inventory, hash, classify, tag, and propose organization without deleting originals — **done for the V1 day-to-day path; Phase 3 semantic catalog implementation is now present but its real-client Gate 3 pilot is still open**: walking, hashing, deterministic media probing, filename proposals, and IGNORE/REVIEW/INGEST retention triage never delete an original; Phase 3 adds canonical client/project manifests, bounded semantic proposals, append-only human corrections, SQLite embeddings/search, and a dry-run-first derived view. The Phase 3 contract and remaining pilot gate are in `docs/31-phase3-semantic-catalog.md`;
 6. generate checksums for irreplaceable media — **partly**: SHA-256 is computed and recorded for every file the pipeline touches, but no standalone immutable manifest has been written;
 7. establish a second backup before any source deletion — **done** (D-018: encrypted restic to Google Drive via rclone; snapshot, check, and restore drill green 2026-09-12, both LaunchAgents loaded). The independent D-004 Dell/B2 failure domains are still outstanding;
 8. only then begin automating ingestion and worker nodes — **partly**: an opt-in, hourly, one-shot LaunchAgent exists for naming/triage and is disabled by default (D-024). No worker nodes exist.
@@ -277,10 +277,11 @@ closed and each writing a ledger event naming the reason:
 
 Two things follow that are worth stating plainly:
 
-- **Nothing is certified today.** `config/certifications.example.yaml` is an
-  empty list and a test keeps it empty until an ACB-v1 suite exists, so
-  certification-gated work escalates rather than running. Gate 2 is RED, and
-  this is that fact expressed as behaviour rather than as a sentence.
+- **Gate 2 is green for its two measured roles.** The machine-local
+  `config/certifications.yaml` records the certified `classification` and
+  `naming.semantic` configurations; the committed example remains empty.
+  Phase 3's additive `classification.semantic_catalog` task class is attended
+  until its own canary certification is measured.
 - **An unpinned prompt version cannot satisfy any certification.** Until the
   versioned prompt registry exists, certified autonomous routing is
   impossible by construction — which is precisely why it sits on Gate 2's
@@ -342,10 +343,10 @@ work units (`verified_pass`/`verified_fail`/`truncated`/`invalid_output`/
 
 Reports carry Wilson confidence intervals, never a bare pass rate
 (`tools/campaign/statistics.py`) — see `docs/22-evaluation-campaign.md`.
-The two Gate-2 suites (`tools/bench/acb_v1/`) and the prompt registry
-(`tools/prompts/`, D-041) are the machinery this runs against; nothing in
-this repository has certified a model with it yet (`config/
-certifications.example.yaml` stays empty — Gate 2 is still **RED**).
+The two Gate-2 suites plus the additive Phase 3 semantic-catalog suite
+(`tools/bench/acb_v1/`) and the prompt registry (`tools/prompts/`, D-041) are
+the machinery this runs against. Gate 2 is green for its two measured roles;
+Phase 3 remains pending its real-client Gate 3 pilot.
 
 ## The Angel volume: one map, three forms
 
