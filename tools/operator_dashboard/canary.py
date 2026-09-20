@@ -20,12 +20,13 @@ from tools.operator_dashboard.taxonomy import (
     DOCUMENT_MEDIA_TYPES, LABEL_SCHEMA_VERSION, NAMING_ACTIONS, TAXONOMY_VERSION,
     normalize_tags, validate_reason_codes,
 )
-from tools.semantic.evaluation import CanaryRecord
+from tools.semantic.evaluation import CanaryRecord, evaluate
 from tools.semantic.manifests import ManifestRegistry
 
 Split = Literal["development", "training_candidate", "validation", "frozen_canary", "general_holdout"]
 CANARY_SIZE = 100
 FROZEN_SPLITS = frozenset({"frozen_canary", "general_holdout"})
+TRAINING_SPLITS = frozenset({"development", "training_candidate"})
 
 
 def _now() -> str:
@@ -125,6 +126,8 @@ class FrozenCanary:
     corpus_id: str
     selection_seed: str
     selection_rules: str
+    candidate_pool_count: int
+    candidate_pool_sha256: str
     entries: tuple[AssetDescriptor, ...]
     manifest_sha256: str
     frozen_at: str
@@ -136,6 +139,14 @@ class CanaryError(ValueError):
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class CorpusStore:
@@ -174,7 +185,8 @@ class CorpusStore:
         return tuple(AssetDescriptor(**json.loads(line)) for line in self.assets_path.read_text(encoding="utf-8").splitlines() if line.strip())
 
     def import_descriptors(self, assets: Iterable[AssetDescriptor], *, local_paths: dict[str, Path] | None = None) -> int:
-        self.metadata()  # refuse accidental ad-hoc state folders
+        metadata = self.metadata()
+        sealed = metadata.get("sealed_canary_id")
         existing = {asset.content_sha256: asset for asset in self.all_assets()}
         added = 0
         with self.assets_path.open("a", encoding="utf-8") as handle:
@@ -184,13 +196,23 @@ class CorpusStore:
                     if previous != asset:
                         raise CanaryError("a content identity already has conflicting descriptor metadata")
                     continue
+                if sealed:
+                    raise CanaryError(f"corpus is sealed by frozen canary {sealed}; descriptor membership cannot change")
                 handle.write(json.dumps(dataclasses.asdict(asset), sort_keys=True) + "\n")
                 existing[asset.content_sha256] = asset
                 added += 1
         if local_paths:
             index = json.loads(self.path_index_path.read_text(encoding="utf-8")) if self.path_index_path.exists() else {}
             for digest, path in local_paths.items():
-                index[_check_sha256(digest)] = str(Path(path).expanduser().resolve())
+                checked = _check_sha256(digest)
+                if checked not in existing:
+                    raise CanaryError("local path identity is not part of this corpus")
+                resolved = Path(path).expanduser().resolve()
+                if not resolved.is_file():
+                    raise CanaryError(f"local path is not a readable file: {resolved}")
+                if _sha256_file(resolved) != checked:
+                    raise CanaryError(f"local path bytes do not match content identity: {resolved}")
+                index[checked] = str(resolved)
             self.path_index_path.write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
         return added
 
@@ -228,15 +250,39 @@ class CorpusStore:
 
     def freeze_gate3(self, canaries: "FrozenCanaryStore", *, canary_id: str, seed: str) -> "FrozenCanary":
         metadata = self.metadata()
+        if metadata.get("sealed_canary_id"):
+            raise CanaryError(f"corpus is already sealed by {metadata['sealed_canary_id']}")
         assets = self.all_assets()
         if metadata["corpus_kind"] != "coherent_client":
             raise CanaryError("Gate 3 canary must come from a coherent_client corpus, not the general-file corpus")
         if len(assets) > 500:
             raise CanaryError("Gate 3 coherent corpus may contain at most 500 indexed assets")
-        return canaries.freeze(
+        frozen = canaries.freeze(
             canary_id=canary_id, corpus_id=self.corpus_id, assets=assets, seed=seed,
             selection_rules="round-robin strata: media_type, orientation, evidence_strength, evidence_flags",
         )
+        metadata.update({
+            "sealed_canary_id": frozen.canary_id,
+            "sealed_at": frozen.frozen_at,
+            "candidate_pool_count": frozen.candidate_pool_count,
+            "candidate_pool_sha256": frozen.candidate_pool_sha256,
+        })
+        self.metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        return frozen
+
+
+def _inventory(assets: Iterable[AssetDescriptor]) -> tuple[tuple[AssetDescriptor, ...], str]:
+    unique: dict[str, AssetDescriptor] = {}
+    for asset in assets:
+        previous = unique.get(asset.content_sha256)
+        if previous is not None and previous != asset:
+            raise CanaryError("candidate pool contains conflicting descriptors for one content identity")
+        unique[asset.content_sha256] = asset
+    ordered = tuple(sorted(unique.values(), key=lambda item: item.content_sha256))
+    digest = hashlib.sha256(
+        _canonical_json([dataclasses.asdict(item) for item in ordered]).encode("utf-8")
+    ).hexdigest()
+    return ordered, digest
 
 
 def deterministic_select(assets: Iterable[AssetDescriptor], *, seed: str, count: int = CANARY_SIZE) -> tuple[AssetDescriptor, ...]:
@@ -279,35 +325,46 @@ class FrozenCanaryStore:
         manifest_path = directory / "manifest.json"
         if manifest_path.exists():
             raise CanaryError(f"canary already frozen: {canary_id}")
-        selected = deterministic_select(assets, seed=seed)
+        candidate_pool, pool_digest = _inventory(assets)
+        selected = deterministic_select(candidate_pool, seed=seed)
         frozen = tuple(dataclasses.replace(asset, split="frozen_canary") for asset in selected)
         body = {"canary_id": canary_id, "corpus_id": corpus_id, "selection_seed": seed,
-                "selection_rules": selection_rules, "entries": [dataclasses.asdict(item) for item in frozen],
-                "frozen_at": _now()}
+                "selection_rules": selection_rules, "candidate_pool_count": len(candidate_pool),
+                "candidate_pool_sha256": pool_digest,
+                "entries": [dataclasses.asdict(item) for item in frozen], "frozen_at": _now()}
         digest = hashlib.sha256(_canonical_json(body).encode()).hexdigest()
         directory.mkdir(parents=True)
         manifest_path.write_text(json.dumps({**body, "manifest_sha256": digest}, indent=2, sort_keys=True), encoding="utf-8")
         return FrozenCanary(
             canary_id=canary_id, corpus_id=corpus_id, selection_seed=seed,
-            selection_rules=selection_rules, entries=frozen,
+            selection_rules=selection_rules, candidate_pool_count=len(candidate_pool),
+            candidate_pool_sha256=pool_digest, entries=frozen,
             manifest_sha256=digest, frozen_at=body["frozen_at"],
         )
 
     def load(self, canary_id: str) -> FrozenCanary:
-        data = json.loads((self._directory(canary_id) / "manifest.json").read_text(encoding="utf-8"))
+        path = self._directory(canary_id) / "manifest.json"
+        if not path.exists():
+            raise CanaryError(f"unknown frozen canary: {canary_id}")
+        data = json.loads(path.read_text(encoding="utf-8"))
         digest = data.pop("manifest_sha256")
         if hashlib.sha256(_canonical_json(data).encode()).hexdigest() != digest:
             raise CanaryError("canary manifest digest mismatch")
         data["entries"] = tuple(AssetDescriptor(**item) for item in data["entries"])
+        if len(data["entries"]) != CANARY_SIZE:
+            raise CanaryError(f"frozen Gate 3 canary must contain exactly {CANARY_SIZE} entries")
         return FrozenCanary(manifest_sha256=digest, **data)
 
     def contains(self, content_sha256: str) -> bool:
         digest = _check_sha256(content_sha256)
         for manifest in self.root.glob("*/manifest.json"):
-            data = json.loads(manifest.read_text(encoding="utf-8"))
-            if any(item["content_sha256"] == digest for item in data["entries"]):
+            canary = self.load(manifest.parent.name)
+            if any(item.content_sha256 == digest for item in canary.entries):
                 return True
         return False
+
+    def members(self, canary_id: str) -> frozenset[str]:
+        return frozenset(item.content_sha256 for item in self.load(canary_id).entries)
 
 
 def assert_not_frozen_for_development(content_sha256: str, canaries: FrozenCanaryStore) -> None:
@@ -316,14 +373,15 @@ def assert_not_frozen_for_development(content_sha256: str, canaries: FrozenCanar
 
 
 class TruthStore:
-    """Append-only truth events. A lock may be created once per asset identity."""
+    """Append-only truth locks plus append-only audited correction events."""
 
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "truth-events.jsonl"
+        self.corrections_path = self.root / "truth-corrections.jsonl"
 
-    def locked(self, content_sha256: str) -> HumanTruth | None:
+    def _original(self, content_sha256: str) -> HumanTruth | None:
         digest = _check_sha256(content_sha256)
         if not self.path.exists():
             return None
@@ -333,19 +391,63 @@ class TruthStore:
                 return truth_from_json(event)
         return None
 
+    def locked(self, content_sha256: str) -> HumanTruth | None:
+        current = self._original(content_sha256)
+        if current is None or not self.corrections_path.exists():
+            return current
+        digest = _check_sha256(content_sha256)
+        for line in self.corrections_path.read_text(encoding="utf-8").splitlines():
+            event = json.loads(line)
+            if event["content_sha256"] != digest:
+                continue
+            if event["prior_truth_sha256"] != _truth_sha256(current):
+                raise CanaryError("truth correction chain digest mismatch")
+            current = truth_from_json(event["replacement"])
+        return current
+
     def all(self) -> tuple[HumanTruth, ...]:
         if not self.path.exists():
             return ()
-        return tuple(truth_from_json(json.loads(line)) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip())
+        rows = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            current = self.locked(json.loads(line)["content_sha256"])
+            if current is not None:
+                rows.append(current)
+        return tuple(rows)
 
     def lock(self, truth: HumanTruth, *, registry: ManifestRegistry | None = None) -> HumanTruth:
-        if self.locked(truth.content_sha256) is not None:
-            raise CanaryError("ground truth is locked; create an audited correction event rather than overwrite it")
+        if self._original(truth.content_sha256) is not None:
+            raise CanaryError("ground truth is locked; use an audited correction event rather than overwrite it")
         if registry is not None:
             _validate_identity(truth, registry)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(truth_to_json(truth), sort_keys=True) + "\n")
         return truth
+
+    def correct(self, replacement: HumanTruth, *, actor_id: str, reason: str,
+                registry: ManifestRegistry | None = None) -> HumanTruth:
+        current = self.locked(replacement.content_sha256)
+        if current is None:
+            raise CanaryError("cannot correct truth before an original lock exists")
+        if replacement.corpus_id != current.corpus_id:
+            raise CanaryError("a correction cannot move truth to a different corpus")
+        if not actor_id.strip() or not reason.strip():
+            raise CanaryError("correction actor and reason are required")
+        if registry is not None:
+            _validate_identity(replacement, registry)
+        event = {
+            "content_sha256": replacement.content_sha256,
+            "actor_id": actor_id.strip(),
+            "reason": reason.strip(),
+            "prior_truth_sha256": _truth_sha256(current),
+            "replacement": truth_to_json(replacement),
+            "created_at": _now(),
+        }
+        with self.corrections_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True) + "\n")
+        return replacement
 
 
 def _validate_identity(truth: HumanTruth, registry: ManifestRegistry) -> None:
@@ -355,7 +457,9 @@ def _validate_identity(truth: HumanTruth, registry: ManifestRegistry) -> None:
         project = registry.project(truth.project_id)
         if project is None:
             raise CanaryError(f"unknown project manifest id: {truth.project_id}")
-        if truth.client_id is not None and project.client_id != truth.client_id:
+        if truth.client_id is None:
+            raise CanaryError("a canonical project requires its canonical client")
+        if project.client_id != truth.client_id:
             raise CanaryError("project does not belong to the selected canonical client")
 
 
@@ -368,21 +472,31 @@ def truth_from_json(data: dict[str, Any]) -> HumanTruth:
     return HumanTruth(**{key: tuple(value) if key in tuple_fields else value for key, value in data.items()})
 
 
-def blind_review_payload(asset: AssetDescriptor, *, truth: HumanTruth | None, model_result: dict[str, Any] | None, evidence: dict[str, Any]) -> dict[str, Any]:
-    """Never serializes model output until a human lock exists."""
+def _truth_sha256(truth: HumanTruth) -> str:
+    return hashlib.sha256(_canonical_json(truth_to_json(truth)).encode("utf-8")).hexdigest()
+
+
+def blind_review_payload(asset: AssetDescriptor, *, truth: HumanTruth | None, model_result: dict[str, Any] | None,
+                         evidence: dict[str, Any], reveal_model_comparison: bool = True) -> dict[str, Any]:
+    """Never serializes model output before lock or when holdout blindness is required."""
     payload = {"asset": dataclasses.asdict(asset), "evidence": evidence, "ground_truth_locked": truth is not None}
     if truth is not None:
         payload["truth"] = truth_to_json(truth)
-        payload["model_comparison"] = model_result
+        if reveal_model_comparison:
+            payload["model_comparison"] = model_result
+        else:
+            payload["model_comparison_withheld"] = True
     return payload
 
 
-def export_training_jsonl(truths: Iterable[HumanTruth], destination: Path) -> int:
+def export_training_jsonl(truths: Iterable[HumanTruth], destination: Path, *,
+                          canaries: FrozenCanaryStore) -> int:
     rows = list(truths)
-    unsafe = [row.content_sha256 for row in rows if row.split in FROZEN_SPLITS]
+    unsafe = [row.content_sha256 for row in rows
+              if row.split in FROZEN_SPLITS or canaries.contains(row.content_sha256)]
     if unsafe:
-        raise CanaryError(f"training export refuses frozen identities: {unsafe[:3]!r}")
-    allowed = [row for row in rows if row.split in {"development", "training_candidate"}]
+        raise CanaryError(f"training export refuses frozen/holdout identities: {unsafe[:3]!r}")
+    allowed = [row for row in rows if row.split in TRAINING_SPLITS]
     with Path(destination).open("w", encoding="utf-8") as handle:
         for row in allowed:
             handle.write(json.dumps({"schema_version": row.label_schema_version, "taxonomy_version": row.taxonomy_version,
@@ -392,7 +506,7 @@ def export_training_jsonl(truths: Iterable[HumanTruth], destination: Path) -> in
 
 
 def canary_records_from_truth(truths: Iterable[HumanTruth], predictions: dict[str, dict[str, Any]]) -> tuple[CanaryRecord, ...]:
-    """Adapter to the existing trusted Phase 3 evaluator; it owns the metrics."""
+    """Low-level adapter; Gate 3 claims must use frozen_canary_report()."""
     rows = []
     for truth in truths:
         predicted = predictions.get(truth.content_sha256, {})
@@ -404,3 +518,40 @@ def canary_records_from_truth(truths: Iterable[HumanTruth], predictions: dict[st
             project_confidence=float(predicted.get("project_confidence", 0)),
         ))
     return tuple(rows)
+
+
+
+def frozen_canary_report(*, canaries: FrozenCanaryStore, canary_id: str,
+                         truth_store: TruthStore, predictions: dict[str, dict[str, Any]],
+                         run_identity: str) -> dict[str, Any]:
+    """Evaluate exactly one verified frozen manifest and record its identity."""
+    if not run_identity.strip():
+        raise CanaryError("run_identity is required for a Gate 3 evaluation")
+    canary = canaries.load(canary_id)
+    members = {item.content_sha256 for item in canary.entries}
+    extras = set(predictions) - members
+    if extras:
+        raise CanaryError(f"predictions contain {len(extras)} identities outside frozen canary")
+    truths: list[HumanTruth] = []
+    missing: list[str] = []
+    for item in canary.entries:
+        truth = truth_store.locked(item.content_sha256)
+        if truth is None:
+            missing.append(item.content_sha256)
+            continue
+        if truth.corpus_id != canary.corpus_id:
+            raise CanaryError("frozen truth corpus_id does not match canary corpus_id")
+        truths.append(dataclasses.replace(truth, split="frozen_canary"))
+    if missing:
+        raise CanaryError(f"frozen canary has {len(missing)} unlabeled identities")
+    report = evaluate(canary_records_from_truth(truths, predictions))
+    return {
+        "canary_id": canary.canary_id,
+        "canary_manifest_sha256": canary.manifest_sha256,
+        "corpus_id": canary.corpus_id,
+        "candidate_pool_count": canary.candidate_pool_count,
+        "candidate_pool_sha256": canary.candidate_pool_sha256,
+        "run_identity": run_identity.strip(),
+        "evaluated_at": _now(),
+        "metrics": report.as_dict(),
+    }
