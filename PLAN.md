@@ -186,7 +186,7 @@ All ten clauses are satisfied as of 2026-09-18. What Gate 2 does **not** say: th
 
 ## Phase 3 — Catalog pilot on one client (days 21–45)
 
-- [~] 2026-09-20 Implemented the additive semantic contract, canonical client/project manifests, prompt `phase3-semantic-classification@1.0.0`, catalog migration 7, deterministic Gate 3 evaluator, human correction locks, and the additive `acb-v1/semantic-catalog` suite. The real ≤500-file shoot and 100-asset frozen canary remain open.
+- [~] 2026-09-20 Implemented the additive semantic contract, canonical client/project manifests, prompt `phase3-semantic-classification@1.0.0`, catalog migration 7, deterministic Gate 3 evaluator, human correction locks, and the additive `acb-v1/semantic-catalog` suite. The local operator workflow adds a separate versioned human-truth type, deterministic immutable 100-hash canary registry, blind-first review, and a training-export guard (`docs/32-operator-dashboard-and-human-truth.md`). The real ≤500-file shoot and real frozen canary remain open.
 - [~] 2026-09-20 Implemented content-addressed SQLite embeddings (`angel-hash-embedding@1.0.0`), `tools/search`, and deterministic acceptance-test helpers. A real pilot search drill remains open.
 - [~] 2026-09-20 Implemented dry-run-first, 20%-drift-gated derived-view planning and ordinary verified copies. No hardlinks or clonefile are used. T7-backed materialization and the second-run acceptance remain open.
 

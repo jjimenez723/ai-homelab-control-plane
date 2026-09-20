@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Angel Operator Dashboard</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background:#0d1118; color:#edf2f8; }
+      body { margin:0; } main { max-width:960px; margin:0 auto; padding:9vh 24px; }
+      h1 { font-size:clamp(2rem,6vw,4.4rem); margin:0 0 .2em; } p { color:#b8c4d2; line-height:1.6; max-width:70ch; }
+      button { border:0; border-radius:8px; padding:.75rem 1rem; background:#92c5ff; color:#06121f; font:inherit; font-weight:700; cursor:pointer; }
+      .card { margin-top:2rem; padding:1.4rem; background:#151c27; border:1px solid #293649; border-radius:12px; }
+      .warning { color:#ffce82; } .hidden { display:none; } code { color:#b5d7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div>ANGEL / OPERATOR</div>
+      <h1>Local corpus review.</h1>
+      <p>This dashboard authenticates an operator, but source assets, catalog data, previews, and human labels remain on the local Angel machine.</p>
+      <section class="card" id="auth-card">
+        <p id="status">Checking dashboard configuration…</p>
+        <button class="hidden" id="sign-in">Sign in with Google</button>
+      </section>
+      <section class="card hidden" id="dashboard">
+        <h2>Authenticated identity</h2>
+        <p id="identity"></p>
+        <p class="warning">The local companion bridge is intentionally disabled from this hosted page until browser Private Network Access has been verified. No private file data is fetched here.</p>
+        <p>Use the loopback-only local Angel operator service to review canaries, locks, and local evidence.</p>
+      </section>
+      <p><a href="/">Public site</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>
+    </main>
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+      import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+      const config = window.__ANGEL_FIREBASE_CONFIG__;
+      const allowed = new Set(window.__ANGEL_OPERATOR_ALLOWLIST__ || []);
+      const status = document.querySelector("#status"), button = document.querySelector("#sign-in");
+      if (!config || !allowed.size) {
+        status.textContent = "Operator access has not been configured for this deployment.";
+      } else {
+        const auth = getAuth(initializeApp(config));
+        status.textContent = "Sign in to request operator access."; button.classList.remove("hidden");
+        button.onclick = async () => {
+          const result = await signInWithPopup(auth, new GoogleAuthProvider());
+          // Authentication is only the first gate. The local service separately
+          // verifies a token and checks its own explicit subject allowlist.
+          if (!allowed.has(result.user.uid)) { status.textContent = "This Google account is not an authorized Angel operator."; return; }
+          document.querySelector("#identity").textContent = `Authorized dashboard identity: ${result.user.email || result.user.uid}`;
+          document.querySelector("#auth-card").classList.add("hidden"); document.querySelector("#dashboard").classList.remove("hidden");
+        };
+      }
+    </script>
+  </body>
+</html>

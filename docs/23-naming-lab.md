@@ -41,6 +41,11 @@ just a fixture). After prompt/contract development stabilizes here, a
 **separate, fresh validation corpus** is required before any claim about
 production readiness — this Lab's own results are never that corpus.
 
+The operator dashboard/canary workflow in `docs/32-operator-dashboard-and-human-truth.md`
+uses a deliberately separate persisted type. `SeedStore.get_or_create` checks
+the frozen-canary registry before writing a development seed, so frozen content
+cannot become a prompt example, few-shot example, or training record here.
+
 ## Architecture
 
 `tools/naming_lab/` is a new top-level package, deliberately **outside**
