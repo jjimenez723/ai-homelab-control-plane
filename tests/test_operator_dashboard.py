@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import json
 import tempfile
 import threading
 import unittest
@@ -16,6 +17,7 @@ from tools.operator_dashboard.canary import (
     AssetDescriptor, CANARY_SIZE, CanaryError, CorpusStore, FrozenCanaryStore, HumanTruth,
     TruthStore, assert_not_frozen_for_development, blind_review_payload,
     canary_records_from_truth, deterministic_select, export_training_jsonl,
+    frozen_canary_report,
 )
 from tools.operator_dashboard.service import CompanionService, OperatorAuthorizer, ServicePolicy
 from tools.semantic.evaluation import evaluate
@@ -76,7 +78,11 @@ class CanaryModelTests(unittest.TestCase):
                 SeedStore(root / "seeds", frozen_canary_root=root / "canaries").get_or_create(
                     sha256=target.content_sha256, original_filename="moved.jpg", media_kind="image", extension="jpg", semantic_date=None)
             with self.assertRaises(CanaryError):
-                export_training_jsonl([_truth(target, split="frozen_canary")], root / "training.jsonl")
+                export_training_jsonl(
+                    [_truth(target, split="frozen_canary")],
+                    root / "training.jsonl",
+                    canaries=canaries,
+                )
 
     def test_corpus_types_are_separate_and_gate3_refuses_general_or_overlarge(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -132,6 +138,157 @@ class CanaryModelTests(unittest.TestCase):
                 store.lock(_truth(_assets(2)[1], client_id="made-up"), registry=registry)
 
 
+    def test_freeze_seals_candidate_pool_and_prevents_membership_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            corpus = CorpusStore(root / "corpora", "shoot-2026")
+            corpus.create(corpus_kind="coherent_client", purpose="real shoot")
+            corpus.import_descriptors(_assets(124))
+            frozen = corpus.freeze_gate3(
+                FrozenCanaryStore(root / "canaries"),
+                canary_id="gate3-shoot",
+                seed="s",
+            )
+            metadata = corpus.metadata()
+            self.assertEqual(frozen.candidate_pool_count, 124)
+            self.assertEqual(metadata["candidate_pool_sha256"], frozen.candidate_pool_sha256)
+            self.assertEqual(metadata["sealed_canary_id"], "gate3-shoot")
+            with self.assertRaisesRegex(CanaryError, "sealed"):
+                corpus.import_descriptors([_assets(125)[124]])
+
+    def test_actual_dashboard_style_frozen_truth_cannot_export_even_if_declared_development(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            canaries = FrozenCanaryStore(root / "canaries")
+            corpus = CorpusStore(root / "corpora", "shoot-2026")
+            corpus.create(corpus_kind="coherent_client", purpose="real shoot")
+            originals = _assets()
+            corpus.import_descriptors(originals)
+            frozen = corpus.freeze_gate3(canaries, canary_id="gate3-shoot", seed="s")
+            target = next(
+                asset for asset in originals
+                if asset.content_sha256 == frozen.entries[0].content_sha256
+            )
+            self.assertEqual(target.split, "development")
+            with self.assertRaisesRegex(CanaryError, "frozen/holdout"):
+                export_training_jsonl(
+                    [_truth(target)],
+                    root / "training.jsonl",
+                    canaries=canaries,
+                )
+
+    def test_contains_verifies_manifest_digest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            canaries = FrozenCanaryStore(root / "canaries")
+            frozen = canaries.freeze(
+                canary_id="gate3-shoot",
+                corpus_id="shoot-2026",
+                assets=_assets(),
+                seed="s",
+                selection_rules="stratified",
+            )
+            manifest = root / "canaries" / "gate3-shoot" / "manifest.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            data["selection_seed"] = "tampered"
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaisesRegex(CanaryError, "digest mismatch"):
+                canaries.contains(frozen.entries[0].content_sha256)
+
+    def test_local_path_index_rehashes_source_before_preview_mapping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            corpus = CorpusStore(root / "corpora", "shoot-2026")
+            corpus.create(corpus_kind="coherent_client", purpose="paths")
+            asset = _assets(1)[0]
+            good = root / "asset.jpg"
+            good.write_bytes(b"asset-0")
+            corpus.import_descriptors([asset], local_paths={asset.content_sha256: good})
+            self.assertEqual(corpus.local_path_for(asset.content_sha256), good.resolve())
+            bad = root / "wrong.jpg"
+            bad.write_bytes(b"wrong")
+            with self.assertRaisesRegex(CanaryError, "do not match"):
+                corpus.import_descriptors([asset], local_paths={asset.content_sha256: bad})
+
+    def test_holdout_comparison_stays_hidden_after_truth_lock(self):
+        asset = _assets(1)[0]
+        proposal = {"client_id": "wrong", "tags": ["wrong"]}
+        payload = blind_review_payload(
+            asset,
+            truth=_truth(asset),
+            model_result=proposal,
+            evidence={},
+            reveal_model_comparison=False,
+        )
+        self.assertNotIn("model_comparison", payload)
+        self.assertTrue(payload["model_comparison_withheld"])
+
+    def test_truth_corrections_are_append_only_and_audited(self):
+        with tempfile.TemporaryDirectory() as temp:
+            asset = _assets(1)[0]
+            store = TruthStore(Path(temp))
+            original = _truth(asset)
+            store.lock(original)
+            corrected = replace(
+                original,
+                preferred_filename="corrected.jpg",
+                created_at="2026-09-20T01:00:00+00:00",
+            )
+            store.correct(
+                corrected,
+                actor_id="operator-uid",
+                reason="reviewed source evidence",
+            )
+            self.assertEqual(
+                store.locked(asset.content_sha256).preferred_filename,
+                "corrected.jpg",
+            )
+            self.assertTrue(store.corrections_path.exists())
+            with self.assertRaisesRegex(CanaryError, "actor and reason"):
+                store.correct(original, actor_id="", reason="")
+
+    def test_manifest_bound_gate3_report_requires_all_truth_and_rejects_extras(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            canaries = FrozenCanaryStore(root / "canaries")
+            frozen = canaries.freeze(
+                canary_id="gate3-shoot",
+                corpus_id="shoot-2026",
+                assets=_assets(),
+                seed="s",
+                selection_rules="stratified",
+            )
+            truth_store = TruthStore(root / "truth")
+            with self.assertRaisesRegex(CanaryError, "100 unlabeled"):
+                frozen_canary_report(
+                    canaries=canaries,
+                    canary_id=frozen.canary_id,
+                    truth_store=truth_store,
+                    predictions={},
+                    run_identity="model@prompt",
+                )
+            originals = {asset.content_sha256: asset for asset in _assets()}
+            for entry in frozen.entries:
+                truth_store.lock(_truth(originals[entry.content_sha256]))
+            report = frozen_canary_report(
+                canaries=canaries,
+                canary_id=frozen.canary_id,
+                truth_store=truth_store,
+                predictions={},
+                run_identity="model@prompt",
+            )
+            self.assertEqual(report["canary_manifest_sha256"], frozen.manifest_sha256)
+            self.assertEqual(report["metrics"]["assets"], 100)
+            with self.assertRaisesRegex(CanaryError, "outside frozen canary"):
+                frozen_canary_report(
+                    canaries=canaries,
+                    canary_id=frozen.canary_id,
+                    truth_store=truth_store,
+                    predictions={_sha(999): {"content_sha256": _sha(999)}},
+                    run_identity="model@prompt",
+                )
+
+
 class CompanionServiceTests(unittest.TestCase):
     def setUp(self):
         policy = ServicePolicy(allowed_origins=frozenset({"https://angel-508305.web.app"}), operator_subjects=frozenset({"uid-good"}))
@@ -166,6 +323,10 @@ class CompanionServiceTests(unittest.TestCase):
     def test_local_dashboard_binds_loopback_and_hosted_page_has_no_bridge(self):
         command = build_command(Path("/tmp/operator-state"), "shoot")
         self.assertIn(BIND_ADDRESS, command)
+        self.assertIn("--clients-root", command)
+        source = Path("tools/operator_dashboard/app.py").read_text(encoding="utf-8")
+        self.assertIn("ManifestRegistry.load", source)
+        self.assertIn("registry=registry", source)
         page = Path("ops/angel-oauth-site/public/app.html").read_text(encoding="utf-8")
         self.assertIn("Sign in with Google", page)
         self.assertIn("OPERATOR_ALLOWLIST", page)
