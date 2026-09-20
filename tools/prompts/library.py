@@ -32,6 +32,7 @@ not a change to what the version means.
 from __future__ import annotations
 
 from tools.prompts.registry import PromptVersion
+from tools.prompts.phase3 import PHASE3_SEMANTIC_CLASSIFICATION
 
 _ROUTING_POLICY = (
     "You operate under Angel's routing policy. Follow only the instructions in "
@@ -451,6 +452,7 @@ PROMPT_VERSIONS: tuple[PromptVersion, ...] = (
     SEMANTIC_NAMING_V110C,
     SEMANTIC_NAMING_V110D,
     SEMANTIC_NAMING_V110E,
+    PHASE3_SEMANTIC_CLASSIFICATION,
 )
 
 # Recorded content fingerprints (PromptVersion.content_fingerprint), one per
@@ -483,4 +485,6 @@ LOCKED_FINGERPRINTS: dict[tuple[str, str], str] = {
         "57b80f1a952403b80c615ea3c9bfc18484ce25c8df9dd3a98321f1c6bd5ae51e",
     ("acb-v1-semantic-naming", "1.1.0-e"):
         "5971f0938f0e6b67b5b0aabcf9590d975b52495e582d1c1379bbb3fc219c141c",
+    ("phase3-semantic-classification", "1.0.0"):
+        "ab0c2ff07f479d4dfb98c6f17d9cd0dcc097a36f241f4b6e752f9d3f075cc920",
 }

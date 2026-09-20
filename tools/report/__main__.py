@@ -18,6 +18,10 @@ def main() -> int:
               "without this the measurement history has exactly one copy. Point "
               "this at verified Angel 40-ai/evaluation/telemetry to get it backed up."),
     )
+    parser.add_argument(
+        "--phase3-catalog", default=None, metavar="PATH",
+        help="Also print read-only Phase 3 semantic catalog metrics from PATH.",
+    )
     args = parser.parse_args()
 
     value = report(args.database, days=args.days)
@@ -28,6 +32,13 @@ def main() -> int:
 
         written = write_snapshot(build_snapshot(args.database, days=args.days), Path(args.snapshot_dir))
         print(f"\nsnapshot written: {written}")
+    if args.phase3_catalog:
+        from tools.ingest.catalog import Catalog
+        from tools.semantic.report import phase3_report
+        with Catalog(Path(args.phase3_catalog)) as catalog:
+            import json
+            print("\nphase3:")
+            print(json.dumps(phase3_report(catalog), indent=2, sort_keys=True))
     return 0
 
 

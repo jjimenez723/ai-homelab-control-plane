@@ -22,7 +22,7 @@ thumbnail/proxy generation
       |
 vision model analysis
       |
-structured tags + proposed filename
+structured semantic proposal (client/project/tags) + proposed filename
       |
 confidence / policy gate
       |
@@ -88,6 +88,12 @@ Separate:
 5. embedding/indexing.
 
 Do not run a large VLM over every frame of every video.
+
+Phase 3 stores the semantic proposal separately from naming and retention. It
+reuses the bounded V1 perception summary, records model/prompt/evidence
+provenance, caches embeddings by content/evidence identity, and searches the
+SQLite catalog. The organized client tree is a derived view; it never replaces
+the verified canonical bytes in `00-inbox/organized/`.
 
 For video, start with:
 - technical metadata;

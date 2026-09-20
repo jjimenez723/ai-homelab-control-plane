@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Search the Phase 3 catalog without requiring a model at query time."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from tools.ingest.catalog import Catalog
+from tools.semantic.embedding import EmbeddingSpec
+from tools.semantic.index import search_catalog
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Semantic search over Angel's SQLite catalog")
+    parser.add_argument("query")
+    parser.add_argument("--catalog", type=Path, default=Path("90-system/catalog.sqlite"))
+    parser.add_argument("--client")
+    parser.add_argument("--project")
+    parser.add_argument("--tag")
+    parser.add_argument("--media-type")
+    parser.add_argument("--date-from")
+    parser.add_argument("--date-to")
+    parser.add_argument("--orientation")
+    parser.add_argument("--limit", type=int, default=10)
+    args = parser.parse_args()
+    with Catalog(args.catalog) as catalog:
+        results = search_catalog(
+            catalog, args.query, limit=args.limit, spec=EmbeddingSpec(),
+            client_id=args.client, project_id=args.project, tag=args.tag,
+            media_type=args.media_type, date_from=args.date_from,
+            date_to=args.date_to, orientation=args.orientation,
+        )
+    for result in results:
+        print(f"{result.score:.2f}  {result.client_id or 'unknown'} / {result.project_id or 'unknown'}")
+        print(f"      {result.filename or result.path or result.asset_id}")
+        print(f"      tags: {', '.join(result.tags) if result.tags else 'none'}")
+        print(f"      asset_id: {result.asset_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -34,6 +34,7 @@ TASK_CLASS_PROMPT_ID: dict[str, str] = {
     "classification": "acb-v1-routing-classification",
     "routing": "acb-v1-routing-classification",
     "naming.semantic": "acb-v1-semantic-naming",
+    "classification.semantic_catalog": "phase3-semantic-classification",
 }
 
 
@@ -65,6 +66,12 @@ def render_for_task_class(
     what a production caller for that task class should call -- the shared
     path, not a description of one.
     """
+    if registry is None and task_class == "classification.semantic_catalog":
+        # Phase 3 is a separate additive prompt registry so the frozen Gate-2
+        # registry fingerprint set stays historical and immutable. It still
+        # uses the same PromptVersion and renderer seam.
+        from tools.prompts.phase3 import PHASE3_PROMPT_REGISTRY
+        registry = PHASE3_PROMPT_REGISTRY
     registry = registry or load_default_registry()
     prompt = registry.active(prompt_id_for_task_class(task_class))
     return render(prompt, task_text=task_text, context=context, extra=extra)

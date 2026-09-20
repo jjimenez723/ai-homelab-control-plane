@@ -1,6 +1,8 @@
 schema_version: 1
 client_id: example-client
 display_name: Example Client
+aliases: []
+active: true
 data_classification: confidential
 root: /T7/20-clients/example-client
 naming:
@@ -15,3 +17,4 @@ retention:
 backup:
   second_copy_verified: false
 notes: ""
+projects: []

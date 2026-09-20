@@ -24,6 +24,7 @@ from tools.prompts.renderer import ContextPack, render
 ACTIVE_VERSIONS = {
     "acb-v1-routing-classification": "1.1.0",
     "acb-v1-semantic-naming": "1.1.0",
+    "phase3-semantic-classification": "1.0.0",
 }
 
 
@@ -35,7 +36,7 @@ class RegistryIdentityTests(unittest.TestCase):
     def test_default_registry_loads_the_two_gate2_prompts(self) -> None:
         registry = _registry()
         ids = {v.prompt_id for v in registry.all()}
-        self.assertEqual(ids, {"acb-v1-routing-classification", "acb-v1-semantic-naming"})
+        self.assertEqual(ids, {"acb-v1-routing-classification", "acb-v1-semantic-naming", "phase3-semantic-classification"})
 
     def test_get_unknown_prompt_id_raises(self) -> None:
         with self.assertRaises(UnknownPrompt):
