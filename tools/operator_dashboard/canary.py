@@ -54,6 +54,9 @@ class AssetDescriptor:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "content_sha256", _check_sha256(self.content_sha256))
+        object.__setattr__(self, "evidence_flags", tuple(self.evidence_flags))
+        if not all(isinstance(flag, str) for flag in self.evidence_flags):
+            raise ValueError("evidence_flags must contain only strings")
         if self.media_type not in DOCUMENT_MEDIA_TYPES:
             raise ValueError(f"unsupported document/media type: {self.media_type}")
         if self.split not in {"development", "training_candidate", "validation", "frozen_canary", "general_holdout"}:
