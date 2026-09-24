@@ -5,7 +5,7 @@ pillow-heif==1.7.0
 # (confidence 0.92). Without pypdf that branch is dead and PDFs fall back to
 # a generic name, so it is a declared dependency rather than an optional one.
 # `tools/ingest/media/probe.py` still degrades gracefully if it is missing.
-pypdf==6.18.1
+pypdf==6.19.0
 # pypdf can encounter CFF/Type1 fonts. Without fontTools some font encodings
 # cannot be fully parsed; that occurred in the owner's real corpus, making
 # this a demonstrated ingestion dependency rather than speculative optional
