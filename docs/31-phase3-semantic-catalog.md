@@ -138,3 +138,11 @@ existing catalog asset
 
 Retention remains `IGNORE` / `REVIEW` / `INGEST`, and naming remains its own
 proposal/audit chain. A client inference is not retention permission.
+
+## Human truth and operator workflow
+
+`docs/32-operator-dashboard-and-human-truth.md` defines the separate local
+canary registry, versioned human labels, blind-first locks, deterministic
+100-item selection, training export, and heterogeneous general-file corpus.
+The existing `tools.semantic.evaluation` remains the Gate 3 metric authority;
+the dashboard only adapts locked truth into its `CanaryRecord` inputs.

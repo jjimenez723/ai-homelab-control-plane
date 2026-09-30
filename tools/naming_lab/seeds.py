@@ -167,11 +167,13 @@ class SeedStore:
     seed and a path index mapping content hash to last-seen local path.
     """
 
-    def __init__(self, corpus_root: Path):
+    def __init__(self, corpus_root: Path, *, frozen_canary_root: Path | None = None):
         self.corpus_root = Path(corpus_root)
         self.seeds_dir = self.corpus_root / "seeds"
         self.seeds_dir.mkdir(parents=True, exist_ok=True)
         self._path_index_file = self.corpus_root / "path_index.json"
+        # The default is the authoritative local dashboard state location.
+        self._frozen_canary_root = Path(frozen_canary_root or ".state/operator-dashboard/canaries")
 
     def _seed_path(self, sha256: str) -> Path:
         return self.seeds_dir / f"{sha256}.json"
@@ -198,6 +200,10 @@ class SeedStore:
         extension: str,
         semantic_date: SemanticDateCandidate | None,
     ) -> SeedRecord:
+        # Check at the one seed-creation boundary. SeedRecord itself retains
+        # its fixed development-only type; frozen content is refused first.
+        from tools.operator_dashboard.canary import FrozenCanaryStore, assert_not_frozen_for_development
+        assert_not_frozen_for_development(sha256, FrozenCanaryStore(self._frozen_canary_root))
         existing = self.get(sha256)
         if existing is not None:
             return existing
