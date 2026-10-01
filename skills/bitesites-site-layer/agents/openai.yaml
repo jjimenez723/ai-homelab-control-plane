@@ -1,0 +1,4 @@
+interface:
+  display_name: "BiteSites Site Layer"
+  short_description: "Install the BiteSites footer credit and branded location map"
+  default_prompt: "Add the BiteSites footer attribution and a branded, accurate location map to this site."

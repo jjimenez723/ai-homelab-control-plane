@@ -1,0 +1,241 @@
+/*
+ * Bite Sites — Credit Footer
+ *
+ * The agency's own morphing mark, as the "Site by BiteSites" strip that goes at
+ * the bottom of a client site. Sibling of morphing-logo.css: that one is the
+ * generalised raster version for any brand kit, this one is the Bite Sites mark
+ * specifically, drawn as vector so the arms genuinely travel between lockups
+ * rather than cross-dissolving.
+ *
+ * Geometry arrives as custom properties written by bitesites-credit-footer.js.
+ * Nothing here has an opinion about timing, and there are deliberately **no
+ * transitions on the logo layers**: this is scroll-linked, not time-linked, and
+ * a transition makes each layer chase a target the scroll has already passed.
+ *
+ * VENDORED — do not edit. Project overrides live in host.css.
+ */
+
+.bitesites-credit {
+  /* The mark is wider than the strip on narrow viewports mid-morph. */
+  overflow: hidden;
+  margin-top: 44px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bitesites-credit-rule, rgba(0, 0, 0, 0.12));
+}
+
+/*
+ * A single centred stack. The agency site flanks the mark with two nav columns;
+ * a client site should not carry the agency's navigation, so this variant is the
+ * mark and the credit line only.
+ *
+ * min-height is load-bearing, not styling: the morph's progress is measured from
+ * this box, so the strip has to reserve the room the expanded lockup will need
+ * before the lockup is expanded. Shrink it and the morph runs out of travel and
+ * settles part-open, which reads as a failed image load.
+ */
+.bitesites-credit-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(14px, 1.7vw, 28px);
+  min-height: 176px;
+}
+
+.bitesites-credit .bitesites-credit-copy {
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--bitesites-credit-copy-color, rgba(0, 0, 0, 0.45));
+  /*
+   * Fades up with the mark. The fallback is 1, not 0 — JavaScript off, a bundle
+   * that failed, or a browser without IntersectionObserver must all leave the
+   * credit readable. Never make this fade a class the script adds: that inverts
+   * the failure, and the thing that disappears is your attribution.
+   */
+  opacity: var(--bitesites-credit-content-opacity, 1);
+  transition: opacity 0.18s ease;
+}
+
+/* The two ways of reaching a footer that are not scrolling to it. */
+.bitesites-credit:focus-within .bitesites-credit-copy {
+  opacity: 1;
+}
+
+@media print {
+  .bitesites-credit .bitesites-credit-copy,
+  .bitesites-credit .bitesites-credit-eyebrow {
+    opacity: 1;
+  }
+}
+
+.bitesites-credit .bitesites-morph-logo {
+  --bitesites-logo-size: 62px;
+  /* Resting pose is the bare mark: the strip's morph plays in reverse, opening
+     out to the full lockup as the footer arrives. */
+  --bitesites-type-x: -0.5%;
+  --bitesites-type-y: -15.7%;
+  --bitesites-type-scale: 0.42;
+  --bitesites-type-opacity: 0;
+  --bitesites-tag-opacity: 0;
+  position: relative;
+  z-index: 2;
+  display: block;
+  flex: 0 0 auto;
+  width: var(--bitesites-logo-size);
+  height: var(--bitesites-logo-size);
+  color: var(--bitesites-credit-mark-color, #000);
+  will-change: transform;
+}
+
+.bitesites-credit .bitesites-morph-logo:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 4px;
+  border-radius: 12px;
+}
+
+.bitesites-morph-stage {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+/*
+ * The arms are vector, so they stay crisp at every size the morph passes through
+ * and travel between lockups instead of cross-dissolving. The type rides one
+ * transform whose origin is its own resting centre (252.5,338.5 of the 500-unit
+ * canvas), and each <img> is the same full lockup clipped to one band of it —
+ * so the wordmark and tagline keep their designed letterforms without shipping
+ * extra crops, and neither can drift out of register with the other.
+ */
+.bitesites-morph-svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.bitesites-morph-type {
+  position: absolute;
+  inset: 0;
+  display: block;
+  transform-origin: 50.5% 67.7%;
+  transform: translate(var(--bitesites-type-x), var(--bitesites-type-y))
+    scale(var(--bitesites-type-scale));
+  will-change: transform;
+}
+
+.bitesites-morph-type img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  will-change: opacity;
+}
+
+.bitesites-morph-wordline {
+  opacity: var(--bitesites-type-opacity);
+  clip-path: inset(61.8% 10.4% 23.8% 11.4%);
+}
+
+.bitesites-morph-tagline {
+  opacity: var(--bitesites-tag-opacity);
+  clip-path: inset(82.8% 3.2% 5.4% 3.2%);
+}
+
+/*
+ * "Made by" label.
+ *
+ * On the agency's own site the mark is a signature and needs no caption. On a
+ * client site it is an attribution, and an attribution has to say what it is
+ * without relying on the visitor recognising the mark. The label sits above the
+ * mark rather than in the credit line so it reads as the mark's caption, and it
+ * is aria-hidden in the markup because the anchor's accessible name already
+ * carries the same words.
+ *
+ * Tomorrow is the agency wordmark's own family, which is why the label is set in
+ * it rather than in the host's UI font. It has to be loaded by the host page —
+ * see the README. The fallbacks are generic on purpose: a blocked font request
+ * should leave a label that still matches the footer around it.
+ */
+.bitesites-credit .bitesites-credit-eyebrow {
+  /*
+   * The strip's flex gap is sized for mark-to-credit-line spacing. Left at that
+   * distance the label floats between the hairline and the mark instead of
+   * belonging to it, so this pulls the pair back to a fixed 10px.
+   */
+  margin: 0 0 calc(10px - clamp(14px, 1.7vw, 28px));
+  text-align: center;
+  font-family: var(
+    --bitesites-credit-eyebrow-font,
+    Tomorrow,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif
+  );
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--bitesites-credit-eyebrow-color, rgba(0, 0, 0, 0.62));
+  /* Fades up with the mark, and falls back to 1 for the same reason the credit
+     line does: a failed script must not take the attribution with it. */
+  opacity: var(--bitesites-credit-content-opacity, 1);
+  transition: opacity 0.18s ease;
+}
+
+.bitesites-credit:focus-within .bitesites-credit-eyebrow {
+  opacity: 1;
+}
+
+/*
+ * Dark-footer modifier. The artwork ships as black on transparent, so the type
+ * sprite is inverted rather than re-exported; brightness(0) first flattens any
+ * antialiasing to black so invert() lands on flat white. Filters preserve alpha,
+ * so the transparent background stays transparent.
+ */
+.bitesites-credit--on-dark {
+  --bitesites-credit-rule: rgba(255, 255, 255, 0.14);
+  --bitesites-credit-copy-color: rgba(255, 255, 255, 0.4);
+  --bitesites-credit-eyebrow-color: rgba(255, 255, 255, 0.7);
+  --bitesites-credit-mark-color: #fff;
+}
+
+.bitesites-credit--on-dark .bitesites-morph-type img {
+  filter: brightness(0) invert(1);
+}
+
+@media (max-width: 700px) {
+  /*
+   * The fade is dropped here. On a short strip the credit line would otherwise
+   * sit invisible until the morph happened to run, and on a phone the footer is
+   * often the whole viewport already.
+   */
+  .bitesites-credit-inner {
+    gap: 18px;
+    min-height: 200px;
+  }
+
+  .bitesites-credit .bitesites-credit-copy,
+  .bitesites-credit .bitesites-credit-eyebrow {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bitesites-credit .bitesites-credit-copy,
+  .bitesites-credit .bitesites-credit-eyebrow {
+    transition: none;
+  }
+
+  .bitesites-morph-logo,
+  .bitesites-morph-type,
+  .bitesites-morph-type img {
+    will-change: auto;
+  }
+}

@@ -1,0 +1,58 @@
+/* The store locator: the map panel, the floating details card, and the pin.
+   The map's own colours are not here — they are the MapLibre style document in
+   branded-map-style.js, because vector tiles are painted by the renderer and
+   never become CSS-addressable elements. */
+
+.branded-map .map-panel { position: relative; isolation: isolate; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--soft); box-shadow: 0 18px 50px rgba(3,29,58,.09); }
+
+/* The canvas and its failure notice, wherever a map is drawn. Positioned so the
+   notice covers the map it is describing rather than the panel around it. */
+.map-frame { position: relative; }
+.branded-map .map-canvas { width: 100%; height: clamp(380px, 52vh, 560px); }
+
+/* Shown only when MapLibre could not start — no WebGL, a blocked chunk, an
+   offline visitor. The card underneath still carries the address, the phone
+   number, and the directions link, so this states the loss rather than
+   substituting a picture of a map for a map. */
+.map-notice { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; margin: 0; padding: 24px; text-align: center; color: var(--muted); font-size: .95rem; }
+
+/* --- The details card --------------------------------------------------- */
+
+/* Floated over the top-left of the map on wide screens and dropped below it on
+   narrow ones, where an overlay would cover the pin it is describing. */
+.map-card { position: absolute; top: 20px; left: 20px; z-index: 3; display: grid; justify-items: start; gap: 3px; max-width: min(calc(100% - 40px), 330px); border: 1px solid rgba(3,29,58,.1); border-radius: 18px; padding: 18px 20px 20px; background: rgba(255,255,255,.93); backdrop-filter: blur(14px); box-shadow: 0 14px 36px rgba(3,29,58,.16); }
+.map-card strong { font-size: 1.15rem; font-weight: 400; letter-spacing: 0; color: var(--navy); font-family: var(--display-font); font-style: italic; }
+.map-card > span { color: var(--muted); font-size: .87rem; font-weight: 600; line-height: 1.4; }
+.map-card-phone { margin-top: 2px; color: var(--blue); font-size: .87rem; font-weight: 800; text-decoration: none; }
+.map-card-phone:hover { text-decoration: underline; }
+.map-card .button { margin-top: 12px; min-height: 42px; font-size: .9rem; }
+
+/* --- The pin ------------------------------------------------------------ */
+
+/* MapLibre positions the marker by writing a transform onto this element's
+   parent, so the anchor itself must not be positioned — it only has to be the
+   right size and sit above its own shadow. */
+.store-pin { display: block; line-height: 0; cursor: pointer; filter: drop-shadow(0 6px 10px rgba(3,29,58,.32)); transition: transform .22s cubic-bezier(.22,.61,.36,1); transform-origin: 50% 100%; }
+.store-pin:hover, .store-pin:focus-visible { transform: scale(1.09); }
+.store-pin:focus-visible { outline: none; }
+.store-pin:focus-visible svg { border-radius: 50%; outline: 3px solid var(--blue); outline-offset: 3px; }
+
+/* --- MapLibre's own chrome ---------------------------------------------- */
+
+/* The zoom buttons and the attribution ship with square corners and a hard
+   white; these round them and settle them into the panel without touching
+   anything that would hide the OpenStreetMap credit. */
+.branded-map .maplibregl-ctrl-group { border-radius: 12px; overflow: hidden; box-shadow: 0 4px 14px rgba(3,29,58,.18); }
+.branded-map .maplibregl-ctrl-group button + button { border-top-color: var(--line); }
+.branded-map .maplibregl-ctrl-attrib { border-radius: 10px 0 0 0; font-size: 11px; }
+.branded-map .maplibregl-ctrl-attrib a { color: var(--muted); }
+
+/* MapLibre's cooperative-gesture veil — the "use ⌘ + scroll to zoom" panel —
+   defaults to a grey wash that fights the site's navy. */
+.branded-map .maplibregl-cooperative-gesture-screen { background: rgba(3,29,58,.55); font: inherit; font-weight: 700; }
+
+@media (max-width: 760px) {
+  .branded-map .map-canvas { height: 340px; }
+  .map-card { position: static; max-width: none; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: #fff; backdrop-filter: none; box-shadow: none; }
+  .map-card .button { width: 100%; }
+}
