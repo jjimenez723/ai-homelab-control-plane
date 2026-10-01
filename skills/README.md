@@ -5,8 +5,10 @@ loads every `SKILL.md` it finds here, without asking, as instructions. That
 is the whole reason this directory is small, is in Git, and changes only
 through a pull request a human read.
 
-Two skills live here today: `social-video-learner/` and
-`ui-design-system-builder/`.
+Three skills live here today: `social-video-learner/`,
+`ui-design-system-builder/`, and `bitesites-site-layer/`. The BiteSites skill
+carries the reusable agency footer attribution and neutral branded-map pattern;
+Oasis-specific values are kept only in its optional reference material.
 
 ## What may be added
 
