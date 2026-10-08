@@ -23,4 +23,4 @@ fonttools==4.65.0
 # pages just as well, because PyMuPDF is AGPL-licensed; pypdfium2 wraps
 # Google's PDFium and ships under Apache-2.0/BSD-3-Clause with prebuilt
 # wheels and no system library dependency.
-pypdfium2==5.13.0
+pypdfium2==5.14.0
