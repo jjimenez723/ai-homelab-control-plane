@@ -1,4 +1,4 @@
 # Angel Naming Lab -- local, interactive dev/eval UI (docs/23-naming-lab.md).
 # The first Streamlit usage in this repo; kept in its own requirements file
 # like requirements-ingest.txt / requirements-social-video.txt.
-streamlit==1.64.0
+streamlit==1.65.0
