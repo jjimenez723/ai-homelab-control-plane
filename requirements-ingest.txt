@@ -10,7 +10,7 @@ pypdf==6.18.1
 # cannot be fully parsed; that occurred in the owner's real corpus, making
 # this a demonstrated ingestion dependency rather than speculative optional
 # functionality.
-fonttools==4.65.0
+fonttools==4.66.1
 # Renders PDF pages to pixels so a scanned document (one with no usable
 # embedded text layer) can be OCRed or shown to a vision backend at all --
 # `tools/ingest/evidence/raster.py` is dead without it, and scanned-PDF OCR
