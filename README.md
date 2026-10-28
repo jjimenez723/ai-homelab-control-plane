@@ -443,3 +443,7 @@ cargo build --release --locked --manifest-path "$review_dir/Cargo.toml"
 ```
 
 Outputs are written under ignored `knowledge/social-video/<platform>/<content-id>/` with `source.json`, `transcript.md`, `digest.md`, `recommendations.md`, `claims.json`, `visual.json`, and representative `frames/`. Generated procedural material is written as an untrusted candidate under Angel `40-ai/skills/candidates/` when the configured volume UUID verifies, and otherwise under the gitignored `.state/social-video/skill-candidates/` — never under the trusted `skills/` tree. It is never installed, loaded, or executed automatically (D-061, `docs/26-skills-and-knowledge-trust.md`). Raw downloads and temporary extraction bundles are removed after processing. Anonymous Instagram access can fail when Instagram changes or restricts its extractor; the queue records the exact failure reason and does not use third-party download sites or request passwords.
+
+## License
+
+Released under the [MIT License](LICENSE). The two modules adapted from PaddleOCR keep their upstream Apache License 2.0 headers; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
