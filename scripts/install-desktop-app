@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DESKTOP_DIR="${ANGEL_DESKTOP_DIR:-$HOME/Desktop}"
+SOURCE_APP="$ROOT_DIR/build/Angel.app"
+DESKTOP_APP="$DESKTOP_DIR/Angel.app"
+
+"$ROOT_DIR/scripts/build-macos-app"
+mkdir -p "$DESKTOP_DIR"
+ditto --rsrc --extattr "$SOURCE_APP" "$DESKTOP_APP"
+
+echo "Installed: $DESKTOP_APP"
+echo "Double-click Angel.app on the desktop to launch it."

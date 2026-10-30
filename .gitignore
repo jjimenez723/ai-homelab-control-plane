@@ -13,6 +13,7 @@ artifacts/
 generated/
 build/
 dist/
+macos/AngelApp/.build/
 tmp/
 models/
 # The source registry package is tracked; model weights remain ignored above.
