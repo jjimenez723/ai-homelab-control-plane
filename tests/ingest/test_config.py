@@ -24,12 +24,45 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.evidence.transcription.backend, "null")
         self.assertIsNone(config.evidence.transcription.model_path)
         self.assertEqual(config.evidence.transcription.max_audio_seconds, 600)
+        self.assertFalse(config.archive.enabled)
+        self.assertIsNone(config.archive.profile_path)
+
+    def test_archive_routing_requires_a_profile_and_a_valid_service_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ingest.yaml"
+            path.write_text("archive:\n  enabled: true\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_config(path)
+            path.write_text("archive:\n  service_date: 25-10-2026\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_config(path)
+            path.write_text(
+                "archive:\n  enabled: true\n  profile_path: ~/archive-profile.yaml\n  service_date: 2026-10-25\n",
+                encoding="utf-8",
+            )
+            config = load_config(path)
+            self.assertTrue(config.archive.enabled)
+            self.assertEqual(config.archive.profile_path, Path("~/archive-profile.yaml").expanduser())
+            self.assertEqual(config.archive.service_date, "2026-10-25")
 
     def test_preserve_original_false_is_refused_at_load_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ingest.yaml"
             path.write_text("media:\n  heic_to_jpeg:\n    preserve_original: false\n", encoding="utf-8")
             with self.assertRaises(ValueError):
+                load_config(path)
+
+    def test_enabled_model_layer_rejects_remote_or_cloud_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ingest.yaml"
+            path.write_text(
+                "ai:\n"
+                "  enabled: true\n"
+                "  provider: ollama\n"
+                "  base_url: https://models.example.test\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "loopback"):
                 load_config(path)
 
     def test_video_frame_count_is_configurable(self):

@@ -59,6 +59,7 @@ class PlannedTransfer:
     rel_path: str
     source_volume_id: str
     source_class: str
+    destination_rel_path: str | None = None
 
 
 @dataclass
@@ -504,7 +505,7 @@ def transfer_file(
         asset_id,
         resolved_t7.inbox_dir,
         planned.source_class,
-        planned.rel_path,
+        planned.destination_rel_path or planned.rel_path,
         source_sha256,
     )
 

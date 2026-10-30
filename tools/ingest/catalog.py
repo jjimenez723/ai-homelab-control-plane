@@ -36,7 +36,7 @@ from tools.semantic.ids import (
 # Sidecar schema version. V3 records the content-aware asset identity model:
 # blobs are content identity; assets are source occurrences and paths may be
 # reused by multiple generations of bytes.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Transfer state machine. Ordered roughly by progress; retries resume from
 # wherever the previous attempt stopped instead of restarting blindly.
@@ -139,8 +139,94 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at TEXT,
   finished_at TEXT
 );
+
 """
 
+
+# Local-model analysis: append-only proposals, analysis/preflight runs, and
+# human-maintained person profiles with their confirmed observations.
+MODEL_ANALYSIS_SQL = """
+-- Model output is append-only proposal data. A future model version can write
+-- a new proposal without erasing provenance or a human correction.
+CREATE TABLE IF NOT EXISTS proposals (
+  proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT NOT NULL,
+  field TEXT NOT NULL,
+  value TEXT NOT NULL,
+  confidence REAL,
+  model TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  prompt_sha TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+);
+
+CREATE TABLE IF NOT EXISTS analysis_runs (
+  asset_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  input_sha256 TEXT NOT NULL,
+  model TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  prompt_sha TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(asset_id, stage, input_sha256, model, model_version, prompt_sha)
+);
+
+-- Pre-ingest analysis runs against source media that has not reached T7 yet.
+-- The full review record is kept so a UI/process restart can rebuild the
+-- review list without rerunning the model or trusting an in-memory plan.
+CREATE TABLE IF NOT EXISTS preflight_results (
+  result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_volume_id TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  source_size INTEGER NOT NULL,
+  source_mtime_ns INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  prompt_sha TEXT,
+  status TEXT NOT NULL,
+  result_json TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(source_volume_id, relative_path, source_size, source_mtime_ns, model, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS person_profiles (
+  profile_id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL DEFAULT 'global',
+  display_name TEXT NOT NULL UNIQUE,
+  aliases_json TEXT NOT NULL DEFAULT '[]',
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS person_observations (
+  asset_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  confidence REAL,
+  source TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '',
+  model TEXT,
+  model_version TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(asset_id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES person_profiles(profile_id)
+);
+
+CREATE TABLE IF NOT EXISTS correction_events (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT NOT NULL,
+  field TEXT NOT NULL,
+  value TEXT,
+  by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+"""
 
 def _migration_1_phase_1a(conn: sqlite3.Connection) -> None:
     """The original Phase 1A schema.
@@ -307,6 +393,16 @@ def _migration_7_semantic_metadata(conn: sqlite3.Connection) -> None:
     add_column_if_missing(conn, "semantic_classifications", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
 
 
+def _migration_8_model_analysis(conn: sqlite3.Connection) -> None:
+    """Local-model proposals, preflight results, and person profiles.
+
+    Catalogs created by the first model slice already have these tables but
+    not `person_profiles.scope`, so the column is added when missing.
+    """
+    conn.executescript(MODEL_ANALYSIS_SQL)
+    add_column_if_missing(conn, "person_profiles", "scope", "TEXT NOT NULL DEFAULT 'global'")
+
+
 MIGRATIONS = (
     _migration_1_phase_1a,
     _migration_2_file_intelligence,
@@ -315,6 +411,7 @@ MIGRATIONS = (
     _migration_5_naming_audit,
     _migration_6_semantic_catalog,
     _migration_7_semantic_metadata,
+    _migration_8_model_analysis,
 )
 
 
@@ -445,6 +542,19 @@ class Catalog(LedgerTables):
         """
         row = self._conn.execute("SELECT asset_id FROM assets WHERE final_path = ?", (final_path,)).fetchone()
         return row["asset_id"] if row is not None else None
+
+    def get_asset_by_final_path(self, final_path: str) -> Asset | None:
+        row = self._conn.execute("SELECT * FROM assets WHERE final_path = ?", (final_path,)).fetchone()
+        return Asset(dict(row)) if row is not None else None
+
+    def find_assets_by_sha256(self, sha256: str, *, exclude_asset_id: str | None = None) -> list[Asset]:
+        query = "SELECT * FROM assets WHERE sha256 = ?"
+        values: list[Any] = [sha256]
+        if exclude_asset_id is not None:
+            query += " AND asset_id != ?"
+            values.append(exclude_asset_id)
+        rows = self._conn.execute(query, values).fetchall()
+        return [Asset(dict(row)) for row in rows]
 
     def ensure_pending_asset(
         self,
@@ -756,6 +866,280 @@ class Catalog(LedgerTables):
             (asset_id, relative_path, source_sha256, destination_sha256, bytes_count, now_iso()),
         )
 
+
+    # -- model proposals and durable profile feedback ----------------------
+
+    def record_proposal(
+        self,
+        asset_id: str,
+        *,
+        field: str,
+        value: str,
+        confidence: float | None,
+        model: str,
+        model_version: str,
+        prompt_sha: str,
+        status: str = "pending",
+    ) -> int:
+        cursor = self._conn.execute(
+            """
+            INSERT INTO proposals(
+                asset_id, field, value, confidence, model, model_version,
+                prompt_sha, created_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (asset_id, field, value, confidence, model, model_version, prompt_sha, now_iso(), status),
+        )
+        return int(cursor.lastrowid)
+
+    def has_proposal(self, asset_id: str, *, field: str, value: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM proposals WHERE asset_id=? AND field=? AND value=? LIMIT 1",
+            (asset_id, field, value),
+        ).fetchone()
+        return row is not None
+
+    def begin_analysis_run(
+        self,
+        *,
+        asset_id: str,
+        stage: str,
+        input_sha256: str,
+        model: str,
+        model_version: str,
+        prompt_sha: str,
+    ) -> bool:
+        now = now_iso()
+        cursor = self._conn.execute(
+            """
+            INSERT INTO analysis_runs(
+                asset_id, stage, input_sha256, model, model_version, prompt_sha,
+                status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)
+            ON CONFLICT(asset_id, stage, input_sha256, model, model_version, prompt_sha)
+            DO UPDATE SET status='running', updated_at=excluded.updated_at
+            WHERE analysis_runs.status != 'succeeded'
+            """,
+            (asset_id, stage, input_sha256, model, model_version, prompt_sha, now, now),
+        )
+        if cursor.rowcount:
+            return True
+        row = self._conn.execute(
+            """
+            SELECT status FROM analysis_runs
+            WHERE asset_id=? AND stage=? AND input_sha256=? AND model=?
+              AND model_version=? AND prompt_sha=?
+            """,
+            (asset_id, stage, input_sha256, model, model_version, prompt_sha),
+        ).fetchone()
+        return row is None or row["status"] != "succeeded"
+
+    def finish_analysis_run(
+        self,
+        *,
+        asset_id: str,
+        stage: str,
+        input_sha256: str,
+        model: str,
+        model_version: str,
+        prompt_sha: str,
+        status: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            UPDATE analysis_runs SET status=?, updated_at=?
+            WHERE asset_id=? AND stage=? AND input_sha256=? AND model=?
+              AND model_version=? AND prompt_sha=?
+            """,
+            (status, now_iso(), asset_id, stage, input_sha256, model, model_version, prompt_sha),
+        )
+
+    def record_preflight_result(
+        self,
+        *,
+        source_volume_id: str,
+        source_path: str,
+        relative_path: str,
+        source_size: int,
+        source_mtime_ns: int,
+        model: str,
+        model_version: str,
+        prompt_sha: str | None,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Persist one source review result so preflight survives UI/process loss."""
+        now = now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO preflight_results(
+                source_volume_id, source_path, relative_path, source_size,
+                source_mtime_ns, model, model_version, prompt_sha, status,
+                result_json, error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(
+                source_volume_id, relative_path, source_size, source_mtime_ns,
+                model, model_version
+            ) DO UPDATE SET
+                source_path=excluded.source_path,
+                prompt_sha=excluded.prompt_sha,
+                status=excluded.status,
+                result_json=excluded.result_json,
+                error_message=excluded.error_message,
+                updated_at=excluded.updated_at
+            """,
+            (
+                source_volume_id,
+                source_path,
+                relative_path,
+                source_size,
+                source_mtime_ns,
+                model,
+                model_version,
+                prompt_sha,
+                status,
+                json.dumps(result, sort_keys=True) if result is not None else None,
+                error_message,
+                now,
+                now,
+            ),
+        )
+
+    def get_preflight_result(
+        self,
+        *,
+        source_volume_id: str,
+        relative_path: str,
+        source_size: int,
+        source_mtime_ns: int,
+        model: str,
+        model_version: str,
+    ) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM preflight_results
+            WHERE source_volume_id=? AND relative_path=? AND source_size=?
+              AND source_mtime_ns=? AND model=? AND model_version=?
+            """,
+            (source_volume_id, relative_path, source_size, source_mtime_ns, model, model_version),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["result"] = json.loads(result.pop("result_json")) if result.get("result_json") else None
+        return result
+
+    def upsert_person_profile(
+        self,
+        profile_id: str,
+        *,
+        display_name: str,
+        scope: str = "global",
+        aliases: list[str] | None = None,
+        notes: str = "",
+    ) -> None:
+        now = now_iso()
+        aliases_json = json.dumps(sorted({alias.strip() for alias in (aliases or []) if alias.strip()}))
+        self._conn.execute(
+            """
+            INSERT INTO person_profiles(profile_id, scope, display_name, aliases_json, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile_id) DO UPDATE SET
+                scope=excluded.scope,
+                display_name=excluded.display_name,
+                aliases_json=excluded.aliases_json,
+                notes=excluded.notes,
+                updated_at=excluded.updated_at
+            """,
+            (profile_id, scope.strip() or "global", display_name.strip(), aliases_json, notes.strip(), now, now),
+        )
+
+    def list_person_profiles(self, *, scope: str | None = None) -> list[dict[str, Any]]:
+        if scope is None:
+            rows = self._conn.execute("SELECT * FROM person_profiles ORDER BY display_name COLLATE NOCASE").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM person_profiles WHERE scope = ? ORDER BY display_name COLLATE NOCASE", (scope,)
+            ).fetchall()
+        profiles: list[dict[str, Any]] = []
+        for row in rows:
+            profile = dict(row)
+            profile["aliases"] = json.loads(profile.pop("aliases_json") or "[]")
+            profiles.append(profile)
+        return profiles
+
+    def record_person_observation(
+        self,
+        asset_id: str,
+        *,
+        profile_id: str,
+        confidence: float | None,
+        source: str,
+        evidence: str = "",
+        model: str | None = None,
+        model_version: str | None = None,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO person_observations(
+                asset_id, profile_id, confidence, source, evidence,
+                model, model_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asset_id, profile_id) DO UPDATE SET
+                confidence=excluded.confidence,
+                source=excluded.source,
+                evidence=excluded.evidence,
+                model=excluded.model,
+                model_version=excluded.model_version,
+                created_at=excluded.created_at
+            WHERE person_observations.source != 'human' OR excluded.source = 'human'
+            """,
+            (asset_id, profile_id, confidence, source, evidence, model, model_version, now_iso()),
+        )
+
+    def record_correction(self, asset_id: str, *, field: str, value: str, by: str = "human") -> None:
+        self._conn.execute(
+            "INSERT INTO correction_events(asset_id, field, value, by, created_at) VALUES (?, ?, ?, ?, ?)",
+            (asset_id, field, value, by, now_iso()),
+        )
+        self._conn.execute(
+            """
+            INSERT INTO corrections(asset_id, field, value, by, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(asset_id, field) DO UPDATE SET
+                value=excluded.value, by=excluded.by, created_at=excluded.created_at
+            """,
+            (asset_id, field, value, by, now_iso()),
+        )
+        self.update_asset(asset_id, human_reviewed=1)
+
+    def profile_context(self, *, scope: str | None = None) -> list[dict[str, Any]]:
+        """Return compact, human-maintained profile memory for model prompts."""
+        profiles = self.list_person_profiles(scope=scope)
+        for profile in profiles:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS count, MAX(created_at) AS last_seen
+                FROM person_observations WHERE profile_id = ?
+                """,
+                (profile["profile_id"],),
+            ).fetchone()
+            profile["observation_count"] = int(row["count"] or 0)
+            profile["last_seen"] = row["last_seen"]
+            examples = self._conn.execute(
+                """
+                SELECT o.asset_id, a.original_filename, o.evidence
+                FROM person_observations o
+                LEFT JOIN assets a ON a.asset_id = o.asset_id
+                WHERE o.profile_id = ? AND o.source = 'human'
+                ORDER BY o.created_at DESC LIMIT 12
+                """,
+                (profile["profile_id"],),
+            ).fetchall()
+            profile["confirmed_examples"] = [dict(example) for example in examples]
+        return profiles
+
     def begin_immediate(self) -> None:
         self._conn.execute("BEGIN IMMEDIATE")
 
@@ -851,6 +1235,10 @@ class Catalog(LedgerTables):
         derivative = self._conn.execute(
             "SELECT * FROM derivatives WHERE parent_asset_id = ?", (asset_id,)
         ).fetchall()
+        corrections = self._conn.execute(
+            "SELECT field, value, by, created_at FROM corrections WHERE asset_id = ? ORDER BY field",
+            (asset_id,),
+        ).fetchall()
         payload = {
             "schema_version": SCHEMA_VERSION,
             "asset_id": asset.row["asset_id"],
@@ -878,6 +1266,7 @@ class Catalog(LedgerTables):
                 "confidence": asset.row["classifier_confidence"],
             },
             "human_reviewed": bool(asset.row["human_reviewed"]),
+            "corrections": [dict(row) for row in corrections],
             "derivatives": [dict(row) for row in derivative],
             # Provenance that survives a pre-ingestion rename. `original_filename`
             # is the name at the moment of transfer; `first_seen_filename` and the

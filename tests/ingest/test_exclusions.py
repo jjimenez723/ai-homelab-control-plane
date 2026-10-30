@@ -19,6 +19,33 @@ from tests.ingest.helpers import build_config, touch_fresh, write_file
 
 
 class ExclusionTests(unittest.TestCase):
+    def test_macos_metadata_is_excluded_from_ingest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            desktop = Path(tmp) / "Desktop"
+            write_file(desktop / ".DS_Store")
+            write_file(desktop / "._photo.JPG")
+            write_file(desktop / ".fseventsd" / "fseventsd-uuid")
+            photo = write_file(desktop / "photo.JPG")
+            config = build_config(desktop=desktop)
+
+            scan = scan_source(desktop, config=config)
+
+            self.assertEqual([entry.path.name for entry in scan.eligible], [photo.name])
+            self.assertEqual(scan.exclusion_counts.get(ExclusionReason.MACOS_METADATA), 3)
+
+    def test_camera_metadata_stays_on_source_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sd = Path(tmp) / "SD"
+            write_file(sd / "DCIM" / "CANONMSC" / "M3100.CTG")
+            write_file(sd / "TOF4FOLDER" / "2026tom.to4")
+            write_file(sd / "DCIM" / "100CANON" / "photo.JPG")
+            config = build_config(desktop=sd)
+
+            scan = scan_source(sd, config=config)
+
+            self.assertEqual([entry.rel_path for entry in scan.eligible], [os.path.join("DCIM", "100CANON", "photo.JPG")])
+            self.assertEqual(scan.exclusion_counts.get(ExclusionReason.CAMERA_METADATA), 2)
+
     def test_file_still_changing_is_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "Desktop"

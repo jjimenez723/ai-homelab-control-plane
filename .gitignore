@@ -30,6 +30,10 @@ knowledge/
 # Machine-specific ingestion config (T7 UUID, real Desktop/Documents/Downloads
 # paths, registered SD UUIDs). Commit config/ingest.example.yaml instead.
 config/ingest.yaml
+# Archive category profiles hold real folder IDs for a specific archive.
+# Commit config/archive-profile.example.yaml instead.
+config/archive-profile.yaml
+
 # Measured model-role certifications (D-042, D-060). Machine-specific: a
 # certification names the exact local model digest/quantization that was
 # measured on this host, so it is local state, not a repository claim. The

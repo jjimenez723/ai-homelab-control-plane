@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -175,6 +176,139 @@ class CLIIntegrationTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Dry run. No files changed.", output)
         self.assertTrue((self.desktop / "photo.jpg").exists())
+
+    def test_json_dry_run_returns_reviewable_plan_and_stable_fingerprint(self):
+        write_file(self.sd_mount / "DCIM" / "IMG_0001.JPG", b"image")
+        config = build_config(
+            desktop=self.desktop,
+            t7_root=self.t7,
+            sd_volume_uuids=frozenset({SD_TEST_UUID}),
+            settle_seconds=1,
+        )
+        sd_volume = make_volume(SD_TEST_UUID, self.sd_mount, removable=True, label="SD_CARD")
+        prober = lambda: [sd_volume]  # noqa: E731
+
+        first_exit, first_output = self._run(config, ["sd", "--dry-run", "--json"], prober)
+        second_exit, second_output = self._run(config, ["sd", "--dry-run", "--json"], prober)
+
+        self.assertEqual(first_exit, 0)
+        self.assertEqual(second_exit, 0)
+        first = json.loads(first_output)
+        second = json.loads(second_output)
+        self.assertEqual(first["fingerprint"], second["fingerprint"])
+        self.assertEqual(first["summary"]["file_count"], 1)
+        self.assertEqual(first["analysis"]["status"], "not_run")
+        self.assertEqual(first["files"][0]["source_class"], "sd")
+        self.assertEqual(first["files"][0]["source_volume"], SD_TEST_UUID)
+        self.assertEqual(first["files"][0]["proposed_filename"], "IMG_0001.JPG")
+        self.assertEqual(
+            first["files"][0]["landing_destination"],
+            str(self.t7 / "00-inbox" / "organized" / "sd" / "DCIM" / "IMG_0001.JPG"),
+        )
+        self.assertTrue((self.sd_mount / "DCIM" / "IMG_0001.JPG").exists())
+
+    def test_apply_refuses_a_changed_reviewed_plan(self):
+        write_file(self.desktop / "photo.jpg", b"original")
+        config = build_config(desktop=self.desktop, t7_root=self.t7, settle_seconds=1)
+        prober = lambda: []  # noqa: E731
+
+        preview_exit, preview_output = self._run(config, ["desktop", "--dry-run", "--json"], prober)
+        self.assertEqual(preview_exit, 0)
+        fingerprint = json.loads(preview_output)["fingerprint"]
+        write_file(self.desktop / "photo.jpg", b"changed")
+
+        apply_exit, apply_output = self._run(
+            config,
+            ["desktop", "--apply", "--plan-fingerprint", fingerprint],
+            prober,
+        )
+        self.assertEqual(apply_exit, 2)
+        self.assertIn("source set changed", apply_output)
+        self.assertTrue((self.desktop / "photo.jpg").exists())
+
+    def test_approved_plan_controls_destination_and_subset(self):
+        write_file(self.desktop / "photo.jpg", b"original")
+        write_file(self.desktop / "leave.txt", b"leave")
+        config = build_config(desktop=self.desktop, t7_root=self.t7, settle_seconds=1)
+        prober = lambda: []  # noqa: E731
+
+        preview_exit, preview_output = self._run(config, ["desktop", "--dry-run", "--json"], prober)
+        self.assertEqual(preview_exit, 0)
+        preview = json.loads(preview_output)
+        approved_path = self.root / "approved.json"
+        approved_path.write_text(
+            json.dumps(
+                {
+                    "fingerprint": preview["fingerprint"],
+                    "files": [
+                        {
+                            "source_path": next(
+                                item["source_path"]
+                                for item in preview["files"]
+                                if item["current_filename"] == "photo.jpg"
+                            ),
+                            "destination_relative_path": "reviewed/photo-renamed.jpg",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        apply_exit, apply_output = self._run(
+            config,
+            ["desktop", "--apply", "--plan-fingerprint", preview["fingerprint"], "--approved-plan", str(approved_path)],
+            prober,
+        )
+        self.assertEqual(apply_exit, 0)
+        self.assertIn("1/1 transferred", apply_output)
+        self.assertFalse((self.desktop / "photo.jpg").exists())
+        self.assertTrue((self.desktop / "leave.txt").exists())
+        self.assertTrue(
+            (self.t7 / "00-inbox" / "organized" / "desktop" / "reviewed" / "photo-renamed.jpg").exists()
+        )
+
+    def test_approved_plan_rejects_absolute_and_parent_destinations(self):
+        write_file(self.desktop / "photo.jpg", b"original")
+        config = build_config(desktop=self.desktop, t7_root=self.t7, settle_seconds=1)
+        prober = lambda: []  # noqa: E731
+
+        preview_exit, preview_output = self._run(config, ["desktop", "--dry-run", "--json"], prober)
+        self.assertEqual(preview_exit, 0)
+        preview = json.loads(preview_output)
+        source_path = preview["files"][0]["source_path"]
+
+        for unsafe_destination in ("../outside.txt", "/tmp/outside.txt"):
+            approved_path = self.root / "approved-unsafe.json"
+            approved_path.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": preview["fingerprint"],
+                        "files": [
+                            {
+                                "source_path": source_path,
+                                "destination_relative_path": unsafe_destination,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            apply_exit, apply_output = self._run(
+                config,
+                [
+                    "desktop",
+                    "--apply",
+                    "--plan-fingerprint",
+                    preview["fingerprint"],
+                    "--approved-plan",
+                    str(approved_path),
+                ],
+                prober,
+            )
+            self.assertEqual(apply_exit, 2)
+            self.assertIn("invalid approved destination", apply_output)
+            self.assertTrue((self.desktop / "photo.jpg").exists())
 
 
 if __name__ == "__main__":

@@ -25,6 +25,26 @@ class ExclusionReason:
     EXTRA_PATH = "excluded_path"
     SELF_REPO = "control_plane_repo"
     DESTINATION = "destination_volume"
+    MACOS_METADATA = "macos_metadata"
+    CAMERA_METADATA = "camera_metadata"
+
+
+_MACOS_METADATA_DIRS = frozenset({
+    ".fseventsd",
+    ".spotlight-v100",
+    ".temporaryitems",
+    ".trashes",
+})
+
+
+def is_macos_metadata_dir(directory: Path) -> bool:
+    """Skip volume metadata that is never a user-owned ingest candidate."""
+    return directory.name.lower() in _MACOS_METADATA_DIRS
+
+
+def is_macos_metadata_file(file_path: Path) -> bool:
+    """Skip Finder/resource-fork sidecars while keeping the real media file."""
+    return file_path.name == ".DS_Store" or file_path.name.startswith("._")
 
 
 def is_git_repo_dir(directory: Path) -> bool:
@@ -65,6 +85,13 @@ def is_incomplete_download(path: Path, config: ExclusionsConfig) -> bool:
         if path.with_name(f"{path.name}{suffix}").exists():
             return True
     return False
+
+
+def is_camera_metadata_file(file_path: Path, config: ExclusionsConfig) -> bool:
+    """Keep camera catalog/sidecar data on the card with the camera media."""
+    if file_path.suffix.lower() in config.camera_metadata_suffixes:
+        return True
+    return any(part.lower() in config.camera_metadata_dir_names for part in file_path.parts)
 
 
 def is_settled(file_path: Path, settle_seconds: int, *, now: float | None = None) -> bool:
