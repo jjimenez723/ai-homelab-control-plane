@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+# One-command setup for Angel on an Apple silicon Mac.
+#
+# Takes a fresh clone of this repository to a working ~/Desktop/Angel.app:
+# installs Python 3, Ollama and ffmpeg with Homebrew when they are missing,
+# starts the local Ollama service, pulls the default local model, creates the
+# .venv Python environment, and builds the app.
+#
+# SAFE BY DEFAULT: it never formats or mounts a disk, never moves or deletes
+# your files, never uses sudo, and never configures credentials or cloud
+# access. Running it again only fills in what is still missing.
+#
+# `--check` reports what is present and what is missing, and changes nothing.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+CONFIG_EXAMPLE="$ROOT_DIR/config/ingest.example.yaml"
+CONFIG_PATH="$ROOT_DIR/config/ingest.yaml"
+REQUIREMENTS="$ROOT_DIR/requirements-ingest.txt"
+VENV_DIR="$ROOT_DIR/.venv"
+VENV_PY="$VENV_DIR/bin/python3"
+BUILT_APP="$ROOT_DIR/build/Angel.app"
+DESKTOP_APP="${ANGEL_DESKTOP_DIR:-$HOME/Desktop}/Angel.app"
+OLLAMA_URL="http://127.0.0.1:11434"
+OLLAMA_LOG="$ROOT_DIR/build/ollama-serve.log"
+
+MIN_MACOS_MAJOR=14
+MIN_PYTHON_MINOR=10    # Python 3.10+ (Pillow 12 needs it; CI runs 3.12)
+MIN_SWIFT="6.3"        # macos/AngelApp/Package.swift: swift-tools-version 6.3
+DEFAULT_MODEL="qwen3.5:4b"
+# Printed for the user to run, never run here; the quotes are deliberate.
+# shellcheck disable=SC2016
+HOMEBREW_INSTALL='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+CHECK_ONLY=0
+MISSING=0
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/setup-angel [--check]
+
+Sets up Angel on this Mac in one go:
+  1. checks for Apple silicon, macOS 14 or later, and Homebrew
+  2. installs Python 3, Ollama and ffmpeg with Homebrew if they are missing
+  3. starts Ollama and pulls the default local model (ai.model in the config)
+  4. creates .venv and installs requirements-ingest.txt
+  5. checks for Xcode's Swift 6.3+ and builds ~/Desktop/Angel.app
+
+Options:
+  --check     Report what is present and what is missing; install nothing.
+  -h, --help  Show this help.
+
+Environment:
+  ANGEL_MODEL        Pull this Ollama model instead of the configured one.
+  ANGEL_DESKTOP_DIR  Install Angel.app here instead of ~/Desktop.
+
+It never formats a disk, moves or deletes your files, uses sudo, or sets up
+credentials. Running it again only fills in what is missing.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check)
+      CHECK_ONLY=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------- output ---
+
+step() { printf '\n==> %s\n' "$*"; }
+ok() { printf '  [ok]      %s\n' "$*"; }
+todo() {
+  # In --check mode: something setup would install or create.
+  printf '  [missing] %s\n' "$*"
+  MISSING=1
+}
+fail() {
+  # Something this script cannot fix by itself. Stops a real run.
+  printf '  [stop]    %s\n' "$1" >&2
+  shift
+  local line
+  for line in "$@"; do
+    printf '            %s\n' "$line" >&2
+  done
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then
+    MISSING=1
+  else
+    echo >&2
+    echo "Setup stopped. Fix the item above, then run ./scripts/setup-angel again." >&2
+    exit 1
+  fi
+}
+
+# --------------------------------------------------------------- helpers ---
+
+# major.minor version comparison: version_at_least 6.3.3 6.3 -> true
+version_at_least() {
+  local have="$1" want="$2"
+  local have_major have_minor want_major want_minor
+  have_major="${have%%.*}"
+  have_minor="${have#*.}"; have_minor="${have_minor%%.*}"
+  want_major="${want%%.*}"
+  want_minor="${want#*.}"; want_minor="${want_minor%%.*}"
+  [[ "$have_minor" == "$have" ]] && have_minor=0
+  [[ "$have_major" =~ ^[0-9]+$ && "$have_minor" =~ ^[0-9]+$ ]] || return 1
+  (( have_major > want_major || (have_major == want_major && have_minor >= want_minor) ))
+}
+
+python_ok() {
+  # True if $1 is a Python 3.MIN_PYTHON_MINOR+ interpreter.
+  [[ -x "$1" ]] || return 1
+  "$1" -c "import sys; sys.exit(0 if sys.version_info >= (3, $MIN_PYTHON_MINOR) else 1)" >/dev/null 2>&1
+}
+
+python_version() {
+  "$1" -c 'import platform; print(platform.python_version())' 2>/dev/null || echo "unknown"
+}
+
+find_python() {
+  # Prefer Homebrew's python3; Xcode's /usr/bin/python3 is usually too old.
+  local candidate
+  for candidate in "${BREW_PREFIX:+$BREW_PREFIX/bin/python3}" "$(command -v python3 || true)"; do
+    if [[ -n "$candidate" ]] && python_ok "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_ollama() {
+  if command -v ollama >/dev/null 2>&1; then
+    command -v ollama
+  elif [[ -x "/Applications/Ollama.app/Contents/Resources/ollama" ]]; then
+    echo "/Applications/Ollama.app/Contents/Resources/ollama"
+  else
+    return 1
+  fi
+}
+
+ollama_running() {
+  curl -fsS -m 3 "$OLLAMA_URL/api/version" >/dev/null 2>&1
+}
+
+configured_model() {
+  # ai.model from the local config if it exists, else from the example.
+  local config="$CONFIG_EXAMPLE" model=""
+  [[ -f "$CONFIG_PATH" ]] && config="$CONFIG_PATH"
+  if [[ -f "$config" ]]; then
+    model="$(awk '
+      /^[^[:space:]#]/ { in_ai = ($0 ~ /^ai:/); next }
+      in_ai && /^  model:/ {
+        sub(/^  model:[[:space:]]*/, "")
+        sub(/[[:space:]]+#.*$/, "")
+        gsub(/["\047]/, "")
+        print
+        exit
+      }
+    ' "$config")"
+  fi
+  echo "${model:-$DEFAULT_MODEL}"
+}
+
+swift_version() {
+  swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p' | head -n 1
+}
+
+# ------------------------------------------------------------ 1. this Mac ---
+
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  echo "Angel setup check (nothing will be installed or changed)"
+else
+  echo "Angel setup"
+fi
+echo "Project folder: $ROOT_DIR"
+
+step "This Mac"
+
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  fail "Run this as your normal user, not with sudo or as root."
+fi
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  fail "Angel is a macOS app; this is $(uname -s)."
+fi
+
+if [[ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" != "1" ]]; then
+  fail "Angel needs an Apple silicon Mac (M1 or later). This Mac has an Intel processor."
+elif [[ "$(uname -m)" != "arm64" ]]; then
+  fail "This terminal is running under Rosetta (x86_64)." \
+    "Open Terminal without \"Open using Rosetta\" and run setup again."
+else
+  ok "Apple silicon ($(uname -m))"
+fi
+
+MACOS_VERSION="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+if (( ${MACOS_VERSION%%.*} >= MIN_MACOS_MAJOR )); then
+  ok "macOS $MACOS_VERSION"
+else
+  fail "Angel needs macOS $MIN_MACOS_MAJOR (Sonoma) or later; this Mac has macOS $MACOS_VERSION." \
+    "Update macOS in System Settings > General > Software Update, then run setup again."
+fi
+
+# ------------------------------------------------------------- 2. Homebrew ---
+
+step "Homebrew"
+
+BREW_BIN="$(command -v brew || true)"
+if [[ -z "$BREW_BIN" && -x /opt/homebrew/bin/brew ]]; then
+  BREW_BIN=/opt/homebrew/bin/brew
+fi
+BREW_PREFIX=""
+if [[ -n "$BREW_BIN" ]]; then
+  # Homebrew's own environment, for shells that have not loaded it yet.
+  eval "$("$BREW_BIN" shellenv)"
+  BREW_PREFIX="$("$BREW_BIN" --prefix)"
+  ok "Homebrew ($BREW_BIN)"
+else
+  fail "Homebrew is required to install Python and Ollama. Install it with:" \
+    "" \
+    "$HOMEBREW_INSTALL" \
+    "" \
+    "Follow the \"Next steps\" it prints to add brew to your PATH," \
+    "then run ./scripts/setup-angel again."
+fi
+
+# --------------------------------------------------------- 3. Python 3 ---
+
+step "Python 3"
+
+PYTHON_BIN="$(find_python || true)"
+if [[ -n "$PYTHON_BIN" ]]; then
+  ok "Python $(python_version "$PYTHON_BIN") ($PYTHON_BIN)"
+elif [[ "$CHECK_ONLY" -eq 1 ]]; then
+  todo "Python 3.$MIN_PYTHON_MINOR or later (setup installs it with: brew install python)"
+elif [[ -n "$BREW_BIN" ]]; then
+  echo "Installing Python with Homebrew..."
+  brew install python
+  hash -r
+  PYTHON_BIN="$(find_python || true)"
+  if [[ -z "$PYTHON_BIN" ]]; then
+    fail "Homebrew installed Python, but no python3 3.$MIN_PYTHON_MINOR+ could be found on PATH."
+  fi
+  ok "Python $(python_version "$PYTHON_BIN") ($PYTHON_BIN)"
+fi
+
+# ------------------------------------------------------ 4. Ollama + model ---
+
+step "Ollama and the local model"
+
+OLLAMA_BIN="$(find_ollama || true)"
+if [[ -n "$OLLAMA_BIN" ]]; then
+  ok "Ollama ($OLLAMA_BIN)"
+elif [[ "$CHECK_ONLY" -eq 1 ]]; then
+  todo "Ollama (setup installs it with: brew install ollama)"
+else
+  echo "Installing Ollama with Homebrew..."
+  brew install ollama
+  hash -r
+  OLLAMA_BIN="$(find_ollama || true)"
+  if [[ -z "$OLLAMA_BIN" ]]; then
+    fail "Homebrew installed Ollama, but its command could not be found."
+  fi
+  ok "Ollama ($OLLAMA_BIN)"
+fi
+
+if ollama_running; then
+  ok "Ollama is running at $OLLAMA_URL"
+elif [[ "$CHECK_ONLY" -eq 1 ]]; then
+  todo "Ollama is not running (setup starts it with: brew services start ollama)"
+elif [[ -n "$OLLAMA_BIN" ]]; then
+  echo "Starting the local Ollama service..."
+  if "$BREW_BIN" list --formula ollama >/dev/null 2>&1; then
+    # A login service, so Ollama is also there after a restart.
+    "$BREW_BIN" services start ollama
+  elif [[ -d /Applications/Ollama.app ]]; then
+    open -a Ollama
+  else
+    mkdir -p "$(dirname "$OLLAMA_LOG")"
+    nohup "$OLLAMA_BIN" serve >"$OLLAMA_LOG" 2>&1 &
+    disown "$!" 2>/dev/null || true
+  fi
+  for _ in {1..30}; do
+    ollama_running && break
+    sleep 1
+  done
+  if ollama_running; then
+    ok "Ollama is running at $OLLAMA_URL"
+  else
+    fail "Ollama did not start within 30 seconds." \
+      "Open the Ollama app (or run: brew services restart ollama), then run setup again."
+  fi
+fi
+
+MODEL="${ANGEL_MODEL:-$(configured_model)}"
+if [[ -z "$OLLAMA_BIN" ]] || ! ollama_running; then
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then
+    todo "Model $MODEL (cannot check until Ollama is running; setup pulls it)"
+  fi
+elif "$OLLAMA_BIN" show "$MODEL" >/dev/null 2>&1; then
+  ok "Model $MODEL"
+elif [[ "$CHECK_ONLY" -eq 1 ]]; then
+  todo "Model $MODEL (setup pulls it with: ollama pull $MODEL)"
+else
+  echo "Pulling $MODEL (a few GB the first time; it stays on this Mac)..."
+  "$OLLAMA_BIN" pull "$MODEL"
+  ok "Model $MODEL"
+fi
+
+# ffmpeg/ffprobe sample frames for video analysis; without them Angel cannot
+# analyze videos at all.
+if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+  ok "ffmpeg (for video analysis)"
+elif [[ "$CHECK_ONLY" -eq 1 ]]; then
+  todo "ffmpeg, used for video analysis (setup installs it with: brew install ffmpeg)"
+elif [[ -n "$BREW_BIN" ]]; then
+  echo "Installing ffmpeg with Homebrew (used for video analysis)..."
+  brew install ffmpeg
+  hash -r
+  ok "ffmpeg (for video analysis)"
+fi
+
+# ---------------------------------------------- 5. Python environment ---
+
+step "Python environment"
+
+if [[ -x "$VENV_PY" ]] && ! python_ok "$VENV_PY"; then
+  fail "The existing .venv uses Python $(python_version "$VENV_PY"); Angel needs 3.$MIN_PYTHON_MINOR or later." \
+    "Move it aside (mv .venv .venv.old) and run setup again."
+fi
+
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  if [[ ! -x "$VENV_PY" ]]; then
+    todo ".venv (setup creates it and installs requirements-ingest.txt)"
+  elif "$VENV_PY" -c 'import yaml, PIL, pillow_heif, pypdf, fontTools, pypdfium2' >/dev/null 2>&1; then
+    ok ".venv with requirements-ingest.txt (Python $(python_version "$VENV_PY"))"
+  else
+    todo ".venv exists but requirements-ingest.txt is not fully installed (setup installs it)"
+  fi
+elif [[ -n "$PYTHON_BIN" ]]; then
+  if [[ ! -x "$VENV_PY" ]]; then
+    echo "Creating .venv..."
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+  fi
+  echo "Installing requirements-ingest.txt into .venv..."
+  "$VENV_PY" -m pip install --disable-pip-version-check --quiet -r "$REQUIREMENTS"
+  ok ".venv with requirements-ingest.txt (Python $(python_version "$VENV_PY"))"
+fi
+
+if [[ -f "$CONFIG_PATH" ]]; then
+  ok "config/ingest.yaml"
+elif [[ "$CHECK_ONLY" -eq 1 ]]; then
+  todo "config/ingest.yaml (setup copies it from config/ingest.example.yaml)"
+else
+  # Machine-local and ignored by git; never overwritten once it exists.
+  cp "$CONFIG_EXAMPLE" "$CONFIG_PATH"
+  ok "config/ingest.yaml (created from config/ingest.example.yaml)"
+fi
+
+# -------------------------------------------------------- 6. Angel.app ---
+
+step "Angel.app"
+
+XCODE_HINT="Install Xcode from the App Store, open it once to finish setup, then run setup again."
+SWIFT_VERSION=""
+if ! xcode-select -p >/dev/null 2>&1; then
+  fail "Xcode is required to build Angel.app." "$XCODE_HINT"
+else
+  SWIFT_VERSION="$(swift_version)"
+  if [[ -z "$SWIFT_VERSION" ]]; then
+    fail "The Swift toolchain did not run (swift --version failed)." \
+      "$XCODE_HINT" \
+      "If Xcode is already installed, open it once and accept its license."
+    SWIFT_VERSION=""
+  elif ! version_at_least "$SWIFT_VERSION" "$MIN_SWIFT"; then
+    fail "Angel.app needs Swift $MIN_SWIFT or later; this Mac has Swift $SWIFT_VERSION." \
+      "Update Xcode from the App Store, open it once, then run setup again."
+    SWIFT_VERSION=""
+  else
+    ok "Swift $SWIFT_VERSION ($(xcode-select -p))"
+  fi
+fi
+
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  if [[ -d "$DESKTOP_APP" ]]; then
+    ok "Angel.app installed at $DESKTOP_APP"
+  else
+    todo "Angel.app at $DESKTOP_APP (setup builds it with scripts/install-desktop-app)"
+  fi
+elif [[ -n "$SWIFT_VERSION" ]]; then
+  echo "Building Angel.app (the first build takes a few minutes)..."
+  "$ROOT_DIR/scripts/install-desktop-app"
+  ok "Angel.app built at $BUILT_APP and installed at $DESKTOP_APP"
+fi
+
+# ----------------------------------------------------------- 7. finish ---
+
+echo
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  if [[ "$MISSING" -eq 0 ]]; then
+    echo "Everything Angel needs is in place."
+    exit 0
+  fi
+  echo "Some items are missing. Run ./scripts/setup-angel to install them."
+  exit 1
+fi
+
+cat <<EOF
+Angel setup is complete.
+
+Next:
+  1. Open Angel.app on your Desktop:  open "$DESKTOP_APP"
+  2. If Angel asks for its project folder, choose this folder:
+       $ROOT_DIR
+  3. Point it at a card or the files you want filed. Angel proposes names and
+     folders; nothing moves until you approve it.
+
+The model runs locally through Ollama. No credentials or cloud access were
+configured, and no files were moved or deleted.
+Run ./scripts/setup-angel --check at any time to see what is installed.
+EOF

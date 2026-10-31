@@ -1,5 +1,27 @@
 # Angel macOS app
 
+## Quick setup
+
+On an Apple silicon Mac with macOS 14 or later, [Homebrew](https://brew.sh)
+and Xcode installed:
+
+```bash
+git clone https://github.com/jjimenez723/ai-homelab-control-plane.git && cd ai-homelab-control-plane && ./scripts/setup-angel
+```
+
+`scripts/setup-angel` installs Python 3, Ollama and ffmpeg with Homebrew if
+they are missing, starts Ollama, pulls the default local model (`ai.model` in
+`config/ingest.example.yaml`), creates `.venv` with `requirements-ingest.txt`,
+and builds `~/Desktop/Angel.app`. Then open Angel.app and, if it asks, choose
+the folder you cloned.
+
+It is safe to run again: it only fills in what is missing. It never formats a
+disk, moves or deletes files, uses sudo, or sets up credentials. Run
+`./scripts/setup-angel --check` to see what is present and what is missing
+without installing anything.
+
+## Details
+
 This directory contains the native SwiftUI control surface for Angel. The app
 intentionally delegates file operations to the existing, tested scripts in the
 selected Angel project folder. The model action delegates to
@@ -30,7 +52,8 @@ The GitHub build is an arm64 app bundle intended for local distribution. The
 app icon is built from `Resources/AppIcon.icns` and is included in both the
 Swift Package build and the Xcode target.
 
-Build and install the app on the current user's Desktop with:
+`scripts/setup-angel` runs this step for you. To rebuild and reinstall only
+the app on the current user's Desktop, run:
 
 ```bash
 ./scripts/install-desktop-app
