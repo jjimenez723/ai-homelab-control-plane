@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DIST_DIR="${ANGEL_DIST_DIR:-$ROOT_DIR/dist}"
+APP_DIR="$ROOT_DIR/build/Angel.app"
+ARCHIVE="$DIST_DIR/Angel-macOS-arm64.zip"
+
+"$ROOT_DIR/scripts/build-macos-app"
+mkdir -p "$DIST_DIR"
+rm -f "$ARCHIVE"
+ditto -c -k --norsrc --keepParent "$APP_DIR" "$ARCHIVE"
+shasum -a 256 "$ARCHIVE"
+echo "$ARCHIVE"

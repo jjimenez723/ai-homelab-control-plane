@@ -1,0 +1,41 @@
+# Example archive profile for `archive.profile_path` in config/ingest.yaml.
+# Copy to config/archive-profile.yaml (ignored by git) and replace the
+# placeholder folder IDs with the verified IDs of your own archive. The model
+# only ever sees category names and keywords; prefixes and folder IDs are
+# resolved locally after analysis.
+root_name: "Archive"
+year: "2026"
+categories:
+  Weddings:
+    prefix: WED
+    archive_folder_name: "1. Weddings"
+    folder_id: "REPLACE-WITH-FOLDER-ID"
+    media_folder_ids:
+      Pics: "REPLACE-WITH-FOLDER-ID"
+      Vids: "REPLACE-WITH-FOLDER-ID"
+    # Optional: the live child folder names, when they differ from Pics/Vids.
+    media_folder_names:
+      Vids: "Videos"
+    keywords: [ceremony, reception, bride, groom]
+  Portraits:
+    prefix: null          # no prefix yet: matching files stay in review
+    archive_folder_name: "2. Portraits"
+    folder_id: "REPLACE-WITH-FOLDER-ID"
+    media_folder_ids:
+      Pics: "REPLACE-WITH-FOLDER-ID"
+    keywords: [headshot, studio, portrait]
+  Commercial:
+    prefix: COM
+    archive_folder_name: "3. Commercial"
+    folder_id: "REPLACE-WITH-FOLDER-ID"
+    media_folder_ids:
+      Pics: "REPLACE-WITH-FOLDER-ID"
+    nested_paths:
+      "Spring Launch":
+        folder_id: "REPLACE-WITH-FOLDER-ID"
+        media_folder_ids: {}
+    keywords: [product, brand, launch]
+# Normalized alias (lowercase, single spaces) -> canonical category.
+aliases:
+  wedding: Weddings
+  headshots: Portraits

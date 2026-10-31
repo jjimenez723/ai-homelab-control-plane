@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ -x "$ROOT_DIR/.venv/bin/python3" ]]; then
+  PYTHON="$ROOT_DIR/.venv/bin/python3"
+else
+  PYTHON="python3"
+fi
+
+exec "$PYTHON" -m tools.ingest.model_cli "$@"

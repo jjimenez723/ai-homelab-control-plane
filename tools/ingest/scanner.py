@@ -16,13 +16,17 @@ from tools.ingest.exclusions import (
     ExclusionReason,
     has_keep_local_marker,
     is_bundle_dir,
+    is_camera_metadata_file,
     is_excluded_dir_name,
     is_git_repo_dir,
     is_incomplete_download,
+    is_macos_metadata_dir,
+    is_macos_metadata_file,
     is_settled,
     symlink_escapes_root,
     under_any,
 )
+from tools.ingest.media_kind import classify_media
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,7 @@ class EligibleFile:
     rel_path: str
     size: int
     mtime: float
+    mtime_ns: int
 
 
 @dataclass(frozen=True)
@@ -39,11 +44,19 @@ class GitRepoInfo:
     rel_path: str
 
 
+@dataclass(frozen=True)
+class MediaReviewFile:
+    path: Path
+    rel_path: str
+    reason: str
+
+
 @dataclass
 class ScanResult:
     root: Path
     eligible: list[EligibleFile] = field(default_factory=list)
     git_repos: list[GitRepoInfo] = field(default_factory=list)
+    media_review: list[MediaReviewFile] = field(default_factory=list)
     exclusion_counts: dict[str, int] = field(default_factory=dict)
     missing: bool = False
 
@@ -57,6 +70,7 @@ def scan_source(
     *,
     config: IngestConfig,
     extra_exclude_paths: tuple[Path, ...] = (),
+    media_only: bool = False,
 ) -> ScanResult:
     # Preserve the caller's lexical path in results.  On macOS `/var` is a
     # symlink to `/private/var`; resolving here made a read-only scan report a
@@ -70,6 +84,7 @@ def scan_source(
     counts: dict[str, int] = defaultdict(int)
     eligible: list[EligibleFile] = []
     git_repos: list[GitRepoInfo] = []
+    media_review: list[MediaReviewFile] = []
 
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         current = Path(dirpath)
@@ -86,6 +101,9 @@ def scan_source(
                     counts[ExclusionReason.SYMLINK_ESCAPE] += 1
                 else:
                     counts[ExclusionReason.SYMLINK] += 1
+                continue
+            if is_macos_metadata_dir(sub):
+                counts[ExclusionReason.MACOS_METADATA] += 1
                 continue
             if exclude_paths and under_any(sub, exclude_paths):
                 counts[ExclusionReason.EXTRA_PATH] += 1
@@ -118,6 +136,12 @@ def scan_source(
                 else:
                     counts[ExclusionReason.SYMLINK] += 1
                 continue
+            if is_macos_metadata_file(file_path):
+                counts[ExclusionReason.MACOS_METADATA] += 1
+                continue
+            if is_camera_metadata_file(file_path, config.exclusions):
+                counts[ExclusionReason.CAMERA_METADATA] += 1
+                continue
             if is_incomplete_download(file_path, config.exclusions):
                 counts[ExclusionReason.INCOMPLETE_DOWNLOAD] += 1
                 continue
@@ -128,13 +152,32 @@ def scan_source(
                 stat = file_path.stat()
             except OSError:
                 continue
+            if media_only:
+                classification = classify_media(file_path)
+                if classification.route_type is None:
+                    media_review.append(
+                        MediaReviewFile(
+                            path=file_path,
+                            rel_path=str(file_path.relative_to(root)),
+                            reason=classification.reason,
+                        )
+                    )
+                    counts["media_review"] += 1
+                    continue
             eligible.append(
                 EligibleFile(
                     path=file_path,
                     rel_path=str(file_path.relative_to(root)),
                     size=stat.st_size,
                     mtime=stat.st_mtime,
+                    mtime_ns=stat.st_mtime_ns,
                 )
             )
 
-    return ScanResult(root=root, eligible=eligible, git_repos=git_repos, exclusion_counts=dict(counts))
+    return ScanResult(
+        root=root,
+        eligible=eligible,
+        git_repos=git_repos,
+        media_review=media_review,
+        exclusion_counts=dict(counts),
+    )

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT="$ROOT_DIR/macos/AngelApp/AngelApp.xcodeproj"
+ARCHIVE_PATH="${ANGEL_ARCHIVE_PATH:-$ROOT_DIR/build/Angel.xcarchive}"
+
+if [[ -z "${DEVELOPMENT_TEAM:-}" || -z "${SIGNING_IDENTITY:-}" || -z "${PROVISIONING_PROFILE_SPECIFIER:-}" ]]; then
+  echo "Set DEVELOPMENT_TEAM, SIGNING_IDENTITY, and PROVISIONING_PROFILE_SPECIFIER before archiving." >&2
+  exit 2
+fi
+
+rm -rf "$ARCHIVE_PATH"
+xcodebuild \
+  -project "$PROJECT" \
+  -scheme AngelApp \
+  -configuration Release \
+  -destination 'generic/platform=macOS' \
+  -archivePath "$ARCHIVE_PATH" \
+  CODE_SIGN_STYLE=Manual \
+  CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+  DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+  PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER" \
+  archive
+
+echo "$ARCHIVE_PATH"

@@ -18,6 +18,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from tools.ingest.archive_profile import archive_profile_for
 from tools.ingest.automation import (
     RunLockBusy,
     RunLockLost,
@@ -47,6 +48,7 @@ from tools.ingest.ledger import (
     LocalLedger,
 )
 from tools.ingest.pipeline import PipelineReport, run_pipeline
+from tools.ingest.plan import PreviewPlan, attach_preflight_analysis, build_preview_plan
 from tools.ingest.provenance import attach_local_provenance, read_local_provenance
 from tools.ingest.status import collect_status, render_doctor, render_status
 from tools.ingest.derivatives import maybe_generate_heic_derivative
@@ -74,11 +76,14 @@ EXCLUSION_LABELS = {
     ExclusionReason.DIR_NAME: "excluded directories (node_modules/venv/etc.)",
     ExclusionReason.BUNDLE: "application/package bundles",
     ExclusionReason.INCOMPLETE_DOWNLOAD: "active downloads",
+    ExclusionReason.MACOS_METADATA: "macOS metadata/resource forks",
+    ExclusionReason.CAMERA_METADATA: "camera metadata/sidecars (kept on source card)",
     ExclusionReason.STILL_CHANGING: "files still changing",
     ExclusionReason.SYMLINK_ESCAPE: "symlinks escaping the source root",
     ExclusionReason.SYMLINK: "symlinks",
     ExclusionReason.KEEP_LOCAL: "keep-local paths",
     ExclusionReason.EXTRA_PATH: "excluded paths",
+    "media_review": "non-media or ambiguous media held for review",
 }
 
 LOCAL_VOLUME_ID = "mac-local"
@@ -157,6 +162,51 @@ def _print_git_repos(scans: dict[tuple[str, str], ScanResult], limit: int = 10) 
         print(f"  ... and {len(all_repos) - limit} more")
 
 
+def _print_media_review(scans: dict[tuple[str, str], ScanResult], limit: int = 20) -> None:
+    reviewed = [item for scan in scans.values() for item in scan.media_review]
+    if not reviewed:
+        return
+    print(f"\nMedia held for review (not staged): {len(reviewed)}")
+    for item in reviewed[:limit]:
+        print(f"  {item.path} — {item.reason}")
+    if len(reviewed) > limit:
+        print(f"  ... and {len(reviewed) - limit} more")
+
+
+def _print_plan(plan: PreviewPlan) -> None:
+    print("\nReview plan:")
+    if not plan.files:
+        print("  No eligible files found.")
+    for item in plan.files:
+        warning = f" — {item.warning}" if item.warning else ""
+        print(f"  [{item.status}] {item.source_path}")
+        print(f"    {item.current_filename} → {item.landing_destination}{warning}")
+        if item.analysis:
+            summary = item.analysis.get("summary")
+            if summary:
+                print(f"    Summary: {summary}")
+            matches = item.analysis.get("profile_matches", [])
+            if matches:
+                print("    People/profile matches: " + ", ".join(match["display_name"] for match in matches))
+            animals = item.analysis.get("animals", [])
+            if animals:
+                print("    Animals: " + ", ".join(f"{a['count']} {a['animal_type']}" for a in animals))
+    print(f"Plan fingerprint: {plan.fingerprint}")
+    print(f"Analysis: {plan.analysis_message}")
+    for warning in plan.warnings:
+        print(f"Warning: {warning}")
+
+
+def _write_progress(progress_path: Path | None, record: dict[str, object]) -> None:
+    """Append one durable, line-delimited progress record for the macOS UI."""
+    if progress_path is None:
+        return
+    with progress_path.open("a", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+
+
 def cmd_organize(
     args: argparse.Namespace,
     prober: VolumeProber | None = None,
@@ -198,6 +248,7 @@ def cmd_organize(
 def _organize(args: argparse.Namespace, prober: VolumeProber, config: IngestConfig) -> int:
     requested = _requested_classes(args.target)
     allow_dev_root = bool(getattr(args, "allow_dev_storage_root", False))
+    json_output = bool(getattr(args, "json", False) and not args.apply)
 
     # Probe exactly once: gathering targets and resolving the T7 both need a
     # consistent view of what's mounted, not two independent diskutil calls
@@ -220,14 +271,24 @@ def _organize(args: argparse.Namespace, prober: VolumeProber, config: IngestConf
         print("Refusing to --apply: no destructive action taken.")
         return 1
 
-    print(f"T7: connected ({resolved_t7.root})" if resolved_t7 is not None else f"T7: not connected ({t7_error})")
+    if not json_output:
+        print(f"T7: connected ({resolved_t7.root})" if resolved_t7 is not None else f"T7: not connected ({t7_error})")
 
     repo_root = config.repo_root
     extra_excludes = (repo_root,) + ((resolved_t7.root,) if resolved_t7 is not None else ())
 
     scans: dict[tuple[str, str], ScanResult] = {}
     for target in targets:
-        scan = scan_source(target.root, config=config, extra_exclude_paths=extra_excludes)
+        scan = scan_source(
+            target.root,
+            config=config,
+            extra_exclude_paths=extra_excludes,
+            media_only=(
+                target.source_class == SOURCE_SD
+                and config.archive.enabled
+                and config.archive.media_only_sd
+            ),
+        )
         scans[target.key] = scan
 
     for source_class in MANUAL_STATIC_SOURCES:
@@ -235,32 +296,241 @@ def _organize(args: argparse.Namespace, prober: VolumeProber, config: IngestConf
             continue
         matching = [t for t in targets if t.source_class == source_class]
         scan = scans[matching[0].key]
-        print(f"{SOURCE_LABELS[source_class]}: {'missing' if scan.missing else f'{len(scan.eligible)} eligible'}")
+        if not json_output:
+            print(f"{SOURCE_LABELS[source_class]}: {'missing' if scan.missing else f'{len(scan.eligible)} eligible'}")
 
     sd_targets = [t for t in targets if t.source_class == SOURCE_SD]
     if SOURCE_SD in requested:
-        if not sd_targets:
-            print("SD: no registered/mounted card detected")
-        else:
-            total_sd_eligible = sum(len(scans[t.key].eligible) for t in sd_targets)
-            print(f"SD: {total_sd_eligible} eligible")
+        if not json_output:
+            if not sd_targets:
+                print("SD: no registered/mounted card detected")
+            else:
+                total_sd_eligible = sum(len(scans[t.key].eligible) for t in sd_targets)
+                print(f"SD: {total_sd_eligible} eligible")
 
     combined_counts: dict[str, int] = {}
     for scan in scans.values():
         for reason, count in scan.exclusion_counts.items():
             combined_counts[reason] = combined_counts.get(reason, 0) + count
-    _print_exclusions(combined_counts)
-    _print_git_repos(scans)
+    if not json_output:
+        _print_exclusions(combined_counts)
+        _print_git_repos(scans)
+        _print_media_review(scans)
 
     all_eligible = [(target, f) for target in targets for f in scans[target.key].eligible]
     total_bytes = sum(f.size for _, f in all_eligible)
-    print(f"\nPlanned: {len(all_eligible)} files / {total_bytes / 1e9:.1f} GB")
+    if not json_output:
+        print(f"\nPlanned: {len(all_eligible)} files / {total_bytes / 1e9:.1f} GB")
+
+    plan = build_preview_plan(
+        config,
+        targets,
+        scans,
+        resolved_t7=resolved_t7,
+        t7_warning=t7_error,
+    )
+
+    if getattr(args, "analyze", False):
+        analysis_paths = None
+        if getattr(args, "analysis_paths_file", None):
+            analysis_paths = {
+                line.strip()
+                for line in args.analysis_paths_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
+        results = {}
+        progress_path = getattr(args, "progress_file", None)
+        profiles = []
+        catalog_note = ""
+        preflight_catalog = Catalog(args.catalog) if args.catalog else None
+        if preflight_catalog is not None:
+            profiles = preflight_catalog.profile_context(scope=config.ai.profile_scope)
+        else:
+            catalog_note = " No catalog was supplied, so no human-maintained profile matches were available."
+
+        from tools.ingest.modeling import ModelError, ModelOrchestrator, PreflightAnalysis
+
+        orchestrator = ModelOrchestrator(config.ai, archive_profile_for(config))
+        selected_items = [
+            item for item in plan.files
+            if analysis_paths is None or item.source_path in analysis_paths
+        ]
+        working_plan = plan
+        total_selected = len(selected_items)
+        for completed, item in enumerate(selected_items, start=1):
+            _write_progress(
+                progress_path,
+                {
+                    "event": "analysis_started",
+                    "source_path": item.source_path,
+                    "completed": completed - 1,
+                    "total": total_selected,
+                    "file": item.as_dict(),
+                },
+            )
+            cached_result = (
+                preflight_catalog.get_preflight_result(
+                    source_volume_id=item.source_volume,
+                    relative_path=item.relative_path,
+                    source_size=item.size,
+                    source_mtime_ns=item.mtime_ns,
+                    model=config.ai.model,
+                    model_version=config.ai.prompt_version,
+                )
+                if preflight_catalog is not None
+                else None
+            )
+            cached_item = cached_result.get("result") if cached_result else None
+            cached_analysis = cached_item.get("analysis") if isinstance(cached_item, dict) else None
+            if cached_result and cached_result.get("status") == "succeeded" and isinstance(cached_analysis, dict):
+                results[item.source_path] = PreflightAnalysis(
+                    source_path=item.source_path,
+                    payload={
+                        "summary": cached_analysis.get("summary", ""),
+                        "tags": cached_analysis.get("tags", []),
+                        "people": cached_analysis.get("people", []),
+                        "animals": cached_analysis.get("animals", []),
+                        "filename_proposal": cached_analysis.get("filename_proposal", {}),
+                    },
+                    model=str(cached_result.get("model") or config.ai.model),
+                    prompt_sha=str(cached_result.get("prompt_sha") or ""),
+                )
+            else:
+                try:
+                    results[item.source_path] = orchestrator.analyze_source_image(
+                        Path(item.source_path),
+                        source_id=f"preflight:{item.source_volume}:{item.relative_path}",
+                        profiles=profiles,
+                    )
+                except ModelError as exc:
+                    results[item.source_path] = str(exc)
+            working_plan = attach_preflight_analysis(
+                working_plan,
+                {item.source_path: results[item.source_path]},
+                profiles=profiles,
+                config=config,
+            )
+            updated_item = next(
+                file for file in working_plan.files if file.source_path == item.source_path
+            )
+            if preflight_catalog is not None:
+                analysis_result = results[item.source_path]
+                succeeded = not isinstance(analysis_result, str)
+                preflight_catalog.record_preflight_result(
+                    source_volume_id=item.source_volume,
+                    source_path=item.source_path,
+                    relative_path=item.relative_path,
+                    source_size=item.size,
+                    source_mtime_ns=item.mtime_ns,
+                    model=(analysis_result.model if succeeded and analysis_result.model else config.ai.model),
+                    model_version=config.ai.prompt_version,
+                    prompt_sha=analysis_result.prompt_sha if succeeded else None,
+                    status="succeeded" if succeeded else "failed",
+                    result=updated_item.as_dict(),
+                    error_message=analysis_result if not succeeded else None,
+                )
+            _write_progress(
+                progress_path,
+                {
+                    "event": "analysis_progress",
+                    "source_path": item.source_path,
+                    "completed": completed,
+                    "total": total_selected,
+                    "file": updated_item.as_dict(),
+                },
+            )
+        if preflight_catalog is not None:
+            preflight_catalog.close()
+        plan = attach_preflight_analysis(plan, results, profiles=profiles, config=config)
+        if catalog_note:
+            plan = PreviewPlan(
+                fingerprint=plan.fingerprint,
+                files=plan.files,
+                total_bytes=plan.total_bytes,
+                warnings=plan.warnings + (catalog_note.strip(),),
+                destination_root=plan.destination_root,
+                catalog_path=plan.catalog_path,
+                reviewed_files=plan.reviewed_files,
+                analysis_status=plan.analysis_status,
+                analysis_message=plan.analysis_message + catalog_note,
+            )
+
+    if json_output:
+        print(plan.json(), end="")
+        return 0
+
+    _print_plan(plan)
 
     if not args.apply:
         print("\nDry run. No files changed.")
         return 0
 
     assert resolved_t7 is not None
+
+    expected_fingerprint = getattr(args, "plan_fingerprint", None)
+    if expected_fingerprint and expected_fingerprint != plan.fingerprint:
+        print(
+            "\nRefusing to apply: the source set changed since the reviewed preview "
+            "(fingerprint mismatch). Refresh preview before moving files."
+        )
+        print(f"  reviewed: {expected_fingerprint}")
+        print(f"  current:  {plan.fingerprint}")
+        return 2
+
+    approved_destinations: dict[str, str] | None = None
+    if getattr(args, "approved_plan", None):
+        try:
+            approved = json.loads(args.approved_plan.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Refusing to apply: approved plan could not be read: {exc}")
+            return 2
+        if approved.get("fingerprint") != plan.fingerprint:
+            print("Refusing to apply: approved plan fingerprint does not match the reviewed source set.")
+            return 2
+        approved_destinations = {}
+        current_by_path = {item.source_path: item for item in plan.files}
+        for raw in approved.get("files", []):
+            source_path = str(raw.get("source_path", ""))
+            current = current_by_path.get(source_path)
+            destination = str(raw.get("destination_relative_path", ""))
+            if current is None or not destination or Path(destination).is_absolute() or ".." in Path(destination).parts:
+                print(f"Refusing to apply: invalid approved destination for {source_path}")
+                return 2
+            approved_destinations[source_path] = destination
+
+    # Re-scan immediately before opening the catalog. This catches a card
+    # ejecting, a new file appearing, or a source changing between the first
+    # scan and the destructive phase, even when the caller did not provide a
+    # fingerprint from a separate reviewed preview.
+    refreshed_scans: dict[tuple[str, str], ScanResult] = {}
+    for target in targets:
+        refreshed_scans[target.key] = scan_source(
+            target.root,
+            config=config,
+            extra_exclude_paths=extra_excludes,
+            media_only=(
+                target.source_class == SOURCE_SD
+                and config.archive.enabled
+                and config.archive.media_only_sd
+            ),
+        )
+    refreshed_plan = build_preview_plan(
+        config,
+        targets,
+        refreshed_scans,
+        resolved_t7=resolved_t7,
+        t7_warning=None,
+    )
+    if refreshed_plan.fingerprint != plan.fingerprint:
+        print(
+            "\nRefusing to apply: the source set changed during preflight. "
+            "Refresh preview before moving files."
+        )
+        print(f"  initial:  {plan.fingerprint}")
+        print(f"  current:  {refreshed_plan.fingerprint}")
+        return 2
+    scans = refreshed_scans
+
     catalog_path = resolved_t7.catalog_path
     outcomes: list[TransferOutcome] = []
     total_removed_bytes = 0
@@ -281,11 +551,16 @@ def _organize(args: argparse.Namespace, prober: VolumeProber, config: IngestConf
         for target in targets:
             catalog.upsert_volume(target.volume_uuid, label=target.label, mount_point=str(target.root))
             for f in scans[target.key].eligible:
+                if approved_destinations is not None and str(f.path) not in approved_destinations:
+                    continue
                 planned = PlannedTransfer(
                     source_path=f.path,
                     rel_path=f.rel_path,
                     source_volume_id=target.volume_uuid,
                     source_class=target.source_class,
+                    destination_rel_path=(
+                        approved_destinations.get(str(f.path)) if approved_destinations is not None else None
+                    ),
                 )
                 # Read before the transfer: identity is (device, inode) and the
                 # source path stops existing once the transfer succeeds.
@@ -988,6 +1263,45 @@ def _add_mode_arguments(parser: argparse.ArgumentParser) -> None:
     mode.add_argument("--apply", action="store_true", help="Actually make the reported changes.")
 
 
+def _add_review_arguments(parser: argparse.ArgumentParser) -> None:
+    """Flags the macOS app uses to preview, analyze, and apply a reviewed plan."""
+    parser.add_argument("--json", action="store_true", help="Emit the dry-run review plan as JSON.")
+    parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Run read-only local image analysis for the selected source files before returning the plan.",
+    )
+    parser.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        help="Existing T7 catalog used for human-maintained profile context during --analyze.",
+    )
+    parser.add_argument(
+        "--analysis-paths-file",
+        type=Path,
+        default=None,
+        help="Newline-delimited source paths to analyze; omitted means every eligible file.",
+    )
+    parser.add_argument(
+        "--progress-file",
+        type=Path,
+        default=None,
+        help="Append per-file analysis progress as JSONL for a UI monitor.",
+    )
+    parser.add_argument(
+        "--approved-plan",
+        type=Path,
+        default=None,
+        help="JSON file containing the reviewed subset and destination paths to apply.",
+    )
+    parser.add_argument(
+        "--plan-fingerprint",
+        default=None,
+        help="Only apply if the current source plan has this reviewed fingerprint.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="organize",
@@ -1005,6 +1319,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(target, help=f"Ingest {SOURCE_LABELS.get(target, target)} into the T7.")
         sub.set_defaults(command="organize", target=target)
         _add_mode_arguments(sub)
+        _add_review_arguments(sub)
         _add_common_arguments(sub)
 
     triage = subparsers.add_parser(

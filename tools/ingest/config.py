@@ -8,14 +8,16 @@ only needs to override what differs on a given machine.
 from __future__ import annotations
 
 import copy
+import datetime as dt
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     import yaml
 except ImportError as exc:  # pragma: no cover - exercised by the CLI environment
-    raise SystemExit("PyYAML is required; run `uv pip install -r requirements-social-video.txt`") from exc
+    raise SystemExit("PyYAML is required; run `python3 -m pip install -r requirements-ingest.txt`") from exc
 
 
 DEFAULT_CONFIG_PATH = Path("config/ingest.yaml")
@@ -132,6 +134,8 @@ DEFAULTS: dict[str, Any] = {
             ".xcworkspace",
         ],
         "incomplete_download_suffixes": [".crdownload", ".download", ".part"],
+        "camera_metadata_suffixes": [".ctg", ".to4", ".thm", ".cpi"],
+        "camera_metadata_dir_names": ["canonmsc", "tof4folder"],
         "keep_local_marker": ".keep-local",
         "extra_paths": [],
     },
@@ -144,6 +148,29 @@ DEFAULTS: dict[str, Any] = {
             "preserve_icc_profile": True,
             "normalize_orientation": True,
         }
+    },
+    "ai": {
+        "enabled": True,
+        "provider": "ollama",
+        "base_url": "http://127.0.0.1:11434",
+        "model": "qwen3.5:4b",
+        "timeout_seconds": 180,
+        "temperature": 0.0,
+        "prompt_version": "media-analysis-v2",
+        "profile_scope": "global",
+        "video_sample_count": 4,
+    },
+    "archive": {
+        # Optional category routing for analyzed media. The categories, their
+        # filename prefixes, and verified folder IDs live in a local profile
+        # file (see tools/ingest/archive_profile.py) that is never committed.
+        "enabled": False,
+        "profile_path": None,
+        # With archive routing enabled, only stage photo/video files from SD
+        # cards; anything else is held for review on the card.
+        "media_only_sd": False,
+        # YYYY-MM-DD used in category-prefixed filenames for this session.
+        "service_date": None,
     },
     "evidence": {
         # Perception only: native text, OCR, a vision description, layout.
@@ -268,12 +295,45 @@ class MediaConfig:
 
 
 @dataclass(frozen=True)
+class AIConfig:
+    enabled: bool = True
+    provider: str = "ollama"
+    base_url: str = "http://127.0.0.1:11434"
+    model: str = "qwen3.5:4b"
+    timeout_seconds: int = 180
+    temperature: float = 0.0
+    prompt_version: str = "media-analysis-v2"
+    profile_scope: str = "global"
+    video_sample_count: int = 4
+
+
+@dataclass(frozen=True)
+class ArchiveConfig:
+    enabled: bool = False
+    profile_path: Path | None = None
+    media_only_sd: bool = False
+    service_date: str | None = None
+
+
+def _is_loopback_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
+@dataclass(frozen=True)
 class ExclusionsConfig:
     dir_names: frozenset[str]
     bundle_extensions: frozenset[str]
     incomplete_download_suffixes: frozenset[str]
     keep_local_marker: str
     extra_paths: tuple[Path, ...]
+    camera_metadata_suffixes: frozenset[str] = frozenset({".ctg", ".to4", ".thm", ".cpi"})
+    camera_metadata_dir_names: frozenset[str] = frozenset({"canonmsc", "tof4folder"})
 
 
 @dataclass(frozen=True)
@@ -493,6 +553,8 @@ class IngestConfig:
     downloads_watcher_min_settle_seconds: int
     exclusions: ExclusionsConfig
     media: MediaConfig
+    ai: AIConfig = field(default_factory=AIConfig)
+    archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     naming: NamingConfig = field(default_factory=NamingConfig)
     triage: TriageConfig = field(default_factory=TriageConfig)
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
@@ -767,6 +829,8 @@ def load_config(path: Path | None = None) -> IngestConfig:
         incomplete_download_suffixes=frozenset(s.lower() for s in excl_raw["incomplete_download_suffixes"]),
         keep_local_marker=excl_raw["keep_local_marker"],
         extra_paths=tuple(_expand(p) for p in excl_raw.get("extra_paths") or []),
+        camera_metadata_suffixes=frozenset(s.lower() for s in excl_raw.get("camera_metadata_suffixes") or []),
+        camera_metadata_dir_names=frozenset(s.lower() for s in excl_raw.get("camera_metadata_dir_names") or []),
     )
 
     heic_raw = merged["media"]["heic_to_jpeg"]
@@ -788,6 +852,47 @@ def load_config(path: Path | None = None) -> IngestConfig:
             normalize_orientation=bool(heic_raw["normalize_orientation"]),
         )
     )
+
+    ai_raw = merged["ai"]
+    ai = AIConfig(
+        enabled=bool(ai_raw.get("enabled", True)),
+        provider=str(ai_raw.get("provider", "ollama")),
+        base_url=str(ai_raw.get("base_url", "http://127.0.0.1:11434")).rstrip("/"),
+        model=str(ai_raw.get("model", "qwen3.5:4b")),
+        timeout_seconds=int(ai_raw.get("timeout_seconds", 180)),
+        temperature=float(ai_raw.get("temperature", 0.0)),
+        prompt_version=str(ai_raw.get("prompt_version", "media-analysis-v2")),
+        profile_scope=str(ai_raw.get("profile_scope", "global")).strip() or "global",
+        video_sample_count=int(ai_raw.get("video_sample_count", 4)),
+    )
+    if ai.timeout_seconds <= 0:
+        raise ValueError("ai.timeout_seconds must be positive")
+    if not 0 <= ai.temperature <= 2:
+        raise ValueError("ai.temperature must be between 0 and 2")
+    if not 1 <= ai.video_sample_count <= 8:
+        raise ValueError("ai.video_sample_count must be between 1 and 8")
+    if ai.provider not in {"ollama"}:
+        raise ValueError(f"unsupported ai.provider: {ai.provider}; currently supported: ollama")
+    if ai.enabled and not _is_loopback_url(ai.base_url):
+        raise ValueError(
+            "ai.base_url must target a loopback Ollama endpoint while local-only analysis is enabled; "
+            "remote/cloud model routing is not implemented"
+        )
+
+    archive_raw = merged["archive"]
+    archive = ArchiveConfig(
+        enabled=bool(archive_raw.get("enabled", False)),
+        profile_path=_expand(str(archive_raw["profile_path"])) if archive_raw.get("profile_path") else None,
+        media_only_sd=bool(archive_raw.get("media_only_sd", False)),
+        service_date=(str(archive_raw["service_date"]).strip() if archive_raw.get("service_date") else None),
+    )
+    if archive.enabled and archive.profile_path is None:
+        raise ValueError("archive.profile_path is required when archive routing is enabled")
+    if archive.service_date is not None:
+        try:
+            dt.date.fromisoformat(archive.service_date)
+        except ValueError as exc:
+            raise ValueError("archive.service_date must use YYYY-MM-DD") from exc
 
     backup_raw = merged["backup"]
     retention_raw = backup_raw["retention"]
@@ -820,6 +925,8 @@ def load_config(path: Path | None = None) -> IngestConfig:
         downloads_watcher_min_settle_seconds=int(merged["downloads_watcher_min_settle_seconds"]),
         exclusions=exclusions,
         media=media,
+        ai=ai,
+        archive=archive,
         naming=naming,
         triage=triage,
         evidence=evidence,

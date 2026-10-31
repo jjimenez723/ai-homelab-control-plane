@@ -251,6 +251,17 @@ exclusions:
     - .download
     - .part
 
+  # Camera catalog/sidecar files remain on the source card and are never
+  # analyzed or moved with the user media.
+  camera_metadata_suffixes:
+    - .ctg
+    - .to4
+    - .thm
+    - .cpi
+  camera_metadata_dir_names:
+    - CANONMSC
+    - TOF4FOLDER
+
   # A file or directory literally named this, present in a directory, excludes
   # that directory (and everything under it) from ingestion.
   keep_local_marker: ".keep-local"
@@ -367,6 +378,34 @@ media:
     preserve_metadata: true
     preserve_icc_profile: true
     normalize_orientation: true
+
+# Local model layer. The model only proposes metadata, people/profile matches,
+# and filenames for already-verified T7 assets. It never moves or deletes files.
+# Ollama exposes the native chat endpoint used by `scripts/analyze-media`.
+ai:
+  enabled: true
+  provider: "ollama"
+  base_url: "http://127.0.0.1:11434"
+  # Install/pull the model separately; this repository does not download weights.
+  model: "qwen3.5:4b"
+  timeout_seconds: 180
+  temperature: 0.0
+  prompt_version: "media-analysis-v2"
+  # Keep identity evidence isolated unless you intentionally choose a shared scope.
+  profile_scope: "global"
+  # Evenly-spaced representative frames used to analyze video files.
+  video_sample_count: 4
+
+# Optional archive routing. Analysis proposes a category; the deterministic
+# resolver maps it onto the categories, filename prefixes, and verified folder
+# IDs in a local profile file (copy config/archive-profile.example.yaml to
+# config/archive-profile.yaml, which git ignores). It never enables a watcher
+# or scheduler.
+archive:
+  enabled: false
+  profile_path: null           # e.g. config/archive-profile.yaml
+  media_only_sd: false         # stage only photo/video from SD cards
+  service_date: null           # YYYY-MM-DD for category-prefixed filenames
 
 # Immediate off-site backup (D-018). The source UUID is deliberately inherited
 # from t7.volume_uuid above so this file has one machine-specific identity.
